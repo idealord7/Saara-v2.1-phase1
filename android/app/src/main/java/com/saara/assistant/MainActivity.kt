@@ -1,0 +1,626 @@
+package com.saara.assistant
+import android.Manifest
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.graphics.Color
+import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
+import android.media.projection.MediaProjectionManager
+import android.net.Uri
+import android.os.Bundle
+import android.provider.Settings
+import android.text.InputType
+import android.view.Gravity
+import android.view.View
+import android.view.inputmethod.EditorInfo
+import android.widget.*
+import androidx.appcompat.app.AlertDialog
+import androidx.appcompat.app.AppCompatActivity
+import androidx.core.app.NotificationManagerCompat
+import androidx.core.content.ContextCompat
+import androidx.core.widget.doAfterTextChanged
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import org.json.JSONObject
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+
+class MainActivity : AppCompatActivity() {
+  companion object { @Volatile var visible = false }
+
+  private val BG = 0xFF131314.toInt(); private val SURF = 0xFF1E1F20.toInt(); private val SURF2 = 0xFF2A2C2E.toInt()
+  private val TXT = 0xFFE3E3E3.toInt(); private val SUB = 0xFF9AA0A6.toInt(); private val ACC = 0xFF4FA3F7.toInt(); private val ACC2 = 0xFF1A73E8.toInt()
+  private val GOOD = 0xFF81C995.toInt(); private val WARN = 0xFFFDD663.toInt(); private val BAD = 0xFFF28B82.toInt()
+
+  private val updaters = ArrayList<() -> Unit>()
+  private val pages = ArrayList<View>()
+  private val navItems = ArrayList<Pair<TextView, TextView>>()
+  private var curTab = 0
+  private lateinit var statusTv: TextView
+  private lateinit var startBtn: TextView
+  private lateinit var chatList: LinearLayout
+  private lateinit var chatScroll: ScrollView
+  private lateinit var emptyView: View
+  private lateinit var muteChip: TextView
+  private lateinit var camChip: TextView
+  private lateinit var flipChip: TextView
+  private lateinit var screenChip: TextView
+  private lateinit var learnBox: LinearLayout
+  private lateinit var shopBox: LinearLayout
+  private lateinit var taskBox: LinearLayout
+  private val shown = HashMap<Long, TextView>()
+  private var lastId = 0L
+  private var firstId = Long.MAX_VALUE
+  private var noMore = false
+  private var loadingOlder = false
+  private var pendingStart = false
+  private var pendingCam = false
+  private var camFront = false
+  private val fetchedModels = ArrayList<String>()
+  private val busListener: () -> Unit = { refresh() }
+
+  // ---------- small UI helpers ----------
+  private fun dp(x: Int) = (x * resources.displayMetrics.density).toInt()
+  private fun has(p: String) = ContextCompat.checkSelfPermission(this, p) == PackageManager.PERMISSION_GRANTED
+  private fun toast(s: String) = Toast.makeText(this, s, Toast.LENGTH_LONG).show()
+  private fun bg(color: Int, r: Int = 16) = GradientDrawable().apply { setColor(color); cornerRadius = dp(r).toFloat() }
+  private fun tv(t: String, size: Float = 14f, color: Int = TXT, bold: Boolean = false): TextView {
+    val v = TextView(this); v.text = t; v.textSize = size; v.setTextColor(color)
+    if (bold) v.setTypeface(v.typeface, Typeface.BOLD)
+    return v
+  }
+  private fun btn(label: String, color: Int = ACC2, f: () -> Unit): Button {
+    val b = Button(this); b.text = label; b.isAllCaps = false; b.setTextColor(Color.WHITE); b.background = bg(color, 22)
+    b.setOnClickListener { f() }
+    return b
+  }
+  private fun chip(label: String, f: () -> Unit): TextView {
+    val t = tv(label, 13f); t.setPadding(dp(14), dp(8), dp(14), dp(8)); t.background = bg(SURF2, 18); t.gravity = Gravity.CENTER
+    t.setOnClickListener { f() }
+    return t
+  }
+  private fun card(parent: LinearLayout): LinearLayout {
+    val c = LinearLayout(this)
+    c.orientation = LinearLayout.VERTICAL; c.background = bg(SURF, 20); c.setPadding(dp(16), dp(14), dp(16), dp(14))
+    val lp = LinearLayout.LayoutParams(-1, -2); lp.topMargin = dp(12)
+    parent.addView(c, lp)
+    return c
+  }
+  private fun edit(hint: String, pw: Boolean = false): EditText {
+    val e = EditText(this); e.hint = hint; e.setTextColor(TXT); e.setHintTextColor(0xFF6F7580.toInt()); e.textSize = 14f
+    if (pw) e.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+    return e
+  }
+  private fun gap(parent: LinearLayout, h: Int = 8) { parent.addView(View(this), LinearLayout.LayoutParams(1, dp(h))) }
+  private fun page(): Pair<ScrollView, LinearLayout> {
+    val sv = ScrollView(this); sv.setBackgroundColor(BG)
+    val root = LinearLayout(this); root.orientation = LinearLayout.VERTICAL; root.setPadding(dp(16), dp(8), dp(16), dp(24))
+    sv.addView(root); return sv to root
+  }
+  private fun heading(parent: LinearLayout, t: String, sub: String = "") {
+    val h = tv(t, 22f, bold = true); h.setPadding(0, dp(10), 0, 0); parent.addView(h)
+    if (sub.isNotEmpty()) parent.addView(tv(sub, 13f, SUB))
+  }
+  private fun hhmm(ms: Long) = SimpleDateFormat("EEE d MMM, HH:mm", Locale.getDefault()).format(Date(ms))
+  private fun money(v: Double) = "₹" + (if (v == Math.floor(v)) v.toLong().toString() else "%.2f".format(v))
+
+  private fun a11yOn(): Boolean {
+    val s = Settings.Secure.getString(contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES) ?: return false
+    return s.contains(packageName)
+  }
+  private fun notifOn() = NotificationManagerCompat.getEnabledListenerPackages(this).contains(packageName)
+  private fun svc(a: String) = Intent(this, VoiceService::class.java).setAction(a)
+
+  // ---------- screen skeleton ----------
+  override fun onCreate(b: Bundle?) {
+    super.onCreate(b)
+    Bus.init(this); migrateFacts(this)
+    window.statusBarColor = BG; window.navigationBarColor = SURF
+    val root = LinearLayout(this); root.orientation = LinearLayout.VERTICAL; root.setBackgroundColor(BG)
+    setContentView(root)
+
+    // top bar: logo, name + status, start/stop
+    val top = LinearLayout(this); top.gravity = Gravity.CENTER_VERTICAL; top.setPadding(dp(16), dp(34), dp(16), dp(8))
+    val logo = ImageView(this); logo.setImageResource(R.drawable.logo_symbol); logo.scaleType = ImageView.ScaleType.CENTER_CROP
+    logo.background = bg(0xFFF8FAF9.toInt(), 20); logo.clipToOutline = true
+    top.addView(logo, LinearLayout.LayoutParams(dp(40), dp(40)))
+    val names = LinearLayout(this); names.orientation = LinearLayout.VERTICAL; names.setPadding(dp(12), 0, 0, 0)
+    names.addView(tv("Saara", 20f, bold = true)); statusTv = tv("Stopped", 12f, SUB); names.addView(statusTv)
+    top.addView(names, LinearLayout.LayoutParams(0, -2, 1f))
+    startBtn = tv("Start", 14f, Color.WHITE, true); startBtn.setPadding(dp(18), dp(9), dp(18), dp(9)); startBtn.setOnClickListener { toggle() }
+    top.addView(startBtn)
+    root.addView(top)
+
+    val frame = FrameLayout(this)
+    root.addView(frame, LinearLayout.LayoutParams(-1, 0, 1f))
+    pages.add(buildChat()); pages.add(buildFeatures()); pages.add(buildLearning()); pages.add(buildAutomation()); pages.add(buildShop()); pages.add(buildSettings())
+    pages.forEach { frame.addView(it, FrameLayout.LayoutParams(-1, -1)) }
+
+    // bottom navigation
+    val nav = LinearLayout(this); nav.setBackgroundColor(SURF); nav.setPadding(0, dp(6), 0, dp(6))
+    val items = listOf("💬" to "Chat", "🧩" to "Features", "🧠" to "Learning", "⏰" to "Tasks", "📚" to "Knowledge", "⚙️" to "Settings")
+    items.forEachIndexed { i, (e, l) ->
+      val col = LinearLayout(this); col.orientation = LinearLayout.VERTICAL; col.gravity = Gravity.CENTER
+      val ic = tv(e, 20f); ic.gravity = Gravity.CENTER; val lb = tv(l, 11f, SUB); lb.gravity = Gravity.CENTER
+      col.addView(ic); col.addView(lb); navItems.add(ic to lb)
+      col.setOnClickListener { select(i) }
+      nav.addView(col, LinearLayout.LayoutParams(0, -2, 1f))
+    }
+    root.addView(nav)
+    select(0)
+  }
+
+  private fun select(i: Int) {
+    curTab = i
+    pages.forEachIndexed { k, p -> p.visibility = if (k == i) View.VISIBLE else View.GONE }
+    navItems.forEachIndexed { k, (ic, lb) -> lb.setTextColor(if (k == i) ACC else SUB); ic.alpha = if (k == i) 1f else 0.6f }
+    when (i) { 1 -> refresh(); 2 -> rebuildLearning(); 3 -> rebuildTasks(); 4 -> rebuildShop() }
+  }
+
+  // ---------- CHAT ----------
+  private fun buildChat(): View {
+    val box = LinearLayout(this); box.orientation = LinearLayout.VERTICAL; box.setBackgroundColor(BG)
+    val fr = FrameLayout(this)
+    chatScroll = ScrollView(this)
+    chatList = LinearLayout(this); chatList.orientation = LinearLayout.VERTICAL; chatList.setPadding(dp(14), dp(8), dp(14), dp(12))
+    chatScroll.addView(chatList)
+    chatScroll.setOnScrollChangeListener { _, _, y, _, _ -> if (y == 0 && !noMore && !loadingOlder && shown.isNotEmpty()) loadOlder() }
+    fr.addView(chatScroll, FrameLayout.LayoutParams(-1, -1))
+    val e = LinearLayout(this); e.orientation = LinearLayout.VERTICAL; e.gravity = Gravity.CENTER; emptyView = e
+    val big = ImageView(this); big.setImageResource(R.drawable.logo_full); big.alpha = 0.95f
+    e.addView(big, LinearLayout.LayoutParams(dp(200), dp(200)))
+    val hi = tv("Hi, I'm Saara", 22f, bold = true); hi.gravity = Gravity.CENTER; e.addView(hi)
+    val sub = tv("Tap Start, then talk in Bengali, Hindi or English.\nYour old chats stay here — scroll up to see them.", 13f, SUB); sub.gravity = Gravity.CENTER; sub.setPadding(dp(24), dp(6), dp(24), 0); e.addView(sub)
+    fr.addView(e, FrameLayout.LayoutParams(-1, -1))
+    box.addView(fr, LinearLayout.LayoutParams(-1, 0, 1f))
+
+    // share / mic chips
+    val chips = LinearLayout(this); chips.setPadding(dp(12), dp(4), dp(12), dp(4))
+    muteChip = chip("🎤 Mic") { VoiceService.instance?.let { it.muted = !it.muted; refresh() } ?: toast("Start Saara first") }
+    camChip = chip("📷 Camera") { toggleCam() }
+    flipChip = chip("🔄") { camFront = !camFront; startService(svc("CAM_START").putExtra("front", camFront)) }
+    screenChip = chip("🖥 Screen") { toggleScreen() }
+    for (c in listOf(muteChip, camChip, flipChip, screenChip)) { val lp = LinearLayout.LayoutParams(-2, -2); lp.rightMargin = dp(8); chips.addView(c, lp) }
+    val hs = HorizontalScrollView(this); hs.isHorizontalScrollBarEnabled = false; hs.addView(chips)
+    box.addView(hs)
+
+    // input pill
+    val ir = LinearLayout(this); ir.gravity = Gravity.CENTER_VERTICAL; ir.setPadding(dp(12), dp(4), dp(12), dp(10))
+    val input = edit("Message Saara…"); input.maxLines = 4; input.background = bg(SURF2, 26); input.setPadding(dp(18), dp(10), dp(18), dp(10))
+    input.imeOptions = EditorInfo.IME_ACTION_SEND; input.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE or InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
+    val send = tv("➤", 20f, Color.WHITE, true); send.gravity = Gravity.CENTER; send.background = bg(ACC2, 24)
+    val doSend = {
+      val t = input.text.toString().trim()
+      if (t.isNotEmpty()) {
+        val s = VoiceService.instance
+        if (s == null) toast("Tap Start first") else { s.sendText(t); input.text.clear() }
+      }
+    }
+    send.setOnClickListener { doSend() }
+    input.setOnEditorActionListener { _, a, _ -> if (a == EditorInfo.IME_ACTION_SEND) { doSend(); true } else false }
+    ir.addView(input, LinearLayout.LayoutParams(0, -2, 1f))
+    val slp = LinearLayout.LayoutParams(dp(48), dp(48)); slp.leftMargin = dp(8); ir.addView(send, slp)
+    box.addView(ir)
+    return box
+  }
+
+  private fun fmt(m: Msg): String = when (m.role) { "tool" -> "⚙ " + m.text.take(180); else -> m.text }
+
+  private fun msgRow(m: Msg): Pair<View, TextView> {
+    val stamp = SimpleDateFormat("dd MMM yyyy, hh:mm a", Locale.getDefault()).format(Date(m.ts))
+    val t = tv(fmt(m) + "\n\n" + stamp, 15f)
+    val maxW = (resources.displayMetrics.widthPixels * 0.80).toInt()
+    when (m.role) {
+      "you" -> {
+        t.background = bg(SURF2, 20); t.setPadding(dp(14), dp(10), dp(14), dp(10)); t.maxWidth = maxW
+        val row = LinearLayout(this); row.gravity = Gravity.END; row.addView(t); return row to t
+      }
+      "saara" -> {
+        val row = LinearLayout(this); row.gravity = Gravity.TOP
+        val av = ImageView(this); av.setImageResource(R.drawable.logo_symbol); av.background = bg(0xFFF8FAF9.toInt(), 12); av.clipToOutline = true
+        row.addView(av, LinearLayout.LayoutParams(dp(24), dp(24)))
+        t.setPadding(dp(10), 0, 0, 0); t.textSize = 16f; t.maxWidth = maxW + dp(20)
+        row.addView(t); return row to t
+      }
+      "tool" -> {
+        t.textSize = 12f; t.setTextColor(SUB); t.background = bg(SURF, 12); t.setPadding(dp(10), dp(5), dp(10), dp(5))
+        val row = LinearLayout(this); row.addView(t); return row to t
+      }
+      else -> {
+        t.textSize = 12f; t.setTextColor(SUB); t.gravity = Gravity.CENTER
+        val row = LinearLayout(this); row.gravity = Gravity.CENTER; row.addView(t); return row to t
+      }
+    }
+  }
+  private fun rowLp(): LinearLayout.LayoutParams { val lp = LinearLayout.LayoutParams(-1, -2); lp.topMargin = dp(10); return lp }
+
+  private fun loadOlder() {
+    loadingOlder = true
+    val older = Bus.older(firstId, 40)
+    if (older.isEmpty()) { noMore = true; loadingOlder = false; return }
+    val oldH = chatList.height
+    for (m in older.reversed()) {
+      val (row, t) = msgRow(m); chatList.addView(row, 0, rowLp()); shown[m.id] = t
+      if (m.id < firstId) firstId = m.id
+    }
+    chatScroll.post { chatScroll.post { chatScroll.scrollTo(0, maxOf(0, chatList.height - oldH)); loadingOlder = false } }
+  }
+
+  private fun toggleCam() {
+    if (!Prefs.on(this, "f_share", true)) { toast("Camera & screen sharing is switched off in Features."); return }
+    if (!Bus.running) { toast("Tap Start first, then share the camera."); return }
+    if (Bus.camOn) { startService(svc("CAM_STOP")); return }
+    if (!has(Manifest.permission.CAMERA)) { pendingCam = true; requestPermissions(arrayOf(Manifest.permission.CAMERA), 3); return }
+    startService(svc("CAM_START").putExtra("front", camFront))
+  }
+  @Suppress("DEPRECATION")
+  private fun toggleScreen() {
+    if (!Prefs.on(this, "f_share", true)) { toast("Camera & screen sharing is switched off in Features."); return }
+    if (!Bus.running) { toast("Tap Start first, then share the screen."); return }
+    if (Bus.screenOn) { startService(svc("SCREEN_STOP")); return }
+    val mpm = getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+    startActivityForResult(mpm.createScreenCaptureIntent(), 10)
+  }
+  @Suppress("DEPRECATION")
+  override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+    super.onActivityResult(requestCode, resultCode, data)
+    if (requestCode == 10) {
+      if (resultCode == RESULT_OK && data != null) startService(svc("SCREEN_START").putExtra("code", resultCode).putExtra("data", data))
+      else toast("Screen sharing was cancelled.")
+    }
+  }
+
+  // ---------- FEATURES ----------
+  private fun feature(parent: LinearLayout, title: String, desc: String, key: String, def: Boolean, ok: () -> Boolean,
+                      grantLabel: String, grant: () -> Unit, extra: ((LinearLayout) -> Unit)? = null) {
+    val c = card(parent)
+    val top = LinearLayout(this); top.gravity = Gravity.CENTER_VERTICAL
+    val titles = LinearLayout(this); titles.orientation = LinearLayout.VERTICAL
+    titles.addView(tv(title, 16f, bold = true)); titles.addView(tv(desc, 12f, SUB))
+    val sw = Switch(this)
+    sw.isChecked = Prefs.on(this, key, def)
+    sw.setOnCheckedChangeListener { _, v ->
+      Prefs.plain(this).edit().putBoolean(key, v).apply()
+      if (key == "f_bubble" || key == "f_overlay") VoiceService.instance?.refreshBubble()
+    }
+    top.addView(titles, LinearLayout.LayoutParams(0, -2, 1f)); top.addView(sw)
+    c.addView(top)
+    val st = tv("", 12f)
+    c.addView(st)
+    val g = btn(grantLabel, SURF2) { grant() }
+    val glp = LinearLayout.LayoutParams(-1, -2); glp.topMargin = dp(8)
+    if (grantLabel.isNotEmpty()) c.addView(g, glp)
+    extra?.invoke(c)
+    updaters.add {
+      val good = ok()
+      st.text = if (good) (if (grantLabel.isEmpty()) "✓ Ready" else "✓ Permission granted") else "⚠ Permission needed"
+      st.setTextColor(if (good) GOOD else WARN)
+      g.visibility = if (good) View.GONE else View.VISIBLE
+    }
+  }
+
+  private fun buildFeatures(): View {
+    val (sv, root) = page()
+    heading(root, "Features", "Switch things on or off. Grant buttons appear when Android needs permission.")
+    feature(root, "Device controls", "Torch, volume, open apps, camera photo, Wi-Fi / Bluetooth panels", "f_device", true, { true }, "", {})
+    feature(root, "Phone: calls & SMS", "Call, answer / end calls and send texts by voice", "f_phone", true,
+      { has(Manifest.permission.CALL_PHONE) && has(Manifest.permission.SEND_SMS) && has(Manifest.permission.READ_CONTACTS) && has(Manifest.permission.ANSWER_PHONE_CALLS) },
+      "Grant phone, SMS, contacts & answer calls", { requestPermissions(arrayOf(Manifest.permission.CALL_PHONE, Manifest.permission.SEND_SMS, Manifest.permission.READ_CONTACTS, Manifest.permission.ANSWER_PHONE_CALLS), 2) })
+    feature(root, "Screen automation", "Read the screen, tap, type, scroll in any app", "f_ui", true, { a11yOn() },
+      "Enable in Accessibility settings", {
+        toast("Turn on Saara. If Android says 'Restricted setting': App info → ⋮ → Allow restricted settings.")
+        startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+      })
+    feature(root, "Camera & screen sharing", "Share your live camera or screen with Saara from the Chat tab", "f_share", true,
+      { has(Manifest.permission.CAMERA) }, "Allow camera", { requestPermissions(arrayOf(Manifest.permission.CAMERA), 3) })
+    feature(root, "Live caption overlay", "Transparent text over other apps showing what Saara hears, says and does", "f_overlay", true,
+      { Settings.canDrawOverlays(this) }, "Allow display over other apps",
+      { startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName"))) })
+    feature(root, "Notification auto-reply", "Auto-reply to WhatsApp / WhatsApp Business / Telegram messages. Saara must be started.", "f_notif", false, { notifOn() },
+      "Enable Notification access", { startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)) }) { c ->
+      val e = edit("Only these names (comma separated). Leave empty = reply to everyone")
+      e.setText(Prefs.plain(this).getString("reply_names", ""))
+      e.doAfterTextChanged { Prefs.plain(this).edit().putString("reply_names", it.toString()).apply() }
+      c.addView(e)
+    }
+    feature(root, "Floating bubble", "Button over every app. Also lets Saara open apps from the background", "f_bubble", false,
+      { Settings.canDrawOverlays(this) }, "Allow display over other apps",
+      { startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName"))) })
+    return sv
+  }
+
+  private fun buildAutomation(): View {
+    val (sv, root) = page()
+    heading(root, "Tasks & Automation", "Time-based reminders are supported. Advanced event triggers are not yet implemented.")
+    taskBox = card(root)
+    return sv
+  }
+
+  private fun rebuildTasks() {
+    taskBox.removeAllViews()
+    val ts = Db.get(this).tasks()
+    if (ts.isEmpty()) { taskBox.addView(tv("No scheduled tasks yet.", 13f, SUB)); return }
+    for (t in ts) {
+      val r = LinearLayout(this); r.gravity = Gravity.CENTER_VERTICAL
+      val col = LinearLayout(this); col.orientation = LinearLayout.VERTICAL
+      col.addView(tv(t.text, 14f)); col.addView(tv(hhmm(t.whenMs) + if (t.repeatMs > 0) "  •  repeats" else "", 12f, SUB))
+      r.addView(col, LinearLayout.LayoutParams(0, -2, 1f))
+      val x = tv("✕", 18f, BAD); x.setPadding(dp(12), dp(6), dp(4), dp(6)); x.setOnClickListener { Scheduler.cancel(this, t.id); rebuildTasks() }
+      r.addView(x); taskBox.addView(r); gap(taskBox, 6)
+    }
+  }
+
+  // ---------- LEARNING ----------
+  private fun buildLearning(): View {
+    val (sv, root) = page()
+    heading(root, "What Saara learned", "Preferences, habits and corrections she keeps in memory to serve you better.")
+    learnBox = LinearLayout(this); learnBox.orientation = LinearLayout.VERTICAL
+    root.addView(learnBox)
+    return sv
+  }
+
+  private fun hour12(h: Int) = (if (h % 12 == 0) 12 else h % 12).toString() + (if (h < 12) " AM" else " PM")
+
+  private fun rebuildLearning() {
+    learnBox.removeAllViews()
+    val db = Db.get(this)
+    val facts = db.facts(); val apps = db.topUsage("app", 5); val acts = db.topUsage("action", 6); val hours = db.usageHours()
+    val sum = card(learnBox)
+    sum.addView(tv("Summary", 16f, bold = true))
+    val sb = StringBuilder()
+    if (facts.isEmpty() && apps.isEmpty() && acts.isEmpty()) sb.append("Nothing learned yet. Just talk to Saara — she notes your preferences, habits and corrections on her own.")
+    else {
+      sb.append("I remember ${facts.size} thing(s) about you")
+      val cats = facts.groupBy { it.cat }.map { "${it.key} ${it.value.size}" }
+      if (cats.isNotEmpty()) sb.append(" (").append(cats.joinToString(", ")).append(")")
+      sb.append(".")
+      if (apps.isNotEmpty()) sb.append("\nApps you ask for most: ").append(apps.joinToString(", ") { "${it.first} ×${it.second}" })
+      if (acts.isNotEmpty()) sb.append("\nFrequent actions: ").append(acts.joinToString(", ") { "${it.first.replace('_', ' ')} ×${it.second}" })
+      val peak = hours.indices.maxByOrNull { hours[it] } ?: 0
+      if (hours[peak] > 0) sb.append("\nYou talk to me most around ").append(hour12(peak)).append(".")
+    }
+    val st = tv(sb.toString(), 14f); st.setPadding(0, dp(6), 0, 0); sum.addView(st)
+    val ask = btn("🗣  Ask Saara to explain") {
+      val s = VoiceService.instance
+      if (s == null) toast("Tap Start first") else { s.sendText("In 3 or 4 short sentences, tell me what you have learned about me so far and how you will use it to help me better."); select(0) }
+    }
+    val alp = LinearLayout.LayoutParams(-1, -2); alp.topMargin = dp(10); sum.addView(ask, alp)
+
+    val categoryCard = card(learnBox)
+    categoryCard.addView(tv("Manage categories", 16f, bold = true))
+    val newCat = edit("New category name")
+    categoryCard.addView(newCat)
+    categoryCard.addView(btn("Add category") { db.categoryAdd(newCat.text.toString()); rebuildLearning() })
+    val renameCat = edit("Existing category to rename")
+    val renamed = edit("New category name")
+    categoryCard.addView(renameCat); categoryCard.addView(renamed)
+    categoryCard.addView(btn("Rename category") { db.categoryRename(renameCat.text.toString(), renamed.text.toString()); rebuildLearning() })
+
+    val teach = card(learnBox)
+    teach.addView(tv("Teach Saara", 16f, bold = true))
+    val ti = edit("e.g. I prefer replies in Bengali after 9 PM"); teach.addView(ti)
+    val tb = btn("Add to memory") {
+      val t = ti.text.toString().trim()
+      if (t.isNotEmpty()) { db.factAdd("preference", t); rebuildLearning() }
+    }
+    val tlp = LinearLayout.LayoutParams(-1, -2); tlp.topMargin = dp(6); teach.addView(tb, tlp)
+
+    if (facts.isNotEmpty()) {
+      for ((cat, list) in facts.groupBy { it.cat }) {
+        val c = card(learnBox)
+        c.addView(tv(cat.replaceFirstChar { it.uppercase() } + "  (${list.size})", 15f, ACC, true))
+        for (f in list) {
+          val r = LinearLayout(this); r.gravity = Gravity.CENTER_VERTICAL; r.setPadding(0, dp(6), 0, 0)
+          val content = LinearLayout(this); content.orientation = LinearLayout.VERTICAL
+          content.addView(tv(f.text, 14f))
+          val actions = LinearLayout(this); actions.gravity = Gravity.CENTER_VERTICAL
+          val move = Spinner(this); move.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, db.categories())
+          val selected = db.categories().indexOf(f.cat).coerceAtLeast(0); move.setSelection(selected)
+          actions.addView(move, LinearLayout.LayoutParams(0, dp(42), 1f))
+          actions.addView(btn("Move / Edit") {
+            val input = edit("Edit preference", false); input.setText(f.text)
+            AlertDialog.Builder(this).setTitle("Edit preference").setView(input)
+              .setPositiveButton("Save") { _, _ -> db.factUpdate(f.id, move.selectedItem?.toString() ?: f.cat, input.text.toString()); rebuildLearning() }
+              .setNegativeButton("Cancel", null).show()
+          })
+          content.addView(actions); r.addView(content, LinearLayout.LayoutParams(0, -2, 1f))
+          val x = tv("✕", 16f, SUB); x.setPadding(dp(12), dp(4), dp(2), dp(4))
+          x.setOnClickListener {
+            AlertDialog.Builder(this).setMessage("Make Saara forget this?\n\n" + f.text).setPositiveButton("Forget") { _, _ -> db.factDelete(f.id); rebuildLearning() }.setNegativeButton("Cancel", null).show()
+          }
+          r.addView(x); c.addView(r)
+        }
+      }
+    }
+  }
+
+  // ---------- SHOP ----------
+  private fun buildShop(): View {
+    val (sv, root) = page()
+    heading(root, "Knowledge & Google Sheets", "Local knowledge is available in Learning. Google Sheets connection is a planned feature and is not active in this build.")
+    shopBox = LinearLayout(this); shopBox.orientation = LinearLayout.VERTICAL
+    root.addView(shopBox)
+    return sv
+  }
+
+  private fun rebuildShop() {
+    shopBox.removeAllViews()
+    val db = Db.get(this)
+    val manual = card(shopBox)
+    manual.addView(tv("Add knowledge", 16f, bold = true))
+    val categories = db.categories()
+    val cat = Spinner(this)
+    cat.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, categories)
+    manual.addView(cat)
+    val fact = edit("Enter product price, business detail or preference")
+    manual.addView(fact)
+    manual.addView(btn("Save knowledge") {
+      val value = fact.text.toString().trim()
+      if (value.isBlank()) toast("Enter some information first")
+      else { db.factAdd(cat.selectedItem?.toString() ?: "general", value); toast("Saved in Learning"); rebuildShop() }
+    })
+    val sheets = card(shopBox)
+    sheets.addView(tv("Google Sheets connection", 16f, bold = true))
+    sheets.addView(tv("This version can store a sheet link, but does not yet authenticate with Google or read sheet rows. Do not rely on it for live product prices.", 13f, SUB))
+    val url = edit("Google Sheets URL")
+    url.setText(Prefs.plain(this).getString("knowledge_sheet_url", ""))
+    sheets.addView(url)
+    sheets.addView(btn("Save sheet link") { Prefs.plain(this).edit().putString("knowledge_sheet_url", url.text.toString().trim()).apply(); toast("Sheet link saved; data sync is not active yet") })
+    val facts = db.facts()
+    heading(shopBox, "Saved knowledge (${facts.size})")
+    for (f in facts.take(100)) {
+      val c = card(shopBox)
+      c.addView(tv(f.cat.uppercase(), 11f, ACC, true))
+      c.addView(tv(f.text, 14f))
+      c.addView(tv(hhmm(f.ts), 11f, SUB))
+    }
+  }
+
+  // ---------- SETTINGS ----------
+  private val VOICES = listOf("Aoede", "Kore", "Leda", "Zephyr", "Callirrhoe", "Autonoe", "Despina", "Puck", "Charon", "Fenrir", "Orus")
+  private val MODELS = listOf("gemini-3.1-flash-live-preview", "gemini-2.5-flash-native-audio-preview-12-2025", "gemini-live-2.5-flash-preview")
+
+  private fun buildSettings(): View {
+    val (sv, root) = page()
+    heading(root, "Settings")
+
+    // language priority
+    val cl = card(root)
+    cl.addView(tv("Language priority", 16f, bold = true))
+    cl.addView(tv("First-priority languages: Bengali, Hindi, English. Pick how Saara should speak by default.", 12f, SUB))
+    val opts = listOf("auto" to "Auto", "bn" to "বাংলা", "hi" to "हिन्दी", "en" to "English", "hinglish" to "Hinglish")
+    val chips = HashMap<String, TextView>()
+    val paint = {
+      val cur = Prefs.plain(this).getString("lang", "auto")
+      for ((k, v) in chips) { v.background = bg(if (k == cur) ACC2 else SURF2, 18); v.setTextColor(if (k == cur) Color.WHITE else TXT) }
+    }
+    val row = LinearLayout(this); row.setPadding(0, dp(10), 0, 0)
+    for ((k, l) in opts) {
+      val ch = chip(l) { Prefs.plain(this).edit().putString("lang", k).apply(); paint(); toast("Saved. Stop and Start Saara to apply.") }
+      chips[k] = ch; val lp = LinearLayout.LayoutParams(-2, -2); lp.rightMargin = dp(6); row.addView(ch, lp)
+    }
+    val hs = HorizontalScrollView(this); hs.isHorizontalScrollBarEnabled = false; hs.addView(row); cl.addView(hs); paint()
+
+    // gemini
+    val c3 = card(root)
+    c3.addView(tv("Gemini connection", 16f, bold = true))
+    val saved = !(Prefs.secure(this).getString("apiKey", "") ?: "").isBlank()
+    val key = edit(if (saved) "API key saved ✓ (type a new one to replace)" else "Paste Gemini API key", true)
+    val model = edit("Model"); model.setText(Prefs.plain(this).getString("model", "gemini-3.1-flash-live-preview"))
+    var voiceName = Prefs.plain(this).getString("voice", "Aoede") ?: "Aoede"
+    c3.addView(key); c3.addView(tv("Live model", 12f, SUB)); c3.addView(model)
+    val pick = btn("Pick model from list", SURF2) {
+      val all = (MODELS + fetchedModels).distinct()
+      AlertDialog.Builder(this).setTitle("Live models").setItems(all.toTypedArray()) { _, w -> model.setText(all[w]) }.show()
+    }
+    val fetch = btn("🔄  Fetch live models for my key", SURF2) {
+      val k = key.text.toString().trim().ifBlank { Prefs.secure(this).getString("apiKey", "") ?: "" }
+      if (k.isBlank()) toast("Add your API key first") else fetchModels(k) { list -> if (list.isEmpty()) toast("No live models found (or key invalid)") else { fetchedModels.clear(); fetchedModels.addAll(list); toast("${list.size} model(s) found. Tap 'Pick model from list'.") } }
+    }
+    val lp1 = LinearLayout.LayoutParams(-1, -2); lp1.topMargin = dp(8)
+    c3.addView(pick, lp1); c3.addView(fetch, lp1)
+    val voiceBtn = btn("Voice: $voiceName  ▾", SURF2) {}
+    voiceBtn.setOnClickListener { AlertDialog.Builder(this).setTitle("Voice").setItems(VOICES.toTypedArray()) { _, w -> voiceName = VOICES[w]; voiceBtn.text = "Voice: $voiceName  ▾" }.show() }
+    c3.addView(voiceBtn, lp1)
+    val sb = btn("Save settings") {
+      Prefs.plain(this).edit().putString("model", model.text.toString().trim()).putString("voice", voiceName).apply()
+      if (key.text.isNotBlank()) { Prefs.secure(this).edit().putString("apiKey", key.text.toString().trim()).apply(); key.text.clear(); key.hint = "API key saved ✓ (type a new one to replace)" }
+      toast("Saved. Stop and Start Saara to apply.")
+    }
+    c3.addView(sb, lp1)
+    val kb = btn("Get Free API Key / Muft API Key Prapt Karein", SURF2) { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://aistudio.google.com/app/apikey"))) }
+    c3.addView(kb, lp1)
+
+    // data
+    val c4 = card(root)
+    c4.addView(tv("Chat history", 16f, bold = true))
+    c4.addView(tv("Old chats are kept on this phone and load as you scroll up in the Chat tab.", 12f, SUB))
+    val clr = btn("Clear chat history", SURF2) {
+      AlertDialog.Builder(this).setMessage("Delete all saved chats? Learned memory and shop data stay.").setPositiveButton("Delete") { _, _ -> Bus.clear() }.setNegativeButton("Cancel", null).show()
+    }
+    c4.addView(clr, lp1)
+
+    // about
+    val c5 = card(root); c5.gravity = Gravity.CENTER_HORIZONTAL
+    val img = ImageView(this); img.setImageResource(R.drawable.logo_full)
+    c5.addView(img, LinearLayout.LayoutParams(dp(120), dp(120)))
+    val ab = tv("Saara AI Agent", 14f, SUB); ab.gravity = Gravity.CENTER; c5.addView(ab)
+    return sv
+  }
+
+  private fun fetchModels(key: String, done: (List<String>) -> Unit) {
+    Thread {
+      val out = ArrayList<String>()
+      try {
+        val r = OkHttpClient().newCall(Request.Builder().url("https://generativelanguage.googleapis.com/v1beta/models?pageSize=200&key=$key").build()).execute()
+        val body = r.body?.string() ?: ""
+        val arr = JSONObject(body).optJSONArray("models")
+        if (arr != null) for (i in 0 until arr.length()) {
+          val m = arr.getJSONObject(i); val methods = m.optJSONArray("supportedGenerationMethods")
+          var live = false
+          if (methods != null) for (k in 0 until methods.length()) if (methods.getString(k) == "bidiGenerateContent") live = true
+          if (live) out.add(m.optString("name").removePrefix("models/"))
+        }
+      } catch (_: Exception) {}
+      runOnUiThread { done(out) }
+    }.start()
+  }
+
+  // ---------- start / stop / permissions ----------
+  private fun toggle() {
+    if (Bus.running) { startService(svc("STOP")); return }
+    if (!has(Manifest.permission.RECORD_AUDIO)) {
+      pendingStart = true
+      requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO, Manifest.permission.POST_NOTIFICATIONS), 1)
+      return
+    }
+    startSaara()
+  }
+
+  private fun startSaara() {
+    if ((Prefs.secure(this).getString("apiKey", "") ?: "").isBlank()) { toast("Paste your Gemini API key in Settings and tap Save"); select(4); return }
+    startForegroundService(Intent(this, VoiceService::class.java))
+  }
+
+  override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+    super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+    if (pendingStart && has(Manifest.permission.RECORD_AUDIO)) { pendingStart = false; startSaara() }
+    if (pendingCam && has(Manifest.permission.CAMERA)) { pendingCam = false; if (Bus.running) startService(svc("CAM_START").putExtra("front", camFront)) }
+    refresh()
+  }
+
+  // ---------- live refresh ----------
+  private fun refresh() {
+    updaters.forEach { it() }
+    val muted = VoiceService.instance?.muted == true
+    statusTv.text = Bus.status + (if (Bus.running && muted) "  •  mic muted" else "") + (if (Bus.camOn) "  •  camera" else "") + (if (Bus.screenOn) "  •  screen" else "")
+    startBtn.text = if (Bus.running) "Stop" else "Start"
+    startBtn.background = bg(if (Bus.running) 0xFFB3261E.toInt() else ACC2, 20)
+    muteChip.text = if (muted) "🔇 Muted" else "🎤 Mic on"
+    muteChip.background = bg(if (muted) 0xFF5C2B29.toInt() else SURF2, 18)
+    camChip.text = if (Bus.camOn) "📷 Camera: ON" else "📷 Camera"
+    camChip.background = bg(if (Bus.camOn) ACC2 else SURF2, 18)
+    flipChip.visibility = if (Bus.camOn) View.VISIBLE else View.GONE
+    screenChip.text = if (Bus.screenOn) "🖥 Screen: ON" else "🖥 Screen"
+    screenChip.background = bg(if (Bus.screenOn) ACC2 else SURF2, 18)
+
+    val snap = synchronized(Bus) { ArrayList(Bus.msgs) }
+    if (snap.isEmpty() && chatList.childCount > 0) { chatList.removeAllViews(); shown.clear(); lastId = 0; firstId = Long.MAX_VALUE; noMore = false }
+    val nearBottom = chatScroll.scrollY + chatScroll.height >= chatList.height - dp(140)
+    var changed = false
+    for (m in snap) {
+      val t = shown[m.id]
+      if (t != null) { val s = fmt(m); if (t.text.toString() != s) { t.text = s; changed = true } }
+      else if (m.id > lastId) {
+        val (row, tvw) = msgRow(m); chatList.addView(row, rowLp()); shown[m.id] = tvw
+        lastId = m.id; if (m.id < firstId) firstId = m.id; changed = true
+      }
+    }
+    emptyView.visibility = if (shown.isEmpty()) View.VISIBLE else View.GONE
+    if (changed && nearBottom) chatScroll.post { chatScroll.fullScroll(View.FOCUS_DOWN) }
+  }
+
+  override fun onResume() { super.onResume(); visible = true; Bus.listen(busListener); refresh(); Bus.ping() }
+  override fun onPause() { visible = false; Bus.unlisten(busListener); super.onPause() }
+}
