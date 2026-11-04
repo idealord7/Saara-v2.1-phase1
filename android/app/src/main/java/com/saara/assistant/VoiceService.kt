@@ -301,7 +301,15 @@ class VoiceService : Service() {
       "[Notification key=$key app=$pkg from=$title] $text . Now call the reply_notification tool with key=$key and a short, polite, context-aware reply in the sender's language. Do not ask the user and do not say the reply aloud.")).toString())
   }
 
-  private fun startMic() {
+  fun onIncomingCall() {
+    if (!ready) {
+        Bus.add("system", "Incoming call detected, but Saara is not connected.", true)
+        return
+    }
+    sendText("An incoming phone call has arrived. Ask the user by voice whether they want to answer. Wait for an explicit spoken yes or no. Never answer automatically.")
+}
+
+private fun startMic() {
     if (micStarted) return
     micStarted = true
     Thread {
