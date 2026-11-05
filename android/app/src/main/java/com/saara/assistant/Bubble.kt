@@ -16,13 +16,15 @@ class Bubble(private val c: Context, private val onTap: () -> Unit) {
   private var v: ImageView? = null
   fun show() {
     if (v != null || !Settings.canDrawOverlays(c)) return
+    val d = c.resources.displayMetrics.density
+    val size = (56 * d).toInt()
     val t = ImageView(c)
     t.setImageResource(R.drawable.logo_symbol); t.scaleType = ImageView.ScaleType.CENTER_CROP
     t.background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(0xFFF8FAF9.toInt()) }
     t.clipToOutline = true
-    val lp = WindowManager.LayoutParams(150, 150, WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+    val lp = WindowManager.LayoutParams(size, size, WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
       WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE, PixelFormat.TRANSLUCENT)
-    lp.gravity = Gravity.TOP or Gravity.START; lp.x = 20; lp.y = 300
+    lp.gravity = Gravity.TOP or Gravity.START; lp.x = (16 * d).toInt(); lp.y = (120 * d).toInt()
     var ix = 0; var iy = 0; var sx = 0f; var sy = 0f; var moved = false
     t.setOnTouchListener { _, e ->
       when (e.action) {
@@ -36,7 +38,7 @@ class Bubble(private val c: Context, private val onTap: () -> Unit) {
       }
       true
     }
-    wm.addView(t, lp); v = t
+    try { wm.addView(t, lp); v = t } catch (_: Exception) { v = null }
   }
   fun hide() { v?.let { try { wm.removeView(it) } catch (_: Exception) {} }; v = null }
 }

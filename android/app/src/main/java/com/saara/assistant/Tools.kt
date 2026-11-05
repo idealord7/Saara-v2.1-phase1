@@ -56,7 +56,7 @@ object Tools {
     return sb.toString().take(3500)
   }
 
-  fun off(n: String) = "$n is switched OFF in the Saara app. Ask the user to turn it on in the Features section of the app."
+  fun off(n: String) = "$n is switched OFF in the Saara app. Ask the user to turn it on in the Settings section of the app."
   fun need(n: String) = "Android permission missing: $n. Ask the user to tap the Grant button for it in the Saara app."
   private fun has(c: Context, p: String) = ContextCompat.checkSelfPermission(c, p) == PackageManager.PERMISSION_GRANTED
 

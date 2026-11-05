@@ -303,30 +303,43 @@ class VoiceService : Service() {
 
   fun onIncomingCall() {
     if (!ready) {
-        Bus.add("system", "Incoming call detected, but Saara is not connected.", true)
-        return
+      Bus.add("system", "Incoming call detected, but Saara is not connected.", true)
+      return
     }
-    sendText("An incoming phone call has arrived. Ask the user by voice whether they want to answer. Wait for an explicit spoken yes or no. Never answer automatically.")
-}
+    Bus.add("system", "Incoming call detected. Asking whether to answer.", true)
+    tellModel("[System] An incoming phone call has arrived. Ask the user by voice whether they want to answer. Wait for an explicit spoken yes or no. Never answer automatically.")
+  }
 
-private fun startMic() {
+  private fun startMic() {
     if (micStarted) return
     micStarted = true
     Thread {
-      val min = AudioRecord.getMinBufferSize(16000, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
-      val rec = AudioRecord(MediaRecorder.AudioSource.VOICE_COMMUNICATION, 16000, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, min * 2)
-      if (android.media.audiofx.AcousticEchoCanceler.isAvailable()) android.media.audiofx.AcousticEchoCanceler.create(rec.audioSessionId)?.enabled = true
-      if (android.media.audiofx.NoiseSuppressor.isAvailable()) android.media.audiofx.NoiseSuppressor.create(rec.audioSessionId)?.enabled = true
-      val buf = ByteArray(3200)
-      rec.startRecording()
-      while (running) {
-        val n = rec.read(buf, 0, buf.size)
-        if (n > 0 && ready && !muted && System.currentTimeMillis() > speakingUntil + 600) {
-          val a = JSONObject().put("data", Base64.encodeToString(buf, 0, n, Base64.NO_WRAP)).put("mimeType", "audio/pcm;rate=16000")
-          ws?.send(JSONObject().put("realtimeInput", JSONObject().put("audio", a)).toString())
+      var rec: AudioRecord? = null
+      try {
+        val min = AudioRecord.getMinBufferSize(16000, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
+        if (min <= 0) throw IllegalStateException("microphone buffer unavailable")
+        val r = AudioRecord(MediaRecorder.AudioSource.VOICE_COMMUNICATION, 16000, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, min * 2)
+        rec = r
+        if (r.state != AudioRecord.STATE_INITIALIZED) throw IllegalStateException("microphone could not be opened")
+        if (android.media.audiofx.AcousticEchoCanceler.isAvailable()) android.media.audiofx.AcousticEchoCanceler.create(r.audioSessionId)?.enabled = true
+        if (android.media.audiofx.NoiseSuppressor.isAvailable()) android.media.audiofx.NoiseSuppressor.create(r.audioSessionId)?.enabled = true
+        val buf = ByteArray(3200)
+        r.startRecording()
+        while (running) {
+          val n = r.read(buf, 0, buf.size)
+          if (n < 0) break
+          if (n > 0 && ready && !muted && System.currentTimeMillis() > speakingUntil + 600) {
+            val a = JSONObject().put("data", Base64.encodeToString(buf, 0, n, Base64.NO_WRAP)).put("mimeType", "audio/pcm;rate=16000")
+            ws?.send(JSONObject().put("realtimeInput", JSONObject().put("audio", a)).toString())
+          }
         }
+      } catch (e: Exception) {
+        Bus.add("system", "Microphone error: ${e.message}", true)
+      } finally {
+        micStarted = false
+        try { rec?.stop() } catch (_: Exception) {}
+        try { rec?.release() } catch (_: Exception) {}
       }
-      rec.release()
     }.start()
   }
 

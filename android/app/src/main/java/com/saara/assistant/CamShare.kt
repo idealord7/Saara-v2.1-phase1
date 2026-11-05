@@ -26,11 +26,13 @@ class CamShare(private val c: Context, private val onFrame: (ByteArray) -> Unit,
   private var lastSent = 0L
   private var rotation = 0
   private var mirror = false
+  @Volatile private var gen = 0
 
   @SuppressLint("MissingPermission")
   @Suppress("DEPRECATION")
   fun start(front: Boolean): String? {
     stop()
+    val g = ++gen
     return try {
       val cm = c.getSystemService(Context.CAMERA_SERVICE) as CameraManager
       val want = if (front) CameraCharacteristics.LENS_FACING_FRONT else CameraCharacteristics.LENS_FACING_BACK
@@ -49,6 +51,7 @@ class CamShare(private val c: Context, private val onFrame: (ByteArray) -> Unit,
         val img = try { rd.acquireLatestImage() } catch (e: Exception) { null }
         if (img != null) {
           try {
+            if (g != gen) return@setOnImageAvailableListener
             val now = System.currentTimeMillis()
             if (now - lastSent >= 1000) { lastSent = now; onFrame(jpeg(img)) }
           } catch (e: Exception) {} finally { img.close() }
@@ -56,29 +59,38 @@ class CamShare(private val c: Context, private val onFrame: (ByteArray) -> Unit,
       }, handler)
       cm.openCamera(id, object : CameraDevice.StateCallback() {
         override fun onOpened(d: CameraDevice) {
+          if (g != gen) { d.close(); return }
           dev = d
           try {
             d.createCaptureSession(listOf(r.surface), object : CameraCaptureSession.StateCallback() {
               override fun onConfigured(s: CameraCaptureSession) {
+                if (g != gen) { s.close(); return }
                 sess = s
                 try {
                   val rb = d.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW)
                   rb.addTarget(r.surface)
                   s.setRepeatingRequest(rb.build(), null, handler)
-                } catch (e: Exception) { fail("camera: ${e.message}") }
+                } catch (e: Exception) { if (g == gen) fail("camera: ${e.message}") }
               }
-              override fun onConfigureFailed(s: CameraCaptureSession) { fail("camera could not start") }
+              override fun onConfigureFailed(s: CameraCaptureSession) { if (g == gen) fail("camera could not start") }
             }, handler)
-          } catch (e: Exception) { fail("camera: ${e.message}") }
+          } catch (e: Exception) { if (g == gen) fail("camera: ${e.message}") }
         }
-        override fun onDisconnected(d: CameraDevice) { d.close(); dev = null; fail("camera disconnected (another app may be using it)") }
-        override fun onError(d: CameraDevice, error: Int) { d.close(); dev = null; fail("camera error $error") }
+        override fun onDisconnected(d: CameraDevice) {
+          d.close(); if (dev === d) dev = null
+          if (g == gen) fail("camera disconnected (another app may be using it)")
+        }
+        override fun onError(d: CameraDevice, error: Int) {
+          d.close(); if (dev === d) dev = null
+          if (g == gen) fail("camera error $error")
+        }
       }, handler)
       null
     } catch (e: Exception) { "camera: ${e.message}" }
   }
 
   fun stop() {
+    gen++
     try { sess?.close() } catch (_: Exception) {}
     try { dev?.close() } catch (_: Exception) {}
     try { reader?.close() } catch (_: Exception) {}

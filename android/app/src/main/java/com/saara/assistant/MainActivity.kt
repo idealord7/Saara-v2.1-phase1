@@ -134,12 +134,12 @@ class MainActivity : AppCompatActivity() {
 
     val frame = FrameLayout(this)
     root.addView(frame, LinearLayout.LayoutParams(-1, 0, 1f))
-    pages.add(buildChat()); pages.add(buildFeatures()); pages.add(buildLearning()); pages.add(buildAutomation()); pages.add(buildShop()); pages.add(buildSettings())
+    pages.add(buildChat()); pages.add(buildLearning()); pages.add(buildAutomation()); pages.add(buildShop()); pages.add(buildSettings())
     pages.forEach { frame.addView(it, FrameLayout.LayoutParams(-1, -1)) }
 
     // bottom navigation
     val nav = LinearLayout(this); nav.setBackgroundColor(SURF); nav.setPadding(0, dp(6), 0, dp(6))
-    val items = listOf("💬" to "Chat", "🧩" to "Features", "🧠" to "Learning", "⏰" to "Tasks", "📚" to "Knowledge", "⚙️" to "Settings")
+    val items = listOf("💬" to "Chat", "🧠" to "Learning", "⏰" to "Tasks", "📚" to "Knowledge", "⚙️" to "Settings")
     items.forEachIndexed { i, (e, l) ->
       val col = LinearLayout(this); col.orientation = LinearLayout.VERTICAL; col.gravity = Gravity.CENTER
       val ic = tv(e, 20f); ic.gravity = Gravity.CENTER; val lb = tv(l, 11f, SUB); lb.gravity = Gravity.CENTER
@@ -155,7 +155,7 @@ class MainActivity : AppCompatActivity() {
     curTab = i
     pages.forEachIndexed { k, p -> p.visibility = if (k == i) View.VISIBLE else View.GONE }
     navItems.forEachIndexed { k, (ic, lb) -> lb.setTextColor(if (k == i) ACC else SUB); ic.alpha = if (k == i) 1f else 0.6f }
-    when (i) { 1 -> refresh(); 2 -> rebuildLearning(); 3 -> rebuildTasks(); 4 -> rebuildShop() }
+    when (i) { 1 -> rebuildLearning(); 2 -> rebuildTasks(); 3 -> rebuildShop(); 4 -> refresh() }
   }
 
   // ---------- CHAT ----------
@@ -206,10 +206,11 @@ class MainActivity : AppCompatActivity() {
   }
 
   private fun fmt(m: Msg): String = when (m.role) { "tool" -> "⚙ " + m.text.take(180); else -> m.text }
+  private fun stamp(m: Msg): String = SimpleDateFormat("dd MMM yyyy, hh:mm a", Locale.getDefault()).format(Date(m.ts))
+  private fun fullText(m: Msg): String = fmt(m) + "\n\n" + stamp(m)
 
   private fun msgRow(m: Msg): Pair<View, TextView> {
-    val stamp = SimpleDateFormat("dd MMM yyyy, hh:mm a", Locale.getDefault()).format(Date(m.ts))
-    val t = tv(fmt(m) + "\n\n" + stamp, 15f)
+    val t = tv(fullText(m), 15f)
     val maxW = (resources.displayMetrics.widthPixels * 0.80).toInt()
     when (m.role) {
       "you" -> {
@@ -248,7 +249,7 @@ class MainActivity : AppCompatActivity() {
   }
 
   private fun toggleCam() {
-    if (!Prefs.on(this, "f_share", true)) { toast("Camera & screen sharing is switched off in Features."); return }
+    if (!Prefs.on(this, "f_share", true)) { toast("Camera & screen sharing is switched off in Settings."); return }
     if (!Bus.running) { toast("Tap Start first, then share the camera."); return }
     if (Bus.camOn) { startService(svc("CAM_STOP")); return }
     if (!has(Manifest.permission.CAMERA)) { pendingCam = true; requestPermissions(arrayOf(Manifest.permission.CAMERA), 3); return }
@@ -256,7 +257,7 @@ class MainActivity : AppCompatActivity() {
   }
   @Suppress("DEPRECATION")
   private fun toggleScreen() {
-    if (!Prefs.on(this, "f_share", true)) { toast("Camera & screen sharing is switched off in Features."); return }
+    if (!Prefs.on(this, "f_share", true)) { toast("Camera & screen sharing is switched off in Settings."); return }
     if (!Bus.running) { toast("Tap Start first, then share the screen."); return }
     if (Bus.screenOn) { startService(svc("SCREEN_STOP")); return }
     val mpm = getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
@@ -300,13 +301,14 @@ class MainActivity : AppCompatActivity() {
     }
   }
 
-  private fun buildFeatures(): View {
-    val (sv, root) = page()
+  private fun buildFeatureCards(root: LinearLayout) {
     heading(root, "Features", "Switch things on or off. Grant buttons appear when Android needs permission.")
     feature(root, "Device controls", "Torch, volume, open apps, camera photo, Wi-Fi / Bluetooth panels", "f_device", true, { true }, "", {})
     feature(root, "Phone: calls & SMS", "Call, answer / end calls and send texts by voice", "f_phone", true,
       { has(Manifest.permission.CALL_PHONE) && has(Manifest.permission.SEND_SMS) && has(Manifest.permission.READ_CONTACTS) && has(Manifest.permission.ANSWER_PHONE_CALLS) },
       "Grant phone, SMS, contacts & answer calls", { requestPermissions(arrayOf(Manifest.permission.CALL_PHONE, Manifest.permission.SEND_SMS, Manifest.permission.READ_CONTACTS, Manifest.permission.ANSWER_PHONE_CALLS), 2) })
+    feature(root, "Incoming call wake-up", "When a call rings, Saara asks you by voice before answering. Saara must already be started.", "wake_on_call", false,
+      { has(Manifest.permission.READ_PHONE_STATE) }, "Allow phone state", { requestPermissions(arrayOf(Manifest.permission.READ_PHONE_STATE), 4) })
     feature(root, "Screen automation", "Read the screen, tap, type, scroll in any app", "f_ui", true, { a11yOn() },
       "Enable in Accessibility settings", {
         toast("Turn on Saara. If Android says 'Restricted setting': App info → ⋮ → Allow restricted settings.")
@@ -327,7 +329,6 @@ class MainActivity : AppCompatActivity() {
     feature(root, "Floating bubble", "Button over every app. Also lets Saara open apps from the background", "f_bubble", false,
       { Settings.canDrawOverlays(this) }, "Allow display over other apps",
       { startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName"))) })
-    return sv
   }
 
   private fun buildAutomation(): View {
@@ -484,6 +485,7 @@ class MainActivity : AppCompatActivity() {
   private fun buildSettings(): View {
     val (sv, root) = page()
     heading(root, "Settings")
+    buildFeatureCards(root)
 
     // language priority
     val cl = card(root)
@@ -611,7 +613,7 @@ class MainActivity : AppCompatActivity() {
     var changed = false
     for (m in snap) {
       val t = shown[m.id]
-      if (t != null) { val s = fmt(m); if (t.text.toString() != s) { t.text = s; changed = true } }
+      if (t != null) { val s = fullText(m); if (t.text.toString() != s) { t.text = s; changed = true } }
       else if (m.id > lastId) {
         val (row, tvw) = msgRow(m); chatList.addView(row, rowLp()); shown[m.id] = tvw
         lastId = m.id; if (m.id < firstId) firstId = m.id; changed = true

@@ -11,7 +11,7 @@ Features are switched on/off inside the app; permissions have Grant buttons.
 - Calls: device_control answer_call / end_call / reject_call (TelecomManager -> notification button -> on-screen button). New permission ANSWER_PHONE_CALLS (tap Grant again).
 
 ## Changelog (v2.0 — new look + new features)
-- New logo (launcher icon, app header, floating bubble) and Gemini-style dark UI with bottom tabs: Chat, Features, Learning, Shop, Settings.
+- New logo (launcher icon, app header, floating bubble) and Gemini-style dark UI with bottom tabs: Chat, Learning, Tasks, Knowledge, Settings.
 - Chat history is saved in SQLite; scroll to the top of the chat to load older messages.
 - Language priority chips (Auto / Bengali / Hindi / English / Hinglish). Bengali, Hindi, English are always first priority.
 - Live camera sharing and live screen sharing (MediaProjection) streamed to Gemini ~1 frame/sec, buttons in Chat.

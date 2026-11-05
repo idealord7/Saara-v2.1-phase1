@@ -78,13 +78,15 @@ class Db private constructor(c: Context) : SQLiteOpenHelper(c.applicationContext
     return out.distinct().sorted()
   }
   fun categoryRename(old: String, new: String) {
-    val n = new.trim().lowercase(); if (n.isEmpty()) return
-    categoryAdd(n); writableDatabase.update("learned", ContentValues().apply { put("cat", n) }, "cat=?", arrayOf(old))
-    if (old != "general" && old != "preference" && old != "work" && old != "personal") writableDatabase.delete("categories", "name=?", arrayOf(old))
+    val o = old.trim().lowercase(); val n = new.trim().lowercase()
+    if (o.isEmpty() || n.isEmpty() || o == n) return
+    categoryAdd(n); writableDatabase.update("learned", ContentValues().apply { put("cat", n) }, "cat=?", arrayOf(o))
+    if (o != "general" && o != "preference" && o != "work" && o != "personal") writableDatabase.delete("categories", "name=?", arrayOf(o))
   }
   fun categoryDelete(name: String) {
-    writableDatabase.update("learned", ContentValues().apply { put("cat", "general") }, "cat=?", arrayOf(name))
-    if (name != "general" && name != "preference" && name != "work" && name != "personal") writableDatabase.delete("categories", "name=?", arrayOf(name))
+    val n = name.trim().lowercase(); if (n.isEmpty()) return
+    writableDatabase.update("learned", ContentValues().apply { put("cat", "general") }, "cat=?", arrayOf(n))
+    if (n != "general" && n != "preference" && n != "work" && n != "personal") writableDatabase.delete("categories", "name=?", arrayOf(n))
   }
   fun recall(q: String, limit: Int = 12): List<Fact> {
     val words = q.lowercase().split(Regex("[^\\p{L}\\p{N}]+")).filter { it.length >= 2 }
