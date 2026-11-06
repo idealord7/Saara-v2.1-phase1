@@ -127,7 +127,16 @@ class MainActivity : AppCompatActivity() {
 
   // ---------- screen skeleton ----------
   override fun onCreate(b: Bundle?) {
-    super.onCreate(b)
+    try {
+      super.onCreate(b)
+      onCreateInner(b)
+    } catch (t: Throwable) {
+      Crash.save(this, t, "MainActivity.onCreate")
+      throw t
+    }
+  }
+
+  private fun onCreateInner(b: Bundle?) {
     Bus.init(this); migrateFacts(this)
     window.statusBarColor = BG; window.navigationBarColor = SURF
     val root = LinearLayout(this); root.orientation = LinearLayout.VERTICAL; root.setBackgroundColor(BG)

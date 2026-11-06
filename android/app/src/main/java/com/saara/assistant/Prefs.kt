@@ -5,9 +5,34 @@ import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
 
 object Prefs {
-  fun secure(c: Context): SharedPreferences = EncryptedSharedPreferences.create(c, "saara",
+  @Volatile private var securePrefs: SharedPreferences? = null
+
+  private fun openSecure(c: Context): SharedPreferences = EncryptedSharedPreferences.create(c, "saara",
     MasterKey.Builder(c).setKeyScheme(MasterKey.KeyScheme.AES256_GCM).build(),
     EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV, EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM)
+
+  /** Never let a broken keystore entry take the whole app down; fall back to plain prefs. */
+  fun secure(c: Context): SharedPreferences {
+    securePrefs?.let { return it }
+    synchronized(this) {
+      securePrefs?.let { return it }
+      val app = c.applicationContext
+      val p = try {
+        openSecure(app)
+      } catch (t: Throwable) {
+        Crash.save(app, t, "EncryptedSharedPreferences.create failed")
+        try {
+          app.deleteSharedPreferences("saara")
+          openSecure(app)
+        } catch (t2: Throwable) {
+          Crash.save(app, t2, "EncryptedSharedPreferences retry failed; using plain prefs")
+          app.getSharedPreferences("saara_secure_fallback", Context.MODE_PRIVATE)
+        }
+      }
+      securePrefs = p
+      return p
+    }
+  }
   fun plain(c: Context): SharedPreferences = c.getSharedPreferences("saara_settings", Context.MODE_PRIVATE)
   fun on(c: Context, k: String, def: Boolean = true): Boolean = plain(c).getBoolean(k, def)
 }
