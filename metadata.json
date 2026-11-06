@@ -1,0 +1,6 @@
+{
+  "name": "Saara AI Voice Assistant",
+  "description": "Voice intelligence assistant with Gemini Live streaming, device controls, camera and screen preview, and strict on-device privacy safeguards.",
+  "permissions": [],
+  "capabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

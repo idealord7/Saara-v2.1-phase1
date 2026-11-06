@@ -1,0 +1,8 @@
+{
+  "appId": "com.saara.assistant",
+  "appName": "Saara Assistant",
+  "webDir": "dist",
+  "server": {
+    "androidScheme": "https"
+  }
+}
