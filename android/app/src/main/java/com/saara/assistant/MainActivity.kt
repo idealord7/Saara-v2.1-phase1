@@ -8,7 +8,10 @@ import android.graphics.drawable.GradientDrawable
 import android.media.projection.MediaProjectionManager
 import android.net.Uri
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.provider.Settings
+import android.provider.ContactsContract
 import android.text.InputType
 import android.view.Gravity
 import android.view.View
@@ -25,6 +28,8 @@ import org.json.JSONObject
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicInteger
 
 class MainActivity : AppCompatActivity() {
   companion object { @Volatile var visible = false }
@@ -49,6 +54,8 @@ class MainActivity : AppCompatActivity() {
   private lateinit var learnBox: LinearLayout
   private lateinit var shopBox: LinearLayout
   private lateinit var taskBox: LinearLayout
+  private lateinit var contactsBox: LinearLayout
+  private lateinit var contactsSearch: EditText
   private val shown = HashMap<Long, TextView>()
   private var lastId = 0L
   private var firstId = Long.MAX_VALUE
@@ -58,6 +65,12 @@ class MainActivity : AppCompatActivity() {
   private var pendingCam = false
   private var camFront = false
   private val fetchedModels = ArrayList<String>()
+  // Contact provider I/O must never run on Android's main/UI thread.
+  private val contactsExecutor = Executors.newSingleThreadExecutor()
+  private val contactsHandler = Handler(Looper.getMainLooper())
+  private val contactsGeneration = AtomicInteger(0)
+  private val contactsDebounce = Runnable { loadContactsInBackground() }
+  private val knowledgeExecutor = Executors.newSingleThreadExecutor()
   private val busListener: () -> Unit = { refresh() }
 
   // ---------- small UI helpers ----------
@@ -134,12 +147,12 @@ class MainActivity : AppCompatActivity() {
 
     val frame = FrameLayout(this)
     root.addView(frame, LinearLayout.LayoutParams(-1, 0, 1f))
-    pages.add(buildChat()); pages.add(buildLearning()); pages.add(buildAutomation()); pages.add(buildShop()); pages.add(buildSettings())
+    pages.add(buildChat()); pages.add(buildLearning()); pages.add(buildAutomation()); pages.add(buildContacts()); pages.add(buildSettings())
     pages.forEach { frame.addView(it, FrameLayout.LayoutParams(-1, -1)) }
 
     // bottom navigation
     val nav = LinearLayout(this); nav.setBackgroundColor(SURF); nav.setPadding(0, dp(6), 0, dp(6))
-    val items = listOf("💬" to "Chat", "🧠" to "Learning", "⏰" to "Tasks", "📚" to "Knowledge", "⚙️" to "Settings")
+    val items = listOf("💬" to "Chat", "🧠" to "Learning", "⏰" to "Tasks", "👥" to "Contacts", "⚙️" to "Settings")
     items.forEachIndexed { i, (e, l) ->
       val col = LinearLayout(this); col.orientation = LinearLayout.VERTICAL; col.gravity = Gravity.CENTER
       val ic = tv(e, 20f); ic.gravity = Gravity.CENTER; val lb = tv(l, 11f, SUB); lb.gravity = Gravity.CENTER
@@ -155,7 +168,7 @@ class MainActivity : AppCompatActivity() {
     curTab = i
     pages.forEachIndexed { k, p -> p.visibility = if (k == i) View.VISIBLE else View.GONE }
     navItems.forEachIndexed { k, (ic, lb) -> lb.setTextColor(if (k == i) ACC else SUB); ic.alpha = if (k == i) 1f else 0.6f }
-    when (i) { 1 -> rebuildLearning(); 2 -> rebuildTasks(); 3 -> rebuildShop(); 4 -> refresh() }
+    when (i) { 1 -> { rebuildLearning(); rebuildShop() }; 2 -> rebuildTasks(); 3 -> rebuildContacts(); 4 -> refresh() }
   }
 
   // ---------- CHAT ----------
@@ -171,13 +184,13 @@ class MainActivity : AppCompatActivity() {
     val big = ImageView(this); big.setImageResource(R.drawable.logo_full); big.alpha = 0.95f
     e.addView(big, LinearLayout.LayoutParams(dp(200), dp(200)))
     val hi = tv("Hi, I'm Saara", 22f, bold = true); hi.gravity = Gravity.CENTER; e.addView(hi)
-    val sub = tv("Tap Start, then talk in Bengali, Hindi or English.\nYour old chats stay here — scroll up to see them.", 13f, SUB); sub.gravity = Gravity.CENTER; sub.setPadding(dp(24), dp(6), dp(24), 0); e.addView(sub)
+    val sub = tv("Tap Start to connect Gemini. General questions go to Gemini automatically; personal device records stay on this phone.", 13f, SUB); sub.gravity = Gravity.CENTER; sub.setPadding(dp(24), dp(6), dp(24), 0); e.addView(sub)
     fr.addView(e, FrameLayout.LayoutParams(-1, -1))
     box.addView(fr, LinearLayout.LayoutParams(-1, 0, 1f))
 
     // share / mic chips
     val chips = LinearLayout(this); chips.setPadding(dp(12), dp(4), dp(12), dp(4))
-    muteChip = chip("🎤 Mic") { VoiceService.instance?.let { it.muted = !it.muted; refresh() } ?: toast("Start Saara first") }
+    muteChip = chip("🎤 Mic: ON") { VoiceService.instance?.toggleMic() ?: toast("Tap Start first to connect Saara") }
     camChip = chip("📷 Camera") { toggleCam() }
     flipChip = chip("🔄") { camFront = !camFront; startService(svc("CAM_START").putExtra("front", camFront)) }
     screenChip = chip("🖥 Screen") { toggleScreen() }
@@ -194,7 +207,17 @@ class MainActivity : AppCompatActivity() {
       val t = input.text.toString().trim()
       if (t.isNotEmpty()) {
         val s = VoiceService.instance
-        if (s == null) toast("Tap Start first") else { s.sendText(t); input.text.clear() }
+        if (s == null) toast("Tap Start first")
+        else if (extractHttpUrl(t) != null) {
+          input.text.clear()
+          fetchAndSaveUrl(extractHttpUrl(t)!!)
+        } else if ((Prefs.on(this, "privacy_mode", true) && looksPersonal(t)) || Db.get(this).recall(t, 5).any { it.cat == "web_source" }) {
+          input.text.clear()
+          answerFromLocalKnowledge(t)
+        } else {
+          s.sendText(t)
+          input.text.clear()
+        }
       }
     }
     send.setOnClickListener { doSend() }
@@ -205,12 +228,20 @@ class MainActivity : AppCompatActivity() {
     return box
   }
 
-  private fun fmt(m: Msg): String = when (m.role) { "tool" -> "⚙ " + m.text.take(180); else -> m.text }
-  private fun stamp(m: Msg): String = SimpleDateFormat("dd MMM yyyy, hh:mm a", Locale.getDefault()).format(Date(m.ts))
-  private fun fullText(m: Msg): String = fmt(m) + "\n\n" + stamp(m)
+  private fun fmt(m: Msg): String {
+    val body = when (m.role) { "tool" -> "⚙ " + m.text.take(180); else -> m.text }
+    val stamp = SimpleDateFormat("hh:mm:ss a", Locale.getDefault()).format(Date(m.ts))
+    return body + "  ·  " + stamp
+  }
+
+  private fun dateLabel(ts: Long): TextView {
+    val v = tv(SimpleDateFormat("EEEE, d MMMM yyyy", Locale.getDefault()).format(Date(ts)), 12f, SUB)
+    v.gravity = Gravity.CENTER; v.setPadding(0, dp(12), 0, dp(2)); return v
+  }
+  private fun sameDay(a: Long, b: Long): Boolean = SimpleDateFormat("yyyyMMdd", Locale.US).format(Date(a)) == SimpleDateFormat("yyyyMMdd", Locale.US).format(Date(b))
 
   private fun msgRow(m: Msg): Pair<View, TextView> {
-    val t = tv(fullText(m), 15f)
+    val t = tv(fmt(m), 15f)
     val maxW = (resources.displayMetrics.widthPixels * 0.80).toInt()
     when (m.role) {
       "you" -> {
@@ -241,23 +272,34 @@ class MainActivity : AppCompatActivity() {
     val older = Bus.older(firstId, 40)
     if (older.isEmpty()) { noMore = true; loadingOlder = false; return }
     val oldH = chatList.height
-    for (m in older.reversed()) {
+    val ordered = older.reversed()
+    for (idx in ordered.indices.reversed()) {
+      val m = ordered[idx]
+      val nextNewer = ordered.getOrNull(idx + 1) ?: Bus.msgs.firstOrNull { it.id > m.id }
       val (row, t) = msgRow(m); chatList.addView(row, 0, rowLp()); shown[m.id] = t
+      if (nextNewer == null || !sameDay(m.ts, nextNewer.ts)) chatList.addView(dateLabel(m.ts), 0, rowLp())
       if (m.id < firstId) firstId = m.id
     }
     chatScroll.post { chatScroll.post { chatScroll.scrollTo(0, maxOf(0, chatList.height - oldH)); loadingOlder = false } }
   }
 
   private fun toggleCam() {
-    if (!Prefs.on(this, "f_share", true)) { toast("Camera & screen sharing is switched off in Settings."); return }
+    if (!Prefs.on(this, "f_share", true)) { toast("Camera & screen sharing is switched off in Settings → App features."); return }
     if (!Bus.running) { toast("Tap Start first, then share the camera."); return }
     if (Bus.camOn) { startService(svc("CAM_STOP")); return }
     if (!has(Manifest.permission.CAMERA)) { pendingCam = true; requestPermissions(arrayOf(Manifest.permission.CAMERA), 3); return }
+    if (Prefs.on(this, "f_overlay", true) && !Settings.canDrawOverlays(this)) {
+      AlertDialog.Builder(this).setTitle("Allow camera status overlay?")
+        .setMessage("To keep the live camera-sharing indicator visible over other apps, allow Saara to display over other apps.")
+        .setPositiveButton("Allow") { _, _ -> startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName"))) }
+        .setNegativeButton("Continue without overlay") { _, _ -> startService(svc("CAM_START").putExtra("front", camFront)) }.show()
+      return
+    }
     startService(svc("CAM_START").putExtra("front", camFront))
   }
   @Suppress("DEPRECATION")
   private fun toggleScreen() {
-    if (!Prefs.on(this, "f_share", true)) { toast("Camera & screen sharing is switched off in Settings."); return }
+    if (!Prefs.on(this, "f_share", true)) { toast("Camera & screen sharing is switched off in Settings → App features."); return }
     if (!Bus.running) { toast("Tap Start first, then share the screen."); return }
     if (Bus.screenOn) { startService(svc("SCREEN_STOP")); return }
     val mpm = getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
@@ -301,14 +343,12 @@ class MainActivity : AppCompatActivity() {
     }
   }
 
-  private fun buildFeatureCards(root: LinearLayout) {
-    heading(root, "Features", "Switch things on or off. Grant buttons appear when Android needs permission.")
+  private fun addFeatures(root: LinearLayout) {
+    heading(root, "App features", "Manage Saara permissions and device capabilities here.")
     feature(root, "Device controls", "Torch, volume, open apps, camera photo, Wi-Fi / Bluetooth panels", "f_device", true, { true }, "", {})
     feature(root, "Phone: calls & SMS", "Call, answer / end calls and send texts by voice", "f_phone", true,
       { has(Manifest.permission.CALL_PHONE) && has(Manifest.permission.SEND_SMS) && has(Manifest.permission.READ_CONTACTS) && has(Manifest.permission.ANSWER_PHONE_CALLS) },
       "Grant phone, SMS, contacts & answer calls", { requestPermissions(arrayOf(Manifest.permission.CALL_PHONE, Manifest.permission.SEND_SMS, Manifest.permission.READ_CONTACTS, Manifest.permission.ANSWER_PHONE_CALLS), 2) })
-    feature(root, "Incoming call wake-up", "When a call rings, Saara asks you by voice before answering. Saara must already be started.", "wake_on_call", false,
-      { has(Manifest.permission.READ_PHONE_STATE) }, "Allow phone state", { requestPermissions(arrayOf(Manifest.permission.READ_PHONE_STATE), 4) })
     feature(root, "Screen automation", "Read the screen, tap, type, scroll in any app", "f_ui", true, { a11yOn() },
       "Enable in Accessibility settings", {
         toast("Turn on Saara. If Android says 'Restricted setting': App info → ⋮ → Allow restricted settings.")
@@ -358,6 +398,8 @@ class MainActivity : AppCompatActivity() {
     heading(root, "What Saara learned", "Preferences, habits and corrections she keeps in memory to serve you better.")
     learnBox = LinearLayout(this); learnBox.orientation = LinearLayout.VERTICAL
     root.addView(learnBox)
+    shopBox = LinearLayout(this); shopBox.orientation = LinearLayout.VERTICAL
+    root.addView(shopBox)
     return sv
   }
 
@@ -383,8 +425,11 @@ class MainActivity : AppCompatActivity() {
     }
     val st = tv(sb.toString(), 14f); st.setPadding(0, dp(6), 0, 0); sum.addView(st)
     val ask = btn("🗣  Ask Saara to explain") {
-      val s = VoiceService.instance
-      if (s == null) toast("Tap Start first") else { s.sendText("In 3 or 4 short sentences, tell me what you have learned about me so far and how you will use it to help me better."); select(0) }
+      val factsNow = Db.get(this).facts().take(12)
+      val localSummary = if (factsNow.isEmpty()) "No saved learning facts yet." else factsNow.joinToString("\n") { "• ${it.cat}: ${it.text}" }
+      Bus.add("you", "Show my saved learning", true)
+      Bus.add("saara", "Your saved learning (read locally):\n$localSummary", true)
+      select(0)
     }
     val alp = LinearLayout.LayoutParams(-1, -2); alp.topMargin = dp(10); sum.addView(ask, alp)
 
@@ -436,10 +481,47 @@ class MainActivity : AppCompatActivity() {
     }
   }
 
+  // ---------- LOCAL PRIVACY / URL IMPORT ----------
+  private fun extractHttpUrl(text: String): String? = Regex("""https?://[^\s<>"']+""", RegexOption.IGNORE_CASE).find(text)?.value?.trimEnd('.', ',', ')', ']')
+
+  private fun looksPersonal(text: String): Boolean {
+    val q = text.lowercase(Locale.ROOT)
+    return listOf("my contact", "my contacts", "my phone", "phone number", "my address", "home address", "bank account", "account number", "call history", "call log", "sms history", "my messages", "message from", "my email", "my whatsapp", "my saved learning", "my knowledge", "my sheet", "my spreadsheet", "my call", "আমার নম্বর", "আমার কন্টাক্ট", "আমার মেসেজ", "আমার কল", "আমার ঠিকানা", "মেসেজ থেকে", "কল হিস্ট্রি", "मेरा नंबर", "मेरे संपर्क", "मेरे मैसेज", "मेरी कॉल हिस्ट्री", "मेरा पता").any { q.contains(it) } ||
+      Regex("\\b[+0-9][0-9 ()-]{7,}\\b").containsMatchIn(text) ||
+      Regex("[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}", RegexOption.IGNORE_CASE).containsMatchIn(text)
+  }
+
+  private fun answerFromLocalKnowledge(query: String) {
+    Bus.add("you", query, true)
+    val matches = Db.get(this).recall(query, 8)
+    val answer = if (matches.isEmpty()) "I checked Saara's on-device Knowledge and Learning database. No matching saved information was found. Nothing was sent to Gemini." else
+      "I found this on your device:\n" + matches.joinToString("\n") { "• [${it.cat}] ${it.text}" } + "\n\nThis information stayed on this phone."
+    Bus.add("saara", answer, true)
+  }
+
+  private fun fetchAndSaveUrl(url: String) {
+    toast("Fetching link locally. Content will stay on this device…")
+    knowledgeExecutor.execute {
+      val result = Tools.fetchUrlText(url)
+      runOnUiThread {
+        if (isFinishing || isDestroyed) return@runOnUiThread
+        if (result.startsWith("error:")) {
+          Bus.add("system", result, true); toast(result.take(220))
+        } else {
+          Db.get(this).factAdd("web_source", result.take(12000))
+          Db.get(this).factAdd("web_source", "Imported URL: $url")
+          Bus.add("system", "Link fetched and saved locally (${result.length} characters). No page content was sent to Gemini.", true)
+          toast("Fetched and saved on this device")
+          if (::shopBox.isInitialized) rebuildShop()
+        }
+      }
+    }
+  }
+
   // ---------- SHOP ----------
   private fun buildShop(): View {
     val (sv, root) = page()
-    heading(root, "Knowledge & Google Sheets", "Local knowledge is available in Learning. Google Sheets connection is a planned feature and is not active in this build.")
+    heading(root, "Knowledge & Google Sheets", "Saved locally on this phone. Public webpages and Sheets links can be imported; private Sheets need Google sign-in.")
     shopBox = LinearLayout(this); shopBox.orientation = LinearLayout.VERTICAL
     root.addView(shopBox)
     return sv
@@ -463,11 +545,21 @@ class MainActivity : AppCompatActivity() {
     })
     val sheets = card(shopBox)
     sheets.addView(tv("Google Sheets connection", 16f, bold = true))
-    sheets.addView(tv("This version can store a sheet link, but does not yet authenticate with Google or read sheet rows. Do not rely on it for live product prices.", 13f, SUB))
-    val url = edit("Google Sheets URL")
+    sheets.addView(tv("Public webpages and Sheets shared as 'Anyone with the link' can be fetched. Private Sheets are not accessible until Google OAuth is configured.", 13f, SUB))
+    val url = edit("Website or Google Sheets URL")
     url.setText(Prefs.plain(this).getString("knowledge_sheet_url", ""))
     sheets.addView(url)
-    sheets.addView(btn("Save sheet link") { Prefs.plain(this).edit().putString("knowledge_sheet_url", url.text.toString().trim()).apply(); toast("Sheet link saved; data sync is not active yet") })
+    sheets.addView(btn("Save link", SURF2) {
+      val value = url.text.toString().trim()
+      if (!value.startsWith("https://") && !value.startsWith("http://")) toast("Enter a valid http:// or https:// URL")
+      else { Prefs.plain(this).edit().putString("knowledge_sheet_url", value).apply(); Db.get(this).factAdd("web_source", "Saved source URL: $value"); toast("Link saved locally. Fetching its data now…"); rebuildShop(); fetchAndSaveUrl(value) }
+    })
+    sheets.addView(btn("Fetch & save data") {
+      val value = url.text.toString().trim()
+      if (!value.startsWith("https://") && !value.startsWith("http://")) { toast("Enter a valid http:// or https:// URL"); return@btn }
+      Prefs.plain(this).edit().putString("knowledge_sheet_url", value).apply()
+      fetchAndSaveUrl(value)
+    })
     val facts = db.facts()
     heading(shopBox, "Saved knowledge (${facts.size})")
     for (f in facts.take(100)) {
@@ -478,6 +570,126 @@ class MainActivity : AppCompatActivity() {
     }
   }
 
+
+  // ---------- CONTACTS ----------
+  private fun buildContacts(): View {
+    val (sv, root) = page()
+    heading(root, "Contacts", "People saved on this phone, including Google contacts synced to Android.")
+    val permission = card(root)
+    permission.addView(tv("Contact access", 16f, bold = true))
+    permission.addView(tv("Saara reads contacts only after you grant Android permission. Gmail message history and email-based enrichment require a separate Google OAuth connection and are not enabled in this build.", 12f, SUB))
+    permission.addView(btn(if (has(Manifest.permission.READ_CONTACTS)) "Refresh contacts" else "Grant contacts access") {
+      if (has(Manifest.permission.READ_CONTACTS)) rebuildContacts() else requestContactsAccess()
+    })
+    contactsSearch = edit("Search name, phone or email")
+    contactsSearch.background = bg(SURF2, 18); contactsSearch.setPadding(dp(12), dp(8), dp(12), dp(8))
+    root.addView(contactsSearch, LinearLayout.LayoutParams(-1, -2))
+    contactsSearch.doAfterTextChanged { scheduleContactsRefresh() }
+    contactsBox = LinearLayout(this); contactsBox.orientation = LinearLayout.VERTICAL
+    root.addView(contactsBox)
+    return sv
+  }
+
+  private data class ContactEntry(val name: String, val phone: String, val email: String)
+  private data class MutableContact(var name: String = "Unknown", var phone: String = "", var email: String = "")
+
+  private fun requestContactsAccess() {
+    if (has(Manifest.permission.READ_CONTACTS)) { rebuildContacts(); return }
+    val prefs = getSharedPreferences("saara_permissions", MODE_PRIVATE)
+    val askedBefore = prefs.getBoolean("contacts_asked", false)
+    if (askedBefore && !shouldShowRequestPermissionRationale(Manifest.permission.READ_CONTACTS)) {
+      AlertDialog.Builder(this).setTitle("Contacts permission is disabled")
+        .setMessage("Allow Contacts permission in Android App Settings so Saara can display your phone contacts.")
+        .setPositiveButton("Open settings") { _, _ ->
+          startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName")))
+        }.setNegativeButton("Cancel", null).show()
+      return
+    }
+    prefs.edit().putBoolean("contacts_asked", true).apply()
+    toast("Requesting Contacts permission…")
+    try { requestPermissions(arrayOf(Manifest.permission.READ_CONTACTS), 4) }
+    catch (e: Exception) { toast("Could not open permission prompt. Open App info → Permissions → Contacts and allow it."); startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName"))) }
+  }
+
+  private fun rebuildContacts() {
+    if (!::contactsBox.isInitialized) return
+    contactsBox.removeAllViews()
+    if (!has(Manifest.permission.READ_CONTACTS)) {
+      contactsBox.addView(tv("Contacts permission is not granted. Tap 'Grant contacts access' above.", 13f, WARN)); return
+    }
+    contactsBox.addView(tv("Loading contacts…", 13f, SUB))
+    scheduleContactsRefresh()
+  }
+
+  private fun scheduleContactsRefresh() {
+    if (!::contactsBox.isInitialized) return
+    if (!has(Manifest.permission.READ_CONTACTS)) { rebuildContacts(); return }
+    contactsHandler.removeCallbacks(contactsDebounce)
+    contactsGeneration.incrementAndGet()
+    contactsHandler.postDelayed(contactsDebounce, 250L)
+  }
+
+  private fun loadContactsInBackground() {
+    if (!::contactsBox.isInitialized) return
+    if (!has(Manifest.permission.READ_CONTACTS)) {
+      contactsHandler.post { if (::contactsBox.isInitialized) { contactsBox.removeAllViews(); contactsBox.addView(tv("Contacts permission is not granted. Tap 'Grant contacts access' above.", 13f, WARN)) } }
+      return
+    }
+    val generation = contactsGeneration.get()
+    val query = if (::contactsSearch.isInitialized) contactsSearch.text.toString().trim().lowercase(Locale.ROOT) else ""
+    contactsExecutor.execute {
+      val grouped = LinkedHashMap<String, MutableContact>()
+      var error: String? = null
+      try {
+        contentResolver.query(ContactsContract.Contacts.CONTENT_URI,
+          arrayOf(ContactsContract.Contacts._ID, ContactsContract.Contacts.DISPLAY_NAME), null, null,
+          ContactsContract.Contacts.DISPLAY_NAME + " COLLATE NOCASE ASC")?.use { c ->
+          val idCol = c.getColumnIndexOrThrow(ContactsContract.Contacts._ID)
+          val nameCol = c.getColumnIndexOrThrow(ContactsContract.Contacts.DISPLAY_NAME)
+          while (c.moveToNext()) {
+            val id = c.getString(idCol) ?: continue
+            grouped[id] = MutableContact(c.getString(nameCol) ?: "Unknown", "", "")
+          }
+        }
+        contentResolver.query(ContactsContract.CommonDataKinds.Phone.CONTENT_URI,
+          arrayOf(ContactsContract.CommonDataKinds.Phone.CONTACT_ID, ContactsContract.CommonDataKinds.Phone.NUMBER), null, null, null)?.use { c ->
+          val idCol = c.getColumnIndexOrThrow(ContactsContract.CommonDataKinds.Phone.CONTACT_ID)
+          val valCol = c.getColumnIndexOrThrow(ContactsContract.CommonDataKinds.Phone.NUMBER)
+          while (c.moveToNext()) { val id = c.getString(idCol) ?: continue; val item = grouped[id] ?: continue; if (item.phone.isBlank()) item.phone = c.getString(valCol) ?: "" }
+        }
+        contentResolver.query(ContactsContract.CommonDataKinds.Email.CONTENT_URI,
+          arrayOf(ContactsContract.CommonDataKinds.Email.CONTACT_ID, ContactsContract.CommonDataKinds.Email.ADDRESS), null, null, null)?.use { c ->
+          val idCol = c.getColumnIndexOrThrow(ContactsContract.CommonDataKinds.Email.CONTACT_ID)
+          val valCol = c.getColumnIndexOrThrow(ContactsContract.CommonDataKinds.Email.ADDRESS)
+          while (c.moveToNext()) { val id = c.getString(idCol) ?: continue; val item = grouped[id] ?: continue; if (item.email.isBlank()) item.email = c.getString(valCol) ?: "" }
+        }
+      } catch (e: Exception) { error = e.message ?: "permission unavailable" }
+      val entries = grouped.values.map { ContactEntry(it.name, it.phone, it.email) }.filter {
+        query.isBlank() || it.name.lowercase(Locale.ROOT).contains(query) || it.phone.lowercase(Locale.ROOT).contains(query) || it.email.lowercase(Locale.ROOT).contains(query)
+      }
+      contactsHandler.post {
+        if (isFinishing || isDestroyed || generation != contactsGeneration.get() || !::contactsBox.isInitialized) return@post
+        contactsBox.removeAllViews()
+        if (error != null) { contactsBox.addView(tv("Could not read contacts: $error. Open Android App Settings and allow Contacts.", 13f, BAD)); return@post }
+        if (entries.isEmpty()) { contactsBox.addView(tv("No matching contacts found. Check whether contacts are synced to this phone.", 13f, SUB)); return@post }
+        contactsBox.addView(tv("${entries.size} contact(s) · showing up to 100 · stored/read locally", 12f, SUB))
+        entries.take(100).forEach { person ->
+          val c = card(contactsBox)
+          c.addView(tv(person.name, 16f, bold = true))
+          if (person.phone.isNotBlank()) c.addView(tv("☎  ${person.phone}", 13f, SUB))
+          if (person.email.isNotBlank()) c.addView(tv("✉  ${person.email}", 13f, SUB))
+          val actions = LinearLayout(this); actions.gravity = Gravity.CENTER_VERTICAL
+          if (person.phone.isNotBlank()) {
+            actions.addView(btn("Call", SURF2) { startActivity(Intent(Intent.ACTION_DIAL, Uri.parse("tel:" + Uri.encode(person.phone)))) }, LinearLayout.LayoutParams(0, -2, 1f))
+            actions.addView(btn("Message", SURF2) { startActivity(Intent(Intent.ACTION_SENDTO, Uri.parse("smsto:" + Uri.encode(person.phone)))) }, LinearLayout.LayoutParams(0, -2, 1f))
+          }
+          if (person.email.isNotBlank()) actions.addView(btn("Email", SURF2) { startActivity(Intent(Intent.ACTION_SENDTO, Uri.parse("mailto:" + Uri.encode(person.email)))) }, LinearLayout.LayoutParams(0, -2, 1f))
+          c.addView(actions)
+        }
+      }
+    }
+  }
+
   // ---------- SETTINGS ----------
   private val VOICES = listOf("Aoede", "Kore", "Leda", "Zephyr", "Callirrhoe", "Autonoe", "Despina", "Puck", "Charon", "Fenrir", "Orus")
   private val MODELS = listOf("gemini-3.1-flash-live-preview", "gemini-2.5-flash-native-audio-preview-12-2025", "gemini-live-2.5-flash-preview")
@@ -485,7 +697,23 @@ class MainActivity : AppCompatActivity() {
   private fun buildSettings(): View {
     val (sv, root) = page()
     heading(root, "Settings")
-    buildFeatureCards(root)
+
+    val privacy = card(root)
+    val privacyOn = Prefs.on(this, "privacy_mode", true)
+    val privacyLabel = tv("Privacy mode · " + if (privacyOn) "ON" else "OFF", 16f, if (privacyOn) GOOD else WARN, true)
+    privacy.addView(privacyLabel)
+    privacy.addView(tv("ON: Saara locally filters likely personal requests before sending text. OFF: ordinary typed prompts go to Gemini directly. In BOTH modes, contacts, SMS, call history, chat history, Learning, Knowledge, Sheet contents and confidential records are never attached or uploaded. While the mic is ON, microphone audio is streamed to Gemini for live voice replies; mute it anytime.", 12f, SUB))
+    lateinit var privacyToggle: Button
+    privacyToggle = btn(if (privacyOn) "Turn privacy mode OFF" else "Turn privacy mode ON", SURF2) {
+      val next = !Prefs.on(this, "privacy_mode", true)
+      Prefs.plain(this).edit().putBoolean("privacy_mode", next).apply()
+      privacyLabel.text = "Privacy mode · " + if (next) "ON" else "OFF"
+      privacyLabel.setTextColor(if (next) GOOD else WARN)
+      privacyToggle.text = if (next) "Turn privacy mode OFF" else "Turn privacy mode ON"
+      toast(if (next) "Privacy mode ON. Personal requests are filtered locally." else "Privacy mode OFF. Ordinary typed prompts go to Gemini; local databases remain private.")
+    }
+    privacy.addView(privacyToggle)
+    addFeatures(root)
 
     // language priority
     val cl = card(root)
@@ -589,18 +817,29 @@ class MainActivity : AppCompatActivity() {
     super.onRequestPermissionsResult(requestCode, permissions, grantResults)
     if (pendingStart && has(Manifest.permission.RECORD_AUDIO)) { pendingStart = false; startSaara() }
     if (pendingCam && has(Manifest.permission.CAMERA)) { pendingCam = false; if (Bus.running) startService(svc("CAM_START").putExtra("front", camFront)) }
+    if (requestCode == 4) {
+      if (has(Manifest.permission.READ_CONTACTS)) { toast("Contacts access granted"); rebuildContacts() }
+      else {
+        toast("Contacts permission was not granted")
+        if (!shouldShowRequestPermissionRationale(Manifest.permission.READ_CONTACTS)) {
+          contactsHandler.post { if (!isFinishing) AlertDialog.Builder(this).setMessage("Enable Contacts permission in Android App Settings to load your contacts.")
+            .setPositiveButton("Open settings") { _, _ -> startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName"))) }
+            .setNegativeButton("Later", null).show() }
+        }
+      }
+    }
     refresh()
   }
 
   // ---------- live refresh ----------
   private fun refresh() {
     updaters.forEach { it() }
-    val muted = VoiceService.instance?.muted == true
-    statusTv.text = Bus.status + (if (Bus.running && muted) "  •  mic muted" else "") + (if (Bus.camOn) "  •  camera" else "") + (if (Bus.screenOn) "  •  screen" else "")
+    statusTv.text = Bus.status + (if (Bus.camOn) "  •  camera local-only" else "") + (if (Bus.screenOn) "  •  screen local-only" else "")
     startBtn.text = if (Bus.running) "Stop" else "Start"
     startBtn.background = bg(if (Bus.running) 0xFFB3261E.toInt() else ACC2, 20)
-    muteChip.text = if (muted) "🔇 Muted" else "🎤 Mic on"
-    muteChip.background = bg(if (muted) 0xFF5C2B29.toInt() else SURF2, 18)
+    val micOn = VoiceService.instance?.isMicOn() ?: false
+    muteChip.text = if (micOn) "🎤 Mic: ON" else "🎤 Mic: OFF"
+    muteChip.background = bg(if (micOn) ACC2 else SURF2, 18)
     camChip.text = if (Bus.camOn) "📷 Camera: ON" else "📷 Camera"
     camChip.background = bg(if (Bus.camOn) ACC2 else SURF2, 18)
     flipChip.visibility = if (Bus.camOn) View.VISIBLE else View.GONE
@@ -613,8 +852,10 @@ class MainActivity : AppCompatActivity() {
     var changed = false
     for (m in snap) {
       val t = shown[m.id]
-      if (t != null) { val s = fullText(m); if (t.text.toString() != s) { t.text = s; changed = true } }
+      if (t != null) { val s = fmt(m); if (t.text.toString() != s) { t.text = s; changed = true } }
       else if (m.id > lastId) {
+        val prev = snap.lastOrNull { it.id < m.id }
+        if (prev == null || !sameDay(prev.ts, m.ts)) chatList.addView(dateLabel(m.ts), rowLp())
         val (row, tvw) = msgRow(m); chatList.addView(row, rowLp()); shown[m.id] = tvw
         lastId = m.id; if (m.id < firstId) firstId = m.id; changed = true
       }
@@ -623,6 +864,7 @@ class MainActivity : AppCompatActivity() {
     if (changed && nearBottom) chatScroll.post { chatScroll.fullScroll(View.FOCUS_DOWN) }
   }
 
-  override fun onResume() { super.onResume(); visible = true; Bus.listen(busListener); refresh(); Bus.ping() }
+  override fun onResume() { super.onResume(); visible = true; Bus.listen(busListener); refresh(); if (curTab == 3 && has(Manifest.permission.READ_CONTACTS)) scheduleContactsRefresh(); Bus.ping() }
   override fun onPause() { visible = false; Bus.unlisten(busListener); super.onPause() }
+  override fun onDestroy() { contactsHandler.removeCallbacks(contactsDebounce); contactsExecutor.shutdownNow(); knowledgeExecutor.shutdownNow(); super.onDestroy() }
 }

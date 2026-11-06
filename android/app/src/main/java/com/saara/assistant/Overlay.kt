@@ -17,7 +17,7 @@ class Overlay(private val c: Context) {
   private var v: TextView? = null
   private val hideRun = Runnable { hide() }
 
-  fun show(text: String) {
+  fun show(text: String, persistent: Boolean = false) {
     if (!Settings.canDrawOverlays(c)) return
     var t = v
     if (t == null) {
@@ -36,7 +36,8 @@ class Overlay(private val c: Context) {
       v = t
     }
     t.text = text
-    main.removeCallbacks(hideRun); main.postDelayed(hideRun, 7000)
+    main.removeCallbacks(hideRun)
+    if (!persistent) main.postDelayed(hideRun, 7000)
   }
 
   fun hide() {

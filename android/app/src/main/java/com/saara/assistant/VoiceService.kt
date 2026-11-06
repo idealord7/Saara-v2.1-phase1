@@ -21,7 +21,7 @@ import java.util.Date
 import java.util.Locale
 import java.util.concurrent.TimeUnit
 
-/** Talks to Gemini Live directly (no Termux). Mic -> Gemini -> speaker, runs tools natively, can stream camera / screen frames. */
+/** Gemini Live text intelligence with device-local storage. Private mic, camera, screen and notification payloads are not uploaded. */
 class VoiceService : Service() {
   companion object { var instance: VoiceService? = null }
   private val http = OkHttpClient.Builder().pingInterval(20, TimeUnit.SECONDS).build()
@@ -30,7 +30,10 @@ class VoiceService : Service() {
   @Volatile private var ready = false
   @Volatile private var speakingUntil = 0L
   @Volatile var muted = false
-  private var micStarted = false
+  @Volatile private var micStarted = false
+  @Volatile private var micEnabled = true
+  private var micThread: Thread? = null
+  private var audioRecord: AudioRecord? = null
   private var retries = 0
   private var track: AudioTrack? = null
   private val audioQ = java.util.concurrent.LinkedBlockingQueue<ByteArray>()
@@ -41,6 +44,15 @@ class VoiceService : Service() {
   private var gotSpeech = false
   private val main = Handler(Looper.getMainLooper())
   private val busListener: () -> Unit = { updateOverlay() }
+
+  fun isMicOn(): Boolean = micEnabled && micStarted
+  fun toggleMic() {
+    micEnabled = !micEnabled
+    Prefs.plain(this).edit().putBoolean("mic_enabled", micEnabled).apply()
+    if (micEnabled) { if (ready) startMic(); Bus.add("system", "Microphone ON. Your live voice query is sent to Gemini; local contacts and saved records are never attached.", true) }
+    else { stopMic(); Bus.add("system", "Microphone muted.", true) }
+    Bus.ping()
+  }
 
   override fun onBind(i: Intent?): IBinder? = null
 
@@ -73,6 +85,7 @@ class VoiceService : Service() {
     }
     if (running) return START_STICKY
     running = true; instance = this; Bus.running = true
+    micEnabled = Prefs.plain(this).getBoolean("mic_enabled", true)
     migrateFacts(this)
     getSystemService(NotificationManager::class.java).createNotificationChannel(NotificationChannel("saara", "Saara", NotificationManager.IMPORTANCE_LOW))
     fg()
@@ -107,10 +120,15 @@ class VoiceService : Service() {
 
   private fun updateOverlay() {
     if (!running) return
-    if (!Prefs.on(this, "f_overlay", true) || MainActivity.visible || !Settings.canDrawOverlays(this)) { overlay?.hide(); return }
+    if (!Prefs.on(this, "f_overlay", true) || !Settings.canDrawOverlays(this)) { overlay?.hide(); return }
+    if (overlay == null) overlay = Overlay(this)
+    if (Bus.camOn) {
+      overlay?.show("📷 LIVE CAMERA SHARING ON\nCamera is active on this phone. Frames are not uploaded to Gemini.", true)
+      return
+    }
+    if (MainActivity.visible) { overlay?.hide(); return }
     val m = synchronized(Bus) { Bus.msgs.lastOrNull() } ?: return
     val icon = when (m.role) { "you" -> "🧑 "; "saara" -> "✨ "; "tool" -> "⚙️ "; else -> "ℹ️ " }
-    if (overlay == null) overlay = Overlay(this)
     overlay?.show(icon + m.text.takeLast(220))
   }
 
@@ -130,6 +148,44 @@ class VoiceService : Service() {
 
   private fun tellModel(t: String) { if (ready) ws?.send(JSONObject().put("realtimeInput", JSONObject().put("text", t)).toString()) }
 
+  private fun startMic() {
+    if (!running || !ready || !micEnabled || micStarted) return
+    if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+      Bus.add("system", "Microphone permission is missing. Allow Microphone in Android app permissions.", true); return
+    }
+    try {
+      val rate = 16000
+      val min = AudioRecord.getMinBufferSize(rate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
+      val rec = AudioRecord.Builder().setAudioSource(MediaRecorder.AudioSource.VOICE_RECOGNITION)
+        .setAudioFormat(AudioFormat.Builder().setSampleRate(rate).setChannelMask(AudioFormat.CHANNEL_IN_MONO).setEncoding(AudioFormat.ENCODING_PCM_16BIT).build())
+        .setBufferSizeInBytes(maxOf(min, rate)).build()
+      if (rec.state != AudioRecord.STATE_INITIALIZED) { rec.release(); Bus.add("system", "Microphone could not initialize on this phone.", true); return }
+      audioRecord = rec; rec.startRecording(); micStarted = true
+      micThread = Thread {
+        val buf = ByteArray(6400)
+        while (running && micEnabled && micStarted) {
+          val n = try { rec.read(buf, 0, buf.size) } catch (_: Exception) { -1 }
+          if (n > 0 && ready) {
+            val chunk = ByteArray(n); System.arraycopy(buf, 0, chunk, 0, n)
+            val data = Base64.encodeToString(chunk, Base64.NO_WRAP)
+            // ADD this fixed code block:
+val payload = JSONObject().put("realtimeInput", JSONObject().put("audio", JSONObject().put("data", data).put("mime_type", "audio/pcm;rate=16000")))
+ws?.send(payload.toString())
+
+          } else if (n < 0) break
+        }
+      }.also { it.name = "saara-microphone"; it.start() }
+      Bus.add("system", "Microphone is active. Audio is streamed to Gemini for live processing; personal device databases remain local.", true)
+    } catch (e: Exception) { micStarted = false; Bus.add("system", "Microphone error: ${e.message}", true) }
+  }
+
+  private fun stopMic() {
+    micStarted = false
+    try { audioRecord?.stop() } catch (_: Exception) {}
+    try { audioRecord?.release() } catch (_: Exception) {}
+    audioRecord = null; micThread = null
+  }
+
   private fun startCam(front: Boolean) {
     if (!has(Manifest.permission.CAMERA)) { Bus.add("system", "Camera permission missing. Allow it in the Saara app.", true); return }
     val was = Bus.camOn
@@ -138,7 +194,7 @@ class VoiceService : Service() {
     val err = c.start(front)
     if (err != null) { Bus.add("system", err, true); stopCam(false); return }
     Bus.ping()
-    if (!was) { Bus.add("system", "Camera sharing is ON (${if (front) "front" else "back"}).", true); tellModel("[System] The user started sharing their live camera. You now receive video frames about once per second. Use them whenever the user asks what they see. Say only one very short sentence to confirm.") }
+    if (!was) { Bus.add("system", "Camera sharing is ON (${if (front) "front" else "back"}).", true); Bus.add("system", "Camera preview is local-only; camera frames are not sent to Gemini.", true) }
   }
   private fun stopCam(say: Boolean) {
     cam?.stop(); cam = null
@@ -152,7 +208,7 @@ class VoiceService : Service() {
     val err = s.start(code, data)
     if (err != null) { Bus.add("system", err, true); stopScreen(false); return }
     Bus.add("system", "Screen sharing is ON.", true)
-    tellModel("[System] The user started sharing their live screen. You now receive screenshots about once per second. Read them when the user asks about the screen, and combine them with ui_action to act. Say only one very short sentence to confirm.")
+    Bus.add("system", "Screen capture is local-only; screen frames are not sent to Gemini.", true)
   }
   private fun stopScreen(say: Boolean) {
     screen?.stop(); screen = null
@@ -160,11 +216,8 @@ class VoiceService : Service() {
     Bus.ping()
   }
 
-  fun sendFrame(jpeg: ByteArray) {
-    if (!ready) return
-    val v = JSONObject().put("data", Base64.encodeToString(jpeg, Base64.NO_WRAP)).put("mimeType", "image/jpeg")
-    ws?.send(JSONObject().put("realtimeInput", JSONObject().put("video", v)).toString())
-  }
+  /** Privacy mode: camera/screen frames stay on-device and are never uploaded to Gemini. */
+  fun sendFrame(jpeg: ByteArray) { /* intentionally not transmitted */ }
 
   // ---------- Gemini Live connection ----------
   private fun connect() {
@@ -186,6 +239,7 @@ class VoiceService : Service() {
 
   private fun lost(msg: String) {
     ready = false
+    stopMic()
     if (!running) return
     Bus.add("system", msg, true)
     if (++retries > 3) { Bus.add("system", "Stopped after repeated failures. Check API key / model name in Settings.", true); main.post { stopSelf() }; return }
@@ -193,41 +247,29 @@ class VoiceService : Service() {
     main.postDelayed({ connect() }, 3000)
   }
 
-  private fun factsText(): String {
-    val fs = try { Db.get(this).facts() } catch (e: Exception) { emptyList() }
-    val sb = StringBuilder()
-    for (f in fs) { val line = "- [${f.cat}] ${f.text}\n"; if (sb.length + line.length > 3500) break; sb.append(line) }
-    return sb.toString().ifBlank { "(nothing yet)" }
-  }
-
-  private fun setup(): String {
+    private fun setup(): String {
     val p = Prefs.plain(this)
     val model = p.getString("model", "gemini-3.1-flash-live-preview") ?: "gemini-3.1-flash-live-preview"
     val voice = p.getString("voice", "Aoede") ?: "Aoede"
     val now = SimpleDateFormat("EEEE, d MMMM yyyy, HH:mm", Locale.US).format(Date())
     val ins = "You are Saara, an elegant, proactive, warm FEMALE voice assistant (use feminine forms when speaking Hindi, e.g. 'main kar rahi hoon'). Be concise. " + langRule(this) + " " +
       "Current local time: $now. " +
-      "You CAN control this phone with your tools: device_control, ui_action, remember, recall, reply_notification, shop_record, shop_report, schedule_task, list_tasks, cancel_task. When the user asks for an action, call the matching tool yourself. " +
+      "You can use device_control and local task tools for permitted phone actions. Do not request or reveal contacts, SMS, call logs, notifications, local knowledge, learning, chat history, or sheet contents. URL imports are handled locally by the app. Never ask for private data to be pasted into Gemini. " +
       "If a tool result says a feature is OFF or an Android permission is missing, tell the user in one short sentence exactly what to switch on or grant in the Saara app; do not just say you cannot. " +
       // --- autonomous agent behaviour ---
       "AUTONOMY (very important): for any task with several steps (open an app, search, type, send, post, take a photo, answer a call...), complete the WHOLE task yourself by chaining tool calls one after another. " +
-      "Do NOT ask the user anything between steps and never ask them where a button, field or app is. Every ui_action and open_app result already contains the new screen (t=text, id=view id, c=clickable, e=editable, b=bounds): read it, decide the next step, act. " +
-      "If an element is not visible, scroll_down / scroll_up / swipe, try another label or the view id, or tap_xy using the bounds, and retry at least 3 different ways before reporting a problem. " +
-      "To type, tap the field first if needed, then call type. type ADDS to existing text; use replace=true only when asked to overwrite or clear. " +
+      "Do not claim you can inspect the user's screen or local databases. Screen automation content is not sent to Gemini in privacy mode. " +
       "Only ask the user when information is truly missing (which of two contacts, what text to write) or before irreversible/sensitive actions like payments or deleting data. " +
       "Do not narrate each step; when everything is done, say one short sentence with the result. " +
       "Follow the user's command in the simplest way: never make it complicated, never lecture, find a way to get it done. " +
       "Photos: call device_control take_photo (it presses the shutter by itself; text=front for selfie). Calls: answer_call / end_call. " +
-      "Incoming messages: when you get a [Notification ...] message, immediately call reply_notification with the key and a short natural reply in the sender's language; do not speak it aloud and do not ask permission. " +
-      "Scheduled tasks: when you get a [Scheduled task] message, do it now and say one short sentence. " +
+      "Notifications and scheduled-task text are private local data and are never forwarded to Gemini. " +
       // --- learning ---
-      "SELF-IMPROVEMENT: keep learning the user. Whenever they state a preference, habit, routine, a person's name/relationship, correct you, or show HOW they like a task done, quietly call remember(fact, category) in the same turn without announcing it. " +
-      "Before doing a repeated task, apply what you know; call recall(query) if you need older memory. Never repeat a mistake the user corrected. " +
+      "Do not store personal facts in Gemini. The app stores Learning and Knowledge locally on the phone. " +
       // --- shop ---
-      "SHOP LEDGER: the user is a shop owner. When they mention buying stock (purchase price), selling (sale price), a cancelled or returned order, or a product price, call shop_record immediately. For questions about prices, profit, stock bought/sold or cancellations call shop_report. " +
-      // --- vision ---
-      "VISION: when the user shares the camera or screen you receive live frames about once per second; describe or use them whenever asked. " +
-      "What you have learned about the user so far:\n" + factsText()
+      "Do not ask for private shop ledger details. Local ledger data is not sent to Gemini. " +
+      "PRIVACY: Never ask for, reveal, infer, or request private local data. Contacts, SMS, call logs, chat history, learning facts, knowledge base, and sheet contents are stored only on this device. No private database content is provided in this session. Do not claim to have read local private data. " +
+      "Camera and screen frames are not sent to Gemini in privacy mode. Links and spreadsheet data are fetched and stored locally by the app, not by Gemini."
     val s = JSONObject()
       .put("model", "models/$model")
       .put("generationConfig", JSONObject().put("responseModalities", JSONArray().put("AUDIO"))
@@ -241,7 +283,7 @@ class VoiceService : Service() {
 
   private fun handle(s: String) {
     val m = try { JSONObject(s) } catch (e: Exception) { return }
-    if (m.has("setupComplete")) { ready = true; retries = 0; Bus.setStatus("Listening"); Bus.add("system", "Connected. Speak or type.", true); startMic() }
+    if (m.has("setupComplete")) { ready = true; retries = 0; Bus.setStatus("Connected · Gemini active"); if (micEnabled) startMic() else Bus.add("system", "Gemini connected. Microphone is muted.", true) }
     if (m.has("error")) Bus.add("system", "Gemini error: " + m.optString("error"), true)
     val sc = m.optJSONObject("serverContent")
     if (sc != null) {
@@ -268,7 +310,7 @@ class VoiceService : Service() {
         Bus.add("tool", "$name $args", true)
         val r = Tools.run(this, name, args)
         Bus.add("tool", "→ $r", true)
-        out.put(JSONObject().put("id", c.optString("id")).put("name", name).put("response", JSONObject().put("result", r)))
+        out.put(JSONObject().put("id", c.optString("id")).put("name", name).put("response", JSONObject().put("result", "Action handled on device. No local data or tool output is shared with Gemini.")))
       }
       ws?.send(JSONObject().put("toolResponse", JSONObject().put("functionResponses", out)).toString())
     }.start()
@@ -281,70 +323,40 @@ class VoiceService : Service() {
   }
 
   fun sendText(t: String) {
+    val q = t.lowercase(Locale.ROOT)
+    val sensitivePhrase = Prefs.on(this, "privacy_mode", true) && listOf(
+      "my contact", "my contacts", "my phone", "my address", "call history", "call log", "sms history", "my messages", "message from", "my email", "my whatsapp", "my saved learning", "my knowledge", "my sheet", "my spreadsheet", "my call", "dial ", "send sms", "remind me", "schedule ",
+      "আমার নম্বর", "আমার কন্টাক্ট", "আমার যোগাযোগ", "আমার মেসেজ", "আমার কল", "আমার ঠিকানা", "ব্যাংক অ্যাকাউন্ট", "मेरा नंबर", "मेरे संपर्क", "मेरे मैसेज", "मेरी कॉल हिस्ट्री", "मेरा पता", "बैंक खाता"
+    ).any { q.contains(it) }
+    val sensitive = sensitivePhrase || listOf("phone number", "home address", "bank account", "account number").any { q.contains(it) } ||
+      Regex("\\b[+0-9][0-9 ()-]{7,}\\b").containsMatchIn(t) ||
+      Regex("[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}", RegexOption.IGNORE_CASE).containsMatchIn(t)
     Bus.add("you", t, true)
+    if (sensitive) {
+      Bus.add("saara", "This request appears to involve private information or a personal device action. I kept it on this phone and did not send it to Gemini.", true)
+      return
+    }
     try { Db.get(this).usage("command", "turn") } catch (_: Exception) {}
-    ws?.send(JSONObject().put("realtimeInput", JSONObject().put("text", t)).toString())
+    if (ready) ws?.send(JSONObject().put("realtimeInput", JSONObject().put("text", t)).toString())
+    else Bus.add("saara", "Gemini is not connected yet. Check the API key and connection in Settings.", true)
   }
 
   /** Fired by the scheduler. Returns false when Saara is not connected (the caller then shows a notification). */
   fun runScheduled(text: String): Boolean {
-    if (!ready) return false
-    Bus.add("system", "Scheduled task: $text", true)
-    ws?.send(JSONObject().put("realtimeInput", JSONObject().put("text", "[Scheduled task] $text . Do it now.")).toString())
-    return true
+    Bus.add("system", "Scheduled task fired at ${SimpleDateFormat("dd MMM yyyy, hh:mm:ss a", Locale.getDefault()).format(Date())}: $text", true)
+    // Scheduled task text can contain private details; never forward it to Gemini.
+    return false
   }
 
   fun onNotification(key: String, pkg: String, title: String, text: String) {
-    if (!ready) { Bus.add("system", "Message from $title ignored: Saara is not connected yet.", true); return }
-    Bus.add("system", "Notification from $title: $text", true)
-    ws?.send(JSONObject().put("realtimeInput", JSONObject().put("text",
-      "[Notification key=$key app=$pkg from=$title] $text . Now call the reply_notification tool with key=$key and a short, polite, context-aware reply in the sender's language. Do not ask the user and do not say the reply aloud.")).toString())
+    // Notification content is private local data. Never forward it to Gemini.
+    Bus.add("system", "A notification arrived from $pkg. Its contents were kept on this device.", true)
   }
 
-  fun onIncomingCall() {
-    if (!ready) {
-      Bus.add("system", "Incoming call detected, but Saara is not connected.", true)
-      return
-    }
-    Bus.add("system", "Incoming call detected. Asking whether to answer.", true)
-    tellModel("[System] An incoming phone call has arrived. Ask the user by voice whether they want to answer. Wait for an explicit spoken yes or no. Never answer automatically.")
-  }
-
-  private fun startMic() {
-    if (micStarted) return
-    micStarted = true
-    Thread {
-      var rec: AudioRecord? = null
-      try {
-        val min = AudioRecord.getMinBufferSize(16000, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
-        if (min <= 0) throw IllegalStateException("microphone buffer unavailable")
-        val r = AudioRecord(MediaRecorder.AudioSource.VOICE_COMMUNICATION, 16000, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, min * 2)
-        rec = r
-        if (r.state != AudioRecord.STATE_INITIALIZED) throw IllegalStateException("microphone could not be opened")
-        if (android.media.audiofx.AcousticEchoCanceler.isAvailable()) android.media.audiofx.AcousticEchoCanceler.create(r.audioSessionId)?.enabled = true
-        if (android.media.audiofx.NoiseSuppressor.isAvailable()) android.media.audiofx.NoiseSuppressor.create(r.audioSessionId)?.enabled = true
-        val buf = ByteArray(3200)
-        r.startRecording()
-        while (running) {
-          val n = r.read(buf, 0, buf.size)
-          if (n < 0) break
-          if (n > 0 && ready && !muted && System.currentTimeMillis() > speakingUntil + 600) {
-            val a = JSONObject().put("data", Base64.encodeToString(buf, 0, n, Base64.NO_WRAP)).put("mimeType", "audio/pcm;rate=16000")
-            ws?.send(JSONObject().put("realtimeInput", JSONObject().put("audio", a)).toString())
-          }
-        }
-      } catch (e: Exception) {
-        Bus.add("system", "Microphone error: ${e.message}", true)
-      } finally {
-        micStarted = false
-        try { rec?.stop() } catch (_: Exception) {}
-        try { rec?.release() } catch (_: Exception) {}
-      }
-    }.start()
-  }
 
   override fun onDestroy() {
     running = false; ready = false
+    stopMic()
     Bus.unlisten(busListener)
     audioQ.clear()
     cam?.stop(); cam = null; Bus.camOn = false

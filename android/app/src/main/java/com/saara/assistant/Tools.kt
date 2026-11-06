@@ -11,6 +11,11 @@ import android.net.Uri
 import android.os.Build
 import android.provider.ContactsContract
 import android.provider.MediaStore
+import android.text.Html
+import okhttp3.OkHttpClient
+import okhttp3.Dns
+import okhttp3.Request
+import java.util.concurrent.TimeUnit as JTimeUnit
 import android.provider.Settings
 import android.telecom.TelecomManager
 import android.telephony.SmsManager
@@ -20,21 +25,18 @@ import org.json.JSONObject
 import java.util.concurrent.Callable
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
+import java.net.InetAddress
+import java.net.UnknownHostException
 import java.util.concurrent.TimeoutException
 
 /** Everything Saara can do on the phone, natively (no Termux needed). */
 object Tools {
   fun declarations(): JSONArray = JSONArray("""[{"functionDeclarations":[
-{"name":"device_control","description":"Phone controls. action is one of: torch_on, torch_off, volume_up, volume_down, volume_set (level 0-100), open_app (target = app name, e.g. WhatsApp, WhatsApp Business, Instagram, Camera), open_camera, take_photo (opens the camera AND presses the shutter by itself; text = front for a selfie), call (target = contact name or number), answer_call (answers the ringing incoming call), end_call, reject_call, sms (target + text), wifi_panel, bluetooth_panel (opens the system panel; then use ui_action tap_text to flip the switch). open_app returns the new screen contents.","parameters":{"type":"OBJECT","properties":{"action":{"type":"STRING"},"target":{"type":"STRING"},"text":{"type":"STRING"},"level":{"type":"NUMBER"}},"required":["action"]}},
-{"name":"ui_action","description":"Control the screen via accessibility. EVERY op returns the new screen contents, so you can keep going without asking the user. op is one of: dump_ui (read all screen elements with bounds), tap_text (text = visible label, content description or view id), tap_xy (x,y from bounds), long_press (text or x,y), type (text; ADDS to what is already in the field, set replace=true to overwrite), clear_text, enter (keyboard Enter/Search/Send), swipe (direction up/down/left/right, or x,y,x2,y2), scroll_down, scroll_up, wait (ms), back, home, recents, notifications, shutter (press the camera shutter), flip_camera.","parameters":{"type":"OBJECT","properties":{"op":{"type":"STRING"},"text":{"type":"STRING"},"x":{"type":"NUMBER"},"y":{"type":"NUMBER"},"x2":{"type":"NUMBER"},"y2":{"type":"NUMBER"},"direction":{"type":"STRING"},"ms":{"type":"NUMBER"},"replace":{"type":"BOOLEAN"}},"required":["op"]}},
-{"name":"remember","description":"Save something you learned about the user so you keep improving: a preference, habit, routine, person/relationship, a correction, or HOW they like tasks done. Call it quietly whenever the user reveals such a thing; do not announce it. category = preference | habit | routine | person | correction | command_style | shop | general.","parameters":{"type":"OBJECT","properties":{"fact":{"type":"STRING"},"category":{"type":"STRING"}},"required":["fact"]}},
-{"name":"recall","description":"Search everything you have learned about the user (older than the list in your instructions). query = keywords.","parameters":{"type":"OBJECT","properties":{"query":{"type":"STRING"}},"required":["query"]}},
+{"name":"device_control","description":"Phone controls. action is one of: torch_on, torch_off, volume_up, volume_down, volume_set (level 0-100), open_app (target = app name, e.g. WhatsApp, WhatsApp Business, Instagram, Camera), open_camera, take_photo (opens the camera AND presses the shutter by itself; text = front for a selfie), call (target = contact name or number), answer_call (answers the ringing incoming call), end_call, reject_call, sms (target + text), wifi_panel, bluetooth_panel (opens the system panel).","parameters":{"type":"OBJECT","properties":{"action":{"type":"STRING"},"target":{"type":"STRING"},"text":{"type":"STRING"},"level":{"type":"NUMBER"}},"required":["action"]}},
 {"name":"shop_record","description":"Shop-owner ledger. kind = purchase (price the user BOUGHT stock at), sale (price SOLD at), cancellation (cancelled / returned order, price = refunded unit price), price (list or MRP price note). item, price per unit, qty, party = supplier or customer name, note.","parameters":{"type":"OBJECT","properties":{"item":{"type":"STRING"},"kind":{"type":"STRING"},"price":{"type":"NUMBER"},"qty":{"type":"NUMBER"},"party":{"type":"STRING"},"note":{"type":"STRING"}},"required":["item","kind","price"]}},
-{"name":"shop_report","description":"Read the shop ledger: purchase / sale prices, quantities, cancellations and margin per item. item optional (empty = all items).","parameters":{"type":"OBJECT","properties":{"item":{"type":"STRING"}}}},
 {"name":"schedule_task","description":"Schedule a task or reminder for later. text = what to do/say when it fires. Give in_minutes OR at (HH:mm 24h, or yyyy-MM-dd HH:mm). repeat = none | hourly | daily | weekly.","parameters":{"type":"OBJECT","properties":{"text":{"type":"STRING"},"in_minutes":{"type":"NUMBER"},"at":{"type":"STRING"},"repeat":{"type":"STRING"}},"required":["text"]}},
 {"name":"list_tasks","description":"List scheduled tasks.","parameters":{"type":"OBJECT","properties":{}}},
-{"name":"cancel_task","description":"Cancel a scheduled task by id.","parameters":{"type":"OBJECT","properties":{"id":{"type":"NUMBER"}},"required":["id"]}},
-{"name":"reply_notification","description":"Reply to an incoming notification (WhatsApp, WhatsApp Business, Telegram ...) by its key.","parameters":{"type":"OBJECT","properties":{"key":{"type":"STRING"},"text":{"type":"STRING"}},"required":["key","text"]}}
+{"name":"cancel_task","description":"Cancel a scheduled task by id.","parameters":{"type":"OBJECT","properties":{"id":{"type":"NUMBER"}},"required":["id"]}}
 ]}]""")
 
   fun shopReport(c: Context, item: String): String {
@@ -56,7 +58,58 @@ object Tools {
     return sb.toString().take(3500)
   }
 
-  fun off(n: String) = "$n is switched OFF in the Saara app. Ask the user to turn it on in the Settings section of the app."
+
+  /** Fetch public web pages and public Google Sheets without blocking the UI. Call from a worker thread. */
+  fun fetchUrlText(rawUrl: String): String {
+    val raw = rawUrl.trim()
+    if (raw.isBlank()) return "error: URL is empty"
+    val parsed = try { Uri.parse(raw) } catch (_: Exception) { return "error: invalid URL" }
+    val scheme = parsed.scheme?.lowercase()
+    val host = parsed.host?.lowercase()
+    if (scheme !in listOf("http", "https") || host.isNullOrBlank()) return "error: only valid http/https links are supported"
+    if (host == "localhost" || host.endsWith(".local") || host == "127.0.0.1" || host.startsWith("10.") || host.startsWith("192.168.") || host.startsWith("169.254.") || host.matches(Regex("^172\\.(1[6-9]|2[0-9]|3[01])\\..*"))) {
+      return "error: local/private network URLs are blocked"
+    }
+    var target = raw
+    val sheet = Regex("/spreadsheets/d/([A-Za-z0-9_-]+)").find(parsed.encodedPath ?: "")
+    if (sheet != null && host.contains("google.com")) {
+      val fragmentGid = Regex("(?:^|&)gid=([0-9]+)").find(parsed.fragment ?: "")?.groupValues?.get(1)
+      val gid = parsed.getQueryParameter("gid") ?: fragmentGid ?: "0"
+      target = "https://docs.google.com/spreadsheets/d/${sheet.groupValues[1]}/export?format=csv&gid=${Uri.encode(gid)}"
+    }
+    val client = OkHttpClient.Builder().followRedirects(true).callTimeout(25, JTimeUnit.SECONDS)
+      .dns(object : Dns {
+        override fun lookup(hostname: String): List<InetAddress> {
+          val addresses: List<InetAddress> = InetAddress.getAllByName(hostname).toList()
+          if (addresses.isEmpty() || addresses.any { address ->
+              address.isAnyLocalAddress || address.isLoopbackAddress || address.isLinkLocalAddress ||
+                address.isSiteLocalAddress || address.isMulticastAddress
+            }) {
+            throw UnknownHostException("private or local network address blocked")
+          }
+          return addresses
+        }
+      }).build()
+    return try {
+      val request = Request.Builder().url(target).header("User-Agent", "SaaraAndroid/2.1").get().build()
+      client.newCall(request).execute().use { response ->
+        if (!response.isSuccessful) return "error: server returned HTTP ${response.code}. The page may require sign-in or sharing permission."
+        val body = response.body?.string()?.take(2_000_000).orEmpty()
+        if (body.isBlank()) return "error: the page returned no readable content"
+        if (sheet != null && (body.contains("accounts.google.com", true) || body.contains("Sign in", true) && body.contains("<html", true))) {
+          return "error: this Google Sheet is private. Change General access to 'Anyone with the link' or connect Google OAuth."
+        }
+        val type = response.header("Content-Type", "").orEmpty().lowercase()
+        val text = if (type.contains("text/html") || body.contains("<html", true) || body.contains("<!doctype html", true)) {
+          val clean = body.replace(Regex("(?is)<(script|style|noscript)[^>]*>.*?</\\1>"), " ")
+          Html.fromHtml(clean, Html.FROM_HTML_MODE_LEGACY).toString().replace(Regex("[\\t ]+"), " ").replace(Regex("\\n{3,}"), "\\n\\n").trim()
+        } else body.trim()
+        if (text.isBlank()) "error: no readable text was found" else "Fetched from $raw\\n\\n" + text.take(12000)
+      }
+    } catch (e: Exception) { "error: ${e.message ?: "could not fetch URL"}. Check internet access and whether the page is public." }
+  }
+
+  fun off(n: String) = "$n is switched OFF in the Saara app. Ask the user to turn it on in the Features section of the app."
   fun need(n: String) = "Android permission missing: $n. Ask the user to tap the Grant button for it in the Saara app."
   private fun has(c: Context, p: String) = ContextCompat.checkSelfPermission(c, p) == PackageManager.PERMISSION_GRANTED
 
@@ -77,6 +130,7 @@ object Tools {
       "list_tasks" -> Scheduler.list(c)
       "cancel_task" -> { Scheduler.cancel(c, a.optLong("id")); "cancelled" }
       "reply_notification" -> if (!Prefs.on(c, "f_notif", false)) off("Notification auto-reply") else SaaraNotifications.reply(a.optString("key"), a.optString("text"))
+      "fetch_url" -> fetchUrlText(a.optString("url"))
       else -> "unknown tool"
     }
   } catch (e: Exception) { "error: ${e.message}" }

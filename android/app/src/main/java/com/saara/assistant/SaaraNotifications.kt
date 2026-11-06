@@ -12,6 +12,7 @@ class SaaraNotifications : NotificationListenerService() {
     private val cache = LinkedHashMap<String, Notification.Action>()
     private val lastReply = HashMap<String, Long>()
     private val sentTexts = ArrayList<String>()
+    @Volatile private var lastKey: String? = null
     @Volatile private var svc: SaaraNotifications? = null
 
     /** Apps that are auto-replied when the "names" list is left empty. */
@@ -27,15 +28,14 @@ class SaaraNotifications : NotificationListenerService() {
       return null
     }
 
-    /** Only ever matches the exact notification key, so a reply can never go to the wrong chat. */
     private fun scan(key: String): Notification.Action? = try {
-      svc?.activeNotifications?.filter { it.key == key }
+      svc?.activeNotifications?.filter { it.key == key || it.packageName in MSG_APPS }
         ?.sortedByDescending { it.postTime }?.firstNotNullOfOrNull { replyAction(it.notification) }
     } catch (e: Exception) { null }
 
     fun reply(key: String, text: String): String {
-      val a = synchronized(cache) { cache[key] } ?: scan(key)
-        ?: return "no reply button found for that notification (it may have been dismissed). Do not retry."
+      val cached = synchronized(cache) { cache[key] ?: lastKey?.let { cache[it] } }
+      val a = cached ?: scan(key) ?: return "no reply button found for that notification (it may have been dismissed). Do not retry."
       val ri = a.remoteInputs?.firstOrNull() ?: return "no remote input"
       val ctx = svc ?: return "Notification access is not active. Ask the user to enable Notification access in the Saara app."
       val i = Intent(); val b = Bundle().apply { putCharSequence(ri.resultKey, text) }
@@ -90,7 +90,7 @@ class SaaraNotifications : NotificationListenerService() {
       lastReply[title] = now
     }
     synchronized(cache) {
-      cache[sbn.key] = act
+      cache[sbn.key] = act; lastKey = sbn.key
       while (cache.size > 40) cache.remove(cache.keys.first())
     }
     val vs = VoiceService.instance
