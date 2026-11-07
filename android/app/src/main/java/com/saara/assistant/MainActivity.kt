@@ -740,16 +740,16 @@ class MainActivity : AppCompatActivity() {
     val privacyLabel = tv("Privacy mode · " + if (privacyOn) "ON" else "OFF", 16f, if (privacyOn) GOOD else WARN, true)
     privacy.addView(privacyLabel)
     privacy.addView(tv("ON: Saara locally filters likely personal requests before sending text. OFF: ordinary typed prompts go to Gemini directly. In BOTH modes, contacts, SMS, call history, chat history, Learning, Knowledge, Sheet contents and confidential records are never attached or uploaded. While the mic is ON, microphone audio is streamed to Gemini for live voice replies; mute it anytime. Live camera and screen frames are sent to Gemini only while sharing is ON, regardless of privacy mode; manual sharing stays on until you stop it, while sharing Saara requests for a task stops automatically when that task ends. While Screen automation is ON, tool results may include current screen text so Saara can finish the task; private databases stay local. Task self-learning stores tool steps on this phone and may send only short task-step hints with numbers and emails redacted; it never sends contacts, messages, ledger data, or screen text.", 12f, SUB))
-    lateinit var privacyToggle: Button
+    var privacyToggle: Button? = null
     privacyToggle = btn(if (privacyOn) "Turn privacy mode OFF" else "Turn privacy mode ON", SURF2) {
       val next = !Prefs.on(this, "privacy_mode", true)
       Prefs.plain(this).edit().putBoolean("privacy_mode", next).apply()
       privacyLabel.text = "Privacy mode · " + if (next) "ON" else "OFF"
       privacyLabel.setTextColor(if (next) GOOD else WARN)
-      privacyToggle.text = if (next) "Turn privacy mode OFF" else "Turn privacy mode ON"
+      privacyToggle?.text = if (next) "Turn privacy mode OFF" else "Turn privacy mode ON"
       toast(if (next) "Privacy mode ON. Personal requests are filtered locally." else "Privacy mode OFF. Ordinary typed prompts go to Gemini; local databases remain private.")
     }
-    privacy.addView(privacyToggle)
+    privacy.addView(privacyToggle!!)
     addFeatures(root)
 
     // language priority
@@ -826,15 +826,15 @@ class MainActivity : AppCompatActivity() {
       "speech" to "Phone recognizer"
     )
     fun currentEngine() = Prefs.plain(this).getString("wake_engine", "auto") ?: "auto"
-    lateinit var engineBtn: Button
+    var engineBtn: Button? = null
     engineBtn = btn("Wake engine: ${engineNames[currentEngine()]}", SURF2) {
       val next = engineOrder[(engineOrder.indexOf(currentEngine()).coerceAtLeast(0) + 1) % engineOrder.size]
       Prefs.plain(this).edit().putString("wake_engine", next).apply()
-      engineBtn.text = "Wake engine: ${engineNames[next]}"
+      engineBtn?.text = "Wake engine: ${engineNames[next]}"
       toast("Wake engine: ${engineNames[next]}. Stop and Start Saara to apply.")
       VoiceService.instance?.refreshWake()
     }
-    cw.addView(engineBtn, lp1)
+    cw.addView(engineBtn!!, lp1)
     val trainedModel = WakeVerifier.exists(this)
     val trainBtn = btn(if (trainedModel) "Retrain \"Hey Saara\" on this phone" else "Train \"Hey Saara\" on this phone", SURF2) {
       if (!has(Manifest.permission.RECORD_AUDIO)) {
