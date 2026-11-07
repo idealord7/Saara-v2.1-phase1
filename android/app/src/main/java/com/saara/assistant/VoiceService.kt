@@ -50,15 +50,22 @@ class VoiceService : Service() {
   fun isMicOn(): Boolean = micEnabled && micStarted
   fun isWakeOn(): Boolean = wakeActive && !micStarted
   fun toggleMic() {
-    micEnabled = !micEnabled
-    Prefs.plain(this).edit().putBoolean("mic_enabled", micEnabled).apply()
-    if (micEnabled) {
+    if (!micEnabled) {
+      micEnabled = true
+      Prefs.plain(this).edit().putBoolean("mic_enabled", true).apply()
       if (ready) {
         if (wakeOn()) startWake() else startMic()
       }
       Bus.add("system", if (wakeOn()) "Microphone armed. Say \"Hey Saara\" to talk." else "Microphone ON. Your live voice query is sent to Gemini; local contacts and saved records are never attached.", true)
+    } else if (wakeActive && !micStarted) {
+      stopWake()
+      Bus.add("system", "Microphone ON for this turn. Your live voice query is sent to Gemini.", true)
+      startMic()
     } else {
+      micEnabled = false
+      Prefs.plain(this).edit().putBoolean("mic_enabled", false).apply()
       stopWake(); stopMic(); Bus.add("system", "Microphone muted.", true)
+      if (ready) Bus.setStatus("Connected · microphone muted")
     }
     Bus.ping()
   }
@@ -229,6 +236,7 @@ ws?.send(payload.toString())
         }
       }.also { it.name = "saara-microphone"; it.start() }
       Bus.add("system", "Microphone is active. Audio is streamed to Gemini for live processing; personal device databases remain local.", true)
+      Bus.setStatus("Connected · microphone ON")
     } catch (e: Exception) { micStarted = false; Bus.add("system", "Microphone error: ${e.message}", true) }
   }
 
@@ -336,7 +344,7 @@ ws?.send(payload.toString())
       "Do not ask for private shop ledger details. Local ledger data is not sent to Gemini. " +
       "PRIVACY: Never ask for, reveal, infer, or request private local data. Contacts, SMS, call logs, chat history, learning facts, knowledge base, and sheet contents are stored only on this device. No private database content is provided in this session. Do not claim to have read local private data. " +
       "Live camera and screen frames are sent to Gemini only while the user turns camera or screen sharing ON; the user can turn them off at any time. Links and spreadsheet data are fetched and stored locally by the app, not by Gemini. " +
-      if (taskMemory.isBlank()) "" else "The short task-memory hints below contain only tool names and outcomes; they do not contain contacts, messages, ledger data, or screen text.\n$taskMemory"
+      if (taskMemory.isBlank()) "" else "The short task-memory hints below contain goal names, tool names and outcomes with numbers/emails redacted; they do not contain contacts, messages, ledger data, or screen text.\n$taskMemory"
     val s = JSONObject()
       .put("model", "models/$model")
       .put("generationConfig", JSONObject().put("responseModalities", JSONArray().put("AUDIO"))
