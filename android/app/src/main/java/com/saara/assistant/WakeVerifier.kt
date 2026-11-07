@@ -103,13 +103,13 @@ class WakeVerifier(
       require(d > 0)
 
       val mu = FloatArray(d)
-      for ((x, _) in samples) for (j in 0 until d) mu[j] += x[j]
-      for (j in 0 until d) mu[j] /= n
+      for ((x, _) in samples) for (j in 0 until d) mu[j] = mu[j] + x[j]
+      for (j in 0 until d) mu[j] = mu[j] / n
 
       val sigma = FloatArray(d)
       for ((x, _) in samples) for (j in 0 until d) {
         val dv = x[j] - mu[j]
-        sigma[j] += dv * dv
+        sigma[j] = sigma[j] + dv * dv
       }
       for (j in 0 until d) sigma[j] = sqrt(sigma[j] / n).coerceAtLeast(1e-3f)
 
@@ -128,10 +128,10 @@ class WakeVerifier(
           for (j in 0 until d) z += w[j] * xs[i][j]
           val p = 1f / (1f + exp(-z))
           val e = p - ys[i]
-          for (j in 0 until d) gw[j] += e * xs[i][j]
+          for (j in 0 until d) gw[j] = gw[j] + e * xs[i][j]
           gb += e
         }
-        for (j in 0 until d) w[j] -= lr * (gw[j] / n + l2 * w[j])
+        for (j in 0 until d) w[j] = w[j] - lr * (gw[j] / n + l2 * w[j])
         b -= lr * gb / n
       }
       return WakeVerifier(w, b, mu, sigma)
