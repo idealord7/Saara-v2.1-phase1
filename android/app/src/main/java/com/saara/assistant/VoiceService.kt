@@ -615,6 +615,7 @@ ws?.send(payload.toString())
         armScreenAuto(6000L)
         // Short follow-up window, then hand the mic back to the offline wake word.
         armSleep(20_000L)
+        refreshWake()
         if (gotSpeech) { gotSpeech = false; try { Db.get(this).usage("command", "turn") } catch (_: Exception) {} }
       }
     }
@@ -638,6 +639,7 @@ ws?.send(payload.toString())
 
   private fun play(pcm: ByteArray) {
     if (track == null) return
+    if (speakingUntil <= System.currentTimeMillis()) { stopWake(); stopMic() }
     speakingUntil = maxOf(speakingUntil, System.currentTimeMillis()) + pcm.size / 48
     audioQ.offer(pcm)
   }
