@@ -8,7 +8,7 @@ if ! command -v gradle >/dev/null 2>&1; then
 fi
 if [ -z "${ANDROID_HOME:-}" ] || [ ! -d "$ANDROID_HOME/platforms" ]; then
   echo "Android SDK is not configured. Set ANDROID_HOME to a valid Android SDK directory first."
-  echo "This project targets compileSdk 35 and requires Android build-tools/platform 35."
+  echo "This project targets compileSdk 34 and requires Android build-tools/platform 34."
   exit 1
 fi
 gradle assembleDebug --no-daemon
