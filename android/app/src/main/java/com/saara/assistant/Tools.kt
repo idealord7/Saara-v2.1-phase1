@@ -32,11 +32,21 @@ import java.util.concurrent.TimeoutException
 /** Everything Saara can do on the phone, natively (no Termux needed). */
 object Tools {
   fun declarations(): JSONArray = JSONArray("""[{"functionDeclarations":[
-{"name":"device_control","description":"Phone controls. action is one of: torch_on, torch_off, volume_up, volume_down, volume_set (level 0-100), open_app (target = app name, e.g. WhatsApp, WhatsApp Business, Instagram, Camera), open_camera, take_photo (opens the camera AND presses the shutter by itself; text = front for a selfie), call (target = contact name or number), answer_call (answers the ringing incoming call), end_call, reject_call, sms (target + text), wifi_panel, bluetooth_panel (opens the system panel).","parameters":{"type":"OBJECT","properties":{"action":{"type":"STRING"},"target":{"type":"STRING"},"text":{"type":"STRING"},"level":{"type":"NUMBER"}},"required":["action"]}},
+{"name":"device_control","description":"Phone controls. action is one of: torch_on, torch_off, volume_up, volume_down, volume_set (level 0-100), open_app (target = app name, e.g. WhatsApp, WhatsApp Business, Instagram, Camera), open_camera, take_photo (opens the camera AND presses the shutter by itself; text = front for a selfie), call (target = contact name or number), answer_call (answers the ringing incoming call), end_call, reject_call, sms (target + text), wifi_panel, bluetooth_panel (opens the system panel; then use ui_action tap_text to flip the switch). open_app returns the new screen contents.","parameters":{"type":"OBJECT","properties":{"action":{"type":"STRING"},"target":{"type":"STRING"},"text":{"type":"STRING"},"level":{"type":"NUMBER"}},"required":["action"]}},
+{"name":"ui_action","description":"Control the screen via accessibility. EVERY op returns the new screen contents, so you can keep going without asking the user. op is one of: dump_ui (read all screen elements with bounds), tap_text (text = visible label, content description or view id), tap_xy (x,y from bounds), long_press (text or x,y), type (text; ADDS to what is already in the field, set replace=true to overwrite), clear_text, enter (keyboard Enter/Search/Send), swipe (direction up/down/left/right, or x,y,x2,y2), scroll_down, scroll_up, wait (ms), back, home, recents, notifications, shutter (press the camera shutter), flip_camera.","parameters":{"type":"OBJECT","properties":{"op":{"type":"STRING"},"text":{"type":"STRING"},"x":{"type":"NUMBER"},"y":{"type":"NUMBER"},"x2":{"type":"NUMBER"},"y2":{"type":"NUMBER"},"direction":{"type":"STRING"},"ms":{"type":"NUMBER"},"replace":{"type":"BOOLEAN"}},"required":["op"]}},
+{"name":"remember","description":"Save something you learned about the user so you keep improving: a preference, habit, routine, person/relationship, a correction, or HOW they like tasks done. Call it quietly whenever the user reveals such a thing; do not announce it. category = preference | habit | routine | person | correction | command_style | shop | general.","parameters":{"type":"OBJECT","properties":{"fact":{"type":"STRING"},"category":{"type":"STRING"}},"required":["fact"]}},
+{"name":"recall","description":"Search everything you have learned about the user (older than the list in your instructions). query = keywords.","parameters":{"type":"OBJECT","properties":{"query":{"type":"STRING"}},"required":["query"]}},
+{"name":"remember_task","description":"Save which tool steps worked for a repeated mobile task so future attempts improve. goal = the task, method = concise working steps. Never include contacts, messages, ledger data, URLs, or screen text.","parameters":{"type":"OBJECT","properties":{"goal":{"type":"STRING"},"method":{"type":"STRING"}},"required":["goal","method"]}},
+{"name":"recall_task","description":"Recall which tool steps worked or failed for a similar mobile task. Stored locally on this phone.","parameters":{"type":"OBJECT","properties":{"query":{"type":"STRING"}},"required":["query"]}},
+{"name":"request_screen_share","description":"Ask Android for screen-capture permission and start live screen sharing when a task needs to see the current screen. The user sees a permission prompt and must tap Allow.","parameters":{"type":"OBJECT","properties":{}}},
+{"name":"stop_screen_share","description":"Stop live screen sharing when the task no longer needs to see the screen.","parameters":{"type":"OBJECT","properties":{}}},
 {"name":"shop_record","description":"Shop-owner ledger. kind = purchase (price the user BOUGHT stock at), sale (price SOLD at), cancellation (cancelled / returned order, price = refunded unit price), price (list or MRP price note). item, price per unit, qty, party = supplier or customer name, note.","parameters":{"type":"OBJECT","properties":{"item":{"type":"STRING"},"kind":{"type":"STRING"},"price":{"type":"NUMBER"},"qty":{"type":"NUMBER"},"party":{"type":"STRING"},"note":{"type":"STRING"}},"required":["item","kind","price"]}},
+{"name":"shop_report","description":"Read the shop ledger: purchase / sale prices, quantities, cancellations and margin per item. item optional (empty = all items).","parameters":{"type":"OBJECT","properties":{"item":{"type":"STRING"}}}},
 {"name":"schedule_task","description":"Schedule a task or reminder for later. text = what to do/say when it fires. Give in_minutes OR at (HH:mm 24h, or yyyy-MM-dd HH:mm). repeat = none | hourly | daily | weekly.","parameters":{"type":"OBJECT","properties":{"text":{"type":"STRING"},"in_minutes":{"type":"NUMBER"},"at":{"type":"STRING"},"repeat":{"type":"STRING"}},"required":["text"]}},
 {"name":"list_tasks","description":"List scheduled tasks.","parameters":{"type":"OBJECT","properties":{}}},
-{"name":"cancel_task","description":"Cancel a scheduled task by id.","parameters":{"type":"OBJECT","properties":{"id":{"type":"NUMBER"}},"required":["id"]}}
+{"name":"cancel_task","description":"Cancel a scheduled task by id.","parameters":{"type":"OBJECT","properties":{"id":{"type":"NUMBER"}},"required":["id"]}},
+{"name":"reply_notification","description":"Reply to an incoming notification (WhatsApp, WhatsApp Business, Telegram ...) by its key.","parameters":{"type":"OBJECT","properties":{"key":{"type":"STRING"},"text":{"type":"STRING"}},"required":["key","text"]}},
+{"name":"fetch_url","description":"Fetch a public webpage or Google Sheet shared as 'Anyone with the link' and return its readable text.","parameters":{"type":"OBJECT","properties":{"url":{"type":"STRING"}},"required":["url"]}}
 ]}]""")
 
   fun shopReport(c: Context, item: String): String {
@@ -91,7 +101,7 @@ object Tools {
         }
       }).build()
     return try {
-      val request = Request.Builder().url(target).header("User-Agent", "SaaraAndroid/2.1").get().build()
+      val request = Request.Builder().url(target).header("User-Agent", "SaaraAndroid/2.2").get().build()
       client.newCall(request).execute().use { response ->
         if (!response.isSuccessful) return "error: server returned HTTP ${response.code}. The page may require sign-in or sharing permission."
         val body = response.body?.string()?.take(2_000_000).orEmpty()
@@ -113,27 +123,51 @@ object Tools {
   fun need(n: String) = "Android permission missing: $n. Ask the user to tap the Grant button for it in the Saara app."
   private fun has(c: Context, p: String) = ContextCompat.checkSelfPermission(c, p) == PackageManager.PERMISSION_GRANTED
 
-  fun run(c: Context, name: String, a: JSONObject): String = try {
-    when (name) {
-      "device_control" -> { Db.get(c).usage("action", a.optString("action")); if (a.optString("action") == "open_app") Db.get(c).usage("app", a.optString("target")); device(c, a) }
-      "ui_action" -> ui(c, a)
-      "remember" -> { Db.get(c).factAdd(a.optString("category", "general"), a.optString("fact")); "saved" }
-      "recall" -> Db.get(c).recall(a.optString("query")).joinToString("\n") { "[${it.cat}] ${it.text}" }.ifBlank { "nothing found" }
-      "shop_record" -> {
-        val kind = a.optString("kind").lowercase().let { k -> when { k.startsWith("pur") || k.startsWith("buy") || k.startsWith("bought") -> "purchase"; k.startsWith("sal") || k.startsWith("sell") || k.startsWith("sold") -> "sale"; k.startsWith("can") || k.startsWith("ret") || k.startsWith("ref") -> "cancellation"; else -> "price" } }
-        Db.get(c).shopAdd(a.optString("item"), kind, a.optDouble("price", 0.0), a.optDouble("qty", 1.0), a.optString("party"), a.optString("note"))
-        Db.get(c).usage("action", "shop_$kind")
-        "recorded $kind: ${a.optString("item")} @ ${a.optDouble("price", 0.0)} x ${a.optDouble("qty", 1.0)}"
+  fun run(c: Context, name: String, a: JSONObject): String {
+    val result = try {
+      when (name) {
+        "device_control" -> { Db.get(c).usage("action", a.optString("action")); if (a.optString("action") == "open_app") Db.get(c).usage("app", a.optString("target")); device(c, a) }
+        "ui_action" -> ui(c, a)
+        "remember" -> { Db.get(c).factAdd(a.optString("category", "general"), a.optString("fact")); "saved" }
+        "recall" -> Db.get(c).recall(a.optString("query")).joinToString("\n") { "[${it.cat}] ${it.text}" }.ifBlank { "nothing found" }
+        "remember_task" -> TaskLearning.remember(c, a.optString("goal"), a.optString("method"))
+        "recall_task" -> TaskLearning.recall(c, a.optString("query"))
+        "request_screen_share" -> when {
+          !Prefs.on(c, "f_share", true) -> off("Camera & screen sharing")
+          !Bus.running -> "Saara is not started. Ask the user to tap Start, then try again."
+          Bus.screenOn -> "screen sharing is already on"
+          !canLaunch(c) -> LAUNCH_HINT
+          else -> {
+            Bus.add("system", "Screen sharing is needed for this task. Opening the Android permission prompt…", true)
+            launch(c, Intent(c, ScreenAskActivity::class.java))
+            "screen sharing prompt opened; ask the user to tap Allow"
+          }
+        }
+        "stop_screen_share" -> {
+          if (Bus.screenOn) c.startService(Intent(c, VoiceService::class.java).setAction("SCREEN_STOP"))
+          "screen sharing stopped"
+        }
+        "shop_record" -> {
+          val kind = a.optString("kind").lowercase().let { k -> when { k.startsWith("pur") || k.startsWith("buy") || k.startsWith("bought") -> "purchase"; k.startsWith("sal") || k.startsWith("sell") || k.startsWith("sold") -> "sale"; k.startsWith("can") || k.startsWith("ret") || k.startsWith("ref") -> "cancellation"; else -> "price" } }
+          Db.get(c).shopAdd(a.optString("item"), kind, a.optDouble("price", 0.0), a.optDouble("qty", 1.0), a.optString("party"), a.optString("note"))
+          Db.get(c).usage("action", "shop_$kind")
+          "recorded $kind: ${a.optString("item")} @ ${a.optDouble("price", 0.0)} x ${a.optDouble("qty", 1.0)}"
+        }
+        "shop_report" -> shopReport(c, a.optString("item"))
+        "schedule_task" -> Scheduler.add(c, a.optString("text"), a.optDouble("in_minutes", 0.0), a.optString("at"), a.optString("repeat"))
+        "list_tasks" -> Scheduler.list(c)
+        "cancel_task" -> { Scheduler.cancel(c, a.optLong("id")); "cancelled" }
+        "reply_notification" -> if (!Prefs.on(c, "f_notif", false)) off("Notification auto-reply") else SaaraNotifications.reply(a.optString("key"), a.optString("text"))
+        "fetch_url" -> fetchUrlText(a.optString("url"))
+        else -> "unknown tool"
       }
-      "shop_report" -> shopReport(c, a.optString("item"))
-      "schedule_task" -> Scheduler.add(c, a.optString("text"), a.optDouble("in_minutes", 0.0), a.optString("at"), a.optString("repeat"))
-      "list_tasks" -> Scheduler.list(c)
-      "cancel_task" -> { Scheduler.cancel(c, a.optLong("id")); "cancelled" }
-      "reply_notification" -> if (!Prefs.on(c, "f_notif", false)) off("Notification auto-reply") else SaaraNotifications.reply(a.optString("key"), a.optString("text"))
-      "fetch_url" -> fetchUrlText(a.optString("url"))
-      else -> "unknown tool"
+    } catch (e: Exception) { "error: ${e.message}" }
+    val readOnly = setOf("remember", "recall", "remember_task", "recall_task", "shop_report", "list_tasks")
+    if (name !in readOnly && Prefs.on(c, "learn_tasks", true)) {
+      try { TaskLearning.note(c, Bus.lastUser, name, a, result) } catch (_: Exception) {}
     }
-  } catch (e: Exception) { "error: ${e.message}" }
+    return result
+  }
 
   private fun launch(c: Context, i: Intent) {
     val ctx: Context = SaaraAccessibility.instance ?: c

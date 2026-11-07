@@ -12,6 +12,7 @@ object Bus {
   val status: String get() = st
   @Volatile var camOn = false
   @Volatile var screenOn = false
+  @Volatile var lastUser = ""
   private var lastRole = ""
   private var ended = true
   private var db: Db? = null
@@ -22,7 +23,10 @@ object Bus {
   fun init(c: Context) {
     synchronized(this) {
       if (db == null) db = Db.get(c)
-      if (!loaded) { loaded = true; msgs.addAll(db!!.chatBefore(0, 60)); ended = true }
+      if (!loaded) {
+        loaded = true; msgs.addAll(db!!.chatBefore(0, 60)); ended = true
+        lastUser = msgs.lastOrNull { it.role == "you" }?.text ?: ""
+      }
     }
   }
   fun listen(f: () -> Unit) { ls.add(f) }
@@ -40,6 +44,7 @@ object Bus {
         msgs.add(Msg(id, role, text, now))
       }
       lastRole = role; ended = false
+      if (role == "you") lastUser = msgs.lastOrNull { it.role == "you" }?.text ?: text
       if (msgs.size > 300) msgs.removeAt(0)
     }
     fire()
@@ -47,7 +52,7 @@ object Bus {
   fun endTurn() { synchronized(this) { ended = true } }
   fun setStatus(s: String) { st = s; fire() }
   fun ping() = fire()
-  fun clear() { synchronized(this) { msgs.clear(); lastRole = ""; ended = true; try { db?.chatClear() } catch (_: Exception) {} }; fire() }
+  fun clear() { synchronized(this) { msgs.clear(); lastRole = ""; lastUser = ""; ended = true; try { db?.chatClear() } catch (_: Exception) {} }; fire() }
   fun older(beforeId: Long, n: Int): List<Msg> = try { db?.chatBefore(beforeId, n) ?: emptyList() } catch (_: Exception) { emptyList() }
   private fun fire() { Handler(Looper.getMainLooper()).post { ls.forEach { it() } } }
 }

@@ -8,9 +8,10 @@ data class Msg(var id: Long, val role: String, var text: String, val ts: Long)
 data class Fact(val id: Long, val cat: String, val text: String, val ts: Long)
 data class ShopRow(val id: Long, val item: String, val kind: String, val price: Double, val qty: Double, val party: String, val note: String, val ts: Long)
 data class TaskRow(val id: Long, val whenMs: Long, val text: String, val repeatMs: Long)
+data class TaskStep(val id: Long, val goal: String, val tool: String, val args: String, val result: String, val ok: Boolean, val ts: Long)
 
-/** Local SQLite store: chat history, learned facts, shop ledger, usage stats, scheduled tasks. */
-class Db private constructor(c: Context) : SQLiteOpenHelper(c.applicationContext, "saara.db", null, 2) {
+/** Local SQLite store: chat history, learned facts, shop ledger, usage stats, scheduled tasks, task steps. */
+class Db private constructor(c: Context) : SQLiteOpenHelper(c.applicationContext, "saara.db", null, 3) {
   companion object {
     @Volatile private var inst: Db? = null
     fun get(c: Context): Db = inst ?: synchronized(this) { inst ?: Db(c).also { inst = it } }
@@ -23,12 +24,18 @@ class Db private constructor(c: Context) : SQLiteOpenHelper(c.applicationContext
     d.execSQL("CREATE TABLE shop(id INTEGER PRIMARY KEY AUTOINCREMENT, item TEXT, kind TEXT, price REAL, qty REAL, party TEXT, note TEXT, ts INTEGER)")
     d.execSQL("CREATE TABLE usage(id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT, name TEXT, ts INTEGER)")
     d.execSQL("CREATE TABLE tasks(id INTEGER PRIMARY KEY AUTOINCREMENT, whenms INTEGER, text TEXT, repeatms INTEGER)")
+    createTaskSteps(d)
   }
   override fun onUpgrade(d: SQLiteDatabase, o: Int, n: Int) {
     if (o < 2) {
       d.execSQL("CREATE TABLE IF NOT EXISTS categories(name TEXT PRIMARY KEY)")
       d.execSQL("INSERT OR IGNORE INTO categories(name) VALUES ('general'), ('preference'), ('work'), ('personal')")
     }
+    if (o < 3) createTaskSteps(d)
+  }
+  private fun createTaskSteps(d: SQLiteDatabase) {
+    d.execSQL("CREATE TABLE IF NOT EXISTS task_steps(id INTEGER PRIMARY KEY AUTOINCREMENT, goal TEXT, tool TEXT, args TEXT, result TEXT, ok INTEGER, ts INTEGER)")
+    d.execSQL("CREATE INDEX IF NOT EXISTS idx_task_steps_goal ON task_steps(goal)")
   }
 
   // ---------- chat ----------
@@ -145,4 +152,33 @@ class Db private constructor(c: Context) : SQLiteOpenHelper(c.applicationContext
     return out
   }
   fun task(id: Long): TaskRow? = tasks().firstOrNull { it.id == id }
+
+  // ---------- task-step memory ----------
+  fun taskStepAdd(goal: String, tool: String, args: String, result: String, ok: Boolean): Long {
+    val d = writableDatabase
+    val id = d.insert("task_steps", null, ContentValues().apply {
+      put("goal", goal.trim()); put("tool", tool.trim()); put("args", args.trim()); put("result", result.trim())
+      put("ok", if (ok) 1 else 0); put("ts", System.currentTimeMillis())
+    })
+    try {
+      d.execSQL("DELETE FROM task_steps WHERE id NOT IN (SELECT id FROM task_steps ORDER BY id DESC LIMIT 300)")
+    } catch (_: Exception) {}
+    return id
+  }
+  fun taskSteps(limit: Int = 80): List<TaskStep> {
+    val out = ArrayList<TaskStep>()
+    readableDatabase.query("task_steps", arrayOf("id", "goal", "tool", "args", "result", "ok", "ts"), null, null, null, null, "id DESC", limit.toString()).use {
+      while (it.moveToNext()) out.add(TaskStep(it.getLong(0), it.getString(1) ?: "", it.getString(2) ?: "", it.getString(3) ?: "",
+        it.getString(4) ?: "", it.getInt(5) != 0, it.getLong(6)))
+    }
+    return out
+  }
+  fun taskStepsClear() { writableDatabase.delete("task_steps", null, null) }
+  fun taskStepsFor(q: String, limit: Int = 12): List<TaskStep> {
+    val words = q.lowercase().split(Regex("[^\\p{L}\\p{N}]+")).filter { it.length >= 3 }
+    val recent = taskSteps(300)
+    if (words.isEmpty()) return recent.take(limit)
+    return recent.map { s -> s to words.count { s.goal.lowercase().contains(it) } }
+      .filter { it.second > 0 }.sortedByDescending { it.second }.take(limit).map { it.first }
+  }
 }

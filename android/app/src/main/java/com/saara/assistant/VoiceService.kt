@@ -32,6 +32,8 @@ class VoiceService : Service() {
   @Volatile var muted = false
   @Volatile private var micStarted = false
   @Volatile private var micEnabled = true
+  @Volatile private var wakeActive = false
+  private var wake: WakeWord? = null
   private var micThread: Thread? = null
   private var audioRecord: AudioRecord? = null
   private var retries = 0
@@ -46,11 +48,62 @@ class VoiceService : Service() {
   private val busListener: () -> Unit = { updateOverlay() }
 
   fun isMicOn(): Boolean = micEnabled && micStarted
+  fun isWakeOn(): Boolean = wakeActive && !micStarted
   fun toggleMic() {
     micEnabled = !micEnabled
     Prefs.plain(this).edit().putBoolean("mic_enabled", micEnabled).apply()
-    if (micEnabled) { if (ready) startMic(); Bus.add("system", "Microphone ON. Your live voice query is sent to Gemini; local contacts and saved records are never attached.", true) }
-    else { stopMic(); Bus.add("system", "Microphone muted.", true) }
+    if (micEnabled) {
+      if (ready) {
+        if (wakeOn()) startWake() else startMic()
+      }
+      Bus.add("system", if (wakeOn()) "Microphone armed. Say \"Hey Saara\" to talk." else "Microphone ON. Your live voice query is sent to Gemini; local contacts and saved records are never attached.", true)
+    } else {
+      stopWake(); stopMic(); Bus.add("system", "Microphone muted.", true)
+    }
+    Bus.ping()
+  }
+
+  private fun wakeOn() = Prefs.on(this, "wake_phrase", true)
+
+  /** With the wake phrase on, the phone's local recognizer waits for "Hey Saara" before Gemini gets the mic. */
+  fun refreshWake() {
+    if (!running || !ready) return
+    if (wakeOn()) {
+      if (!micStarted) startWake()
+    } else {
+      stopWake()
+      if (micEnabled && !micStarted) { Bus.add("system", "Wake phrase off. Microphone ON.", true); startMic() }
+    }
+    Bus.ping()
+  }
+
+  private fun startWake() {
+    if (!running || !ready || !micEnabled || micStarted || wakeActive || !wakeOn()) return
+    val w = WakeWord(this, { onWakePhrase() }, { msg -> main.post { wakeUnavailable(msg) } })
+    wake = w; wakeActive = true
+    Bus.setStatus("Connected · say \"Hey Saara\"")
+    Bus.add("system", "Wake phrase is listening. Say \"Hey Saara\" to talk.", true)
+    w.start()
+  }
+
+  private fun stopWake() {
+    wakeActive = false
+    val w = wake; wake = null
+    w?.stop()
+  }
+
+  private fun onWakePhrase() {
+    if (!running || !ready || !micEnabled) return
+    stopWake()
+    Bus.add("system", "Wake phrase heard. Starting the microphone…", true)
+    startMic()
+    Bus.ping()
+  }
+
+  private fun wakeUnavailable(msg: String) {
+    stopWake()
+    Bus.add("system", msg + " Microphone is ready instead.", true)
+    if (running && ready && micEnabled && !micStarted) startMic()
     Bus.ping()
   }
 
@@ -248,6 +301,7 @@ ws?.send(payload.toString())
 
   private fun lost(msg: String) {
     ready = false
+    stopWake()
     stopMic()
     if (!running) return
     Bus.add("system", msg, true)
@@ -261,13 +315,15 @@ ws?.send(payload.toString())
     val model = p.getString("model", "gemini-3.1-flash-live-preview") ?: "gemini-3.1-flash-live-preview"
     val voice = p.getString("voice", "Aoede") ?: "Aoede"
     val now = SimpleDateFormat("EEEE, d MMMM yyyy, HH:mm", Locale.US).format(Date())
+    val taskMemory = if (Prefs.on(this, "learn_tasks", true)) try { TaskLearning.prompt(this) } catch (_: Exception) { "" } else ""
     val ins = "You are Saara, an elegant, proactive, warm FEMALE voice assistant (use feminine forms when speaking Hindi, e.g. 'main kar rahi hoon'). Be concise. " + langRule(this) + " " +
-      "Current local time: $now. " +
+      "Current local time: $now. The user may start with 'Hey Saara'; that is only the wake phrase, not part of the request. " +
       "You can use device_control and local task tools for permitted phone actions. Do not request or reveal contacts, SMS, call logs, notifications, local knowledge, learning, chat history, or sheet contents. URL imports are handled locally by the app. Never ask for private data to be pasted into Gemini. " +
       "If a tool result says a feature is OFF or an Android permission is missing, tell the user in one short sentence exactly what to switch on or grant in the Saara app; do not just say you cannot. " +
       // --- autonomous agent behaviour ---
       "AUTONOMY (very important): for any task with several steps (open an app, search, type, send, post, take a photo, answer a call...), complete the WHOLE task yourself by chaining tool calls one after another. " +
-      "When camera or screen sharing is ON, you receive live frames and can see the screen. Use them to understand the screen, ground taps and complete mobile tasks. Local databases are never sent. " +
+      "When camera or screen sharing is ON, you receive live frames and can see the screen. Use them to understand the screen, ground taps and complete mobile tasks. Private database contents are never sent. " +
+      "If you need to see the current screen and screen sharing is OFF, call request_screen_share. It opens Android's permission prompt; after the user taps Allow, continue the task yourself. Call stop_screen_share when screen access is no longer needed. " +
       "Only ask the user when information is truly missing (which of two contacts, what text to write) or before irreversible/sensitive actions like payments or deleting data. " +
       "Do not narrate each step; when everything is done, say one short sentence with the result. " +
       "Follow the user's command in the simplest way: never make it complicated, never lecture, find a way to get it done. " +
@@ -275,10 +331,12 @@ ws?.send(payload.toString())
       "Notifications and scheduled-task text are private local data and are never forwarded to Gemini. " +
       // --- learning ---
       "Do not store personal facts in Gemini. The app stores Learning and Knowledge locally on the phone. " +
+      "SELF-LEARNING: before repeating a multi-step task, call recall_task to check which steps worked or failed. After solving a new task or discovering a better method, call remember_task with concise working steps. Never put contacts, messages, ledger data, URLs, or screen text into remember_task. " +
       // --- shop ---
       "Do not ask for private shop ledger details. Local ledger data is not sent to Gemini. " +
       "PRIVACY: Never ask for, reveal, infer, or request private local data. Contacts, SMS, call logs, chat history, learning facts, knowledge base, and sheet contents are stored only on this device. No private database content is provided in this session. Do not claim to have read local private data. " +
-      "Live camera and screen frames are sent to Gemini only while the user turns camera or screen sharing ON; the user can turn them off at any time. Links and spreadsheet data are fetched and stored locally by the app, not by Gemini."
+      "Live camera and screen frames are sent to Gemini only while the user turns camera or screen sharing ON; the user can turn them off at any time. Links and spreadsheet data are fetched and stored locally by the app, not by Gemini. " +
+      if (taskMemory.isBlank()) "" else "The short task-memory hints below contain only tool names and outcomes; they do not contain contacts, messages, ledger data, or screen text.\n$taskMemory"
     val s = JSONObject()
       .put("model", "models/$model")
       .put("generationConfig", JSONObject().put("responseModalities", JSONArray().put("AUDIO"))
@@ -292,7 +350,14 @@ ws?.send(payload.toString())
 
   private fun handle(s: String) {
     val m = try { JSONObject(s) } catch (e: Exception) { return }
-    if (m.has("setupComplete")) { ready = true; retries = 0; Bus.setStatus("Connected · Gemini active"); if (micEnabled) startMic() else Bus.add("system", "Gemini connected. Microphone is muted.", true) }
+    if (m.has("setupComplete")) {
+      ready = true; retries = 0; Bus.setStatus("Connected · Gemini active")
+      if (micEnabled) {
+        if (wakeOn()) startWake() else startMic()
+      } else {
+        stopWake(); Bus.add("system", "Gemini connected. Microphone is muted.", true)
+      }
+    }
     if (m.has("error")) Bus.add("system", "Gemini error: " + m.optString("error"), true)
     val sc = m.optJSONObject("serverContent")
     if (sc != null) {
@@ -365,6 +430,7 @@ ws?.send(payload.toString())
 
   override fun onDestroy() {
     running = false; ready = false
+    stopWake()
     stopMic()
     Bus.unlisten(busListener)
     audioQ.clear()

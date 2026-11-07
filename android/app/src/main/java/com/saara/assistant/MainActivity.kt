@@ -335,6 +335,7 @@ class MainActivity : AppCompatActivity() {
     sw.setOnCheckedChangeListener { _, v ->
       Prefs.plain(this).edit().putBoolean(key, v).apply()
       if (key == "f_bubble" || key == "f_overlay") VoiceService.instance?.refreshBubble()
+      if (key == "wake_phrase") VoiceService.instance?.refreshWake()
     }
     top.addView(titles, LinearLayout.LayoutParams(0, -2, 1f)); top.addView(sw)
     c.addView(top)
@@ -365,6 +366,10 @@ class MainActivity : AppCompatActivity() {
       })
     feature(root, "Camera & screen sharing", "Send live camera or screen frames to Saara while sharing is ON, so she can complete tasks", "f_share", true,
       { has(Manifest.permission.CAMERA) }, "Allow camera", { requestPermissions(arrayOf(Manifest.permission.CAMERA), 3) })
+    feature(root, "Wake phrase", "Say \"Hey Saara\" before talking instead of keeping the microphone open all the time. Uses your phone's speech recognition.", "wake_phrase", true,
+      { has(Manifest.permission.RECORD_AUDIO) }, "Allow microphone", { requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO, Manifest.permission.POST_NOTIFICATIONS), 1) })
+    feature(root, "Task self-learning", "Remember which screen steps worked or failed for repeated tasks. Stored on this phone; only short tool-step hints are shared to plan similar tasks.", "learn_tasks", true,
+      { true }, "", {})
     feature(root, "Live caption overlay", "Transparent text over other apps showing what Saara hears, says and does", "f_overlay", true,
       { Settings.canDrawOverlays(this) }, "Allow display over other apps",
       { startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName"))) })
@@ -441,6 +446,18 @@ class MainActivity : AppCompatActivity() {
       select(0)
     }
     val alp = LinearLayout.LayoutParams(-1, -2); alp.topMargin = dp(10); sum.addView(ask, alp)
+
+    val steps = db.taskSteps(20)
+    if (steps.isNotEmpty()) {
+      val tc = card(learnBox)
+      tc.addView(tv("Task methods (${steps.size})", 16f, bold = true))
+      tc.addView(tv("Which on-device steps worked or failed during screen tasks. Stored only on this phone.", 12f, SUB))
+      for (s in steps.take(10)) {
+        val line = (if (s.ok) "✓ " else "✗ ") + s.goal.take(90) + "  ·  " + s.tool
+        tc.addView(tv(line, 13f, if (s.ok) GOOD else WARN))
+      }
+      tc.addView(btn("Clear task learning", SURF2) { Db.get(this).taskStepsClear(); rebuildLearning() })
+    }
 
     val categoryCard = card(learnBox)
     categoryCard.addView(tv("Manage categories", 16f, bold = true))
@@ -711,7 +728,7 @@ class MainActivity : AppCompatActivity() {
     val privacyOn = Prefs.on(this, "privacy_mode", true)
     val privacyLabel = tv("Privacy mode · " + if (privacyOn) "ON" else "OFF", 16f, if (privacyOn) GOOD else WARN, true)
     privacy.addView(privacyLabel)
-    privacy.addView(tv("ON: Saara locally filters likely personal requests before sending text. OFF: ordinary typed prompts go to Gemini directly. In BOTH modes, contacts, SMS, call history, chat history, Learning, Knowledge, Sheet contents and confidential records are never attached or uploaded. While the mic is ON, microphone audio is streamed to Gemini for live voice replies; mute it anytime. Live camera and screen frames are sent to Gemini only while their sharing chips are ON, regardless of privacy mode; turn them off anytime.", 12f, SUB))
+    privacy.addView(tv("ON: Saara locally filters likely personal requests before sending text. OFF: ordinary typed prompts go to Gemini directly. In BOTH modes, contacts, SMS, call history, chat history, Learning, Knowledge, Sheet contents and confidential records are never attached or uploaded. While the mic is ON, microphone audio is streamed to Gemini for live voice replies; mute it anytime. Live camera and screen frames are sent to Gemini only while their sharing chips are ON, regardless of privacy mode; turn them off anytime. Task self-learning stores tool steps on this phone and may send only short, non-personal step hints to Gemini; it never sends contacts, messages, ledger data, or screen text.", 12f, SUB))
     lateinit var privacyToggle: Button
     privacyToggle = btn(if (privacyOn) "Turn privacy mode OFF" else "Turn privacy mode ON", SURF2) {
       val next = !Prefs.on(this, "privacy_mode", true)
@@ -825,6 +842,7 @@ class MainActivity : AppCompatActivity() {
   override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
     super.onRequestPermissionsResult(requestCode, permissions, grantResults)
     if (pendingStart && has(Manifest.permission.RECORD_AUDIO)) { pendingStart = false; startSaara() }
+    if (requestCode == 1 && has(Manifest.permission.RECORD_AUDIO)) VoiceService.instance?.refreshWake()
     if (pendingCam && has(Manifest.permission.CAMERA)) { pendingCam = false; if (Bus.running) startService(svc("CAM_START").putExtra("front", camFront)) }
     if (requestCode == 4) {
       if (has(Manifest.permission.READ_CONTACTS)) { toast("Contacts access granted"); rebuildContacts() }
@@ -847,8 +865,9 @@ class MainActivity : AppCompatActivity() {
     startBtn.text = if (Bus.running) "Stop" else "Start"
     startBtn.background = bg(if (Bus.running) 0xFFB3261E.toInt() else ACC2, 20)
     val micOn = VoiceService.instance?.isMicOn() ?: false
-    muteChip.text = if (micOn) "🎤 Mic: ON" else "🎤 Mic: OFF"
-    muteChip.background = bg(if (micOn) ACC2 else SURF2, 18)
+    val wakeOn = VoiceService.instance?.isWakeOn() ?: false
+    muteChip.text = when { micOn -> "🎤 Mic: ON"; wakeOn -> "🎤 Wake: ON"; else -> "🎤 Mic: OFF" }
+    muteChip.background = bg(if (micOn || wakeOn) ACC2 else SURF2, 18)
     camChip.text = if (Bus.camOn) "📷 Camera: ON" else "📷 Camera"
     camChip.background = bg(if (Bus.camOn) ACC2 else SURF2, 18)
     flipChip.visibility = if (Bus.camOn) View.VISIBLE else View.GONE
