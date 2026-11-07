@@ -876,6 +876,15 @@ class MainActivity : AppCompatActivity() {
     return sv
   }
 
+  private fun startEnrollment() {
+    VoiceService.instance?.suspendWakeForEnrollment()
+    val enrollment = WakeEnrollment(this)
+    enrollment.train(
+      onPrompt = { msg -> Bus.add("system", msg, true) },
+      onDone = { msg -> VoiceService.instance?.resumeWakeAfterEnrollment(); Bus.add("system", msg, true) }
+    )
+  }
+
   private fun fetchModels(key: String, done: (List<String>) -> Unit) {
     Thread {
       val out = ArrayList<String>()
