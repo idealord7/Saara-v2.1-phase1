@@ -363,7 +363,7 @@ class MainActivity : AppCompatActivity() {
         toast("Turn on Saara. If Android says 'Restricted setting': App info → ⋮ → Allow restricted settings.")
         startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
       })
-    feature(root, "Camera & screen sharing", "Share your live camera or screen with Saara from the Chat tab", "f_share", true,
+    feature(root, "Camera & screen sharing", "Send live camera or screen frames to Saara while sharing is ON, so she can complete tasks", "f_share", true,
       { has(Manifest.permission.CAMERA) }, "Allow camera", { requestPermissions(arrayOf(Manifest.permission.CAMERA), 3) })
     feature(root, "Live caption overlay", "Transparent text over other apps showing what Saara hears, says and does", "f_overlay", true,
       { Settings.canDrawOverlays(this) }, "Allow display over other apps",
@@ -711,7 +711,7 @@ class MainActivity : AppCompatActivity() {
     val privacyOn = Prefs.on(this, "privacy_mode", true)
     val privacyLabel = tv("Privacy mode · " + if (privacyOn) "ON" else "OFF", 16f, if (privacyOn) GOOD else WARN, true)
     privacy.addView(privacyLabel)
-    privacy.addView(tv("ON: Saara locally filters likely personal requests before sending text. OFF: ordinary typed prompts go to Gemini directly. In BOTH modes, contacts, SMS, call history, chat history, Learning, Knowledge, Sheet contents and confidential records are never attached or uploaded. While the mic is ON, microphone audio is streamed to Gemini for live voice replies; mute it anytime.", 12f, SUB))
+    privacy.addView(tv("ON: Saara locally filters likely personal requests before sending text. OFF: ordinary typed prompts go to Gemini directly. In BOTH modes, contacts, SMS, call history, chat history, Learning, Knowledge, Sheet contents and confidential records are never attached or uploaded. While the mic is ON, microphone audio is streamed to Gemini for live voice replies; mute it anytime. Live camera and screen frames are sent to Gemini only while their sharing chips are ON, regardless of privacy mode; turn them off anytime.", 12f, SUB))
     lateinit var privacyToggle: Button
     privacyToggle = btn(if (privacyOn) "Turn privacy mode OFF" else "Turn privacy mode ON", SURF2) {
       val next = !Prefs.on(this, "privacy_mode", true)
@@ -843,7 +843,7 @@ class MainActivity : AppCompatActivity() {
   // ---------- live refresh ----------
   private fun refresh() {
     updaters.forEach { it() }
-    statusTv.text = Bus.status + (if (Bus.camOn) "  •  camera local-only" else "") + (if (Bus.screenOn) "  •  screen local-only" else "")
+    statusTv.text = Bus.status + (if (Bus.camOn) "  •  camera live" else "") + (if (Bus.screenOn) "  •  screen live" else "")
     startBtn.text = if (Bus.running) "Stop" else "Start"
     startBtn.background = bg(if (Bus.running) 0xFFB3261E.toInt() else ACC2, 20)
     val micOn = VoiceService.instance?.isMicOn() ?: false

@@ -21,7 +21,7 @@ import java.util.Date
 import java.util.Locale
 import java.util.concurrent.TimeUnit
 
-/** Gemini Live text intelligence with device-local storage. Private mic, camera, screen and notification payloads are not uploaded. */
+/** Gemini Live text intelligence with device-local storage. Mic audio and camera/screen frames stream to Gemini only while the user enables them. */
 class VoiceService : Service() {
   companion object { var instance: VoiceService? = null }
   private val http = OkHttpClient.Builder().pingInterval(20, TimeUnit.SECONDS).build()
@@ -123,7 +123,7 @@ class VoiceService : Service() {
     if (!Prefs.on(this, "f_overlay", true) || !Settings.canDrawOverlays(this)) { overlay?.hide(); return }
     if (overlay == null) overlay = Overlay(this)
     if (Bus.camOn) {
-      overlay?.show("📷 LIVE CAMERA SHARING ON\nCamera is active on this phone. Frames are not uploaded to Gemini.", true)
+      overlay?.show("📷 LIVE CAMERA SHARING ON\nLive camera frames are being sent to Gemini.", true)
       return
     }
     if (MainActivity.visible) { overlay?.hide(); return }
@@ -194,7 +194,7 @@ ws?.send(payload.toString())
     val err = c.start(front)
     if (err != null) { Bus.add("system", err, true); stopCam(false); return }
     Bus.ping()
-    if (!was) { Bus.add("system", "Camera sharing is ON (${if (front) "front" else "back"}).", true); Bus.add("system", "Camera preview is local-only; camera frames are not sent to Gemini.", true) }
+    if (!was) { Bus.add("system", "Camera sharing is ON (${if (front) "front" else "back"}).", true); Bus.add("system", "Live camera frames are being sent to Gemini.", true); tellModel("[System] Camera sharing is now ON. Live camera frames are being sent to you. Use them to help the user with the task.") }
   }
   private fun stopCam(say: Boolean) {
     cam?.stop(); cam = null
@@ -208,7 +208,8 @@ ws?.send(payload.toString())
     val err = s.start(code, data)
     if (err != null) { Bus.add("system", err, true); stopScreen(false); return }
     Bus.add("system", "Screen sharing is ON.", true)
-    Bus.add("system", "Screen capture is local-only; screen frames are not sent to Gemini.", true)
+    Bus.add("system", "Live screen frames are being sent to Gemini.", true)
+    tellModel("[System] Screen sharing is now ON. Live screen frames are being sent to you. Use them to complete the user's mobile task.")
   }
   private fun stopScreen(say: Boolean) {
     screen?.stop(); screen = null
@@ -216,8 +217,16 @@ ws?.send(payload.toString())
     Bus.ping()
   }
 
-  /** Privacy mode: camera/screen frames stay on-device and are never uploaded to Gemini. */
-  fun sendFrame(jpeg: ByteArray) { /* intentionally not transmitted */ }
+  /** Sends a camera/screen JPEG frame to the live Gemini session (max ~1 frame per second). */
+  fun sendFrame(jpeg: ByteArray) {
+    if (!running || !ready) return
+    val socket = ws ?: return
+    try {
+      val data = Base64.encodeToString(jpeg, Base64.NO_WRAP)
+      val blob = JSONObject().put("data", data).put("mimeType", "image/jpeg")
+      socket.send(JSONObject().put("realtimeInput", JSONObject().put("video", blob)).toString())
+    } catch (_: Exception) {}
+  }
 
   // ---------- Gemini Live connection ----------
   private fun connect() {
@@ -258,7 +267,7 @@ ws?.send(payload.toString())
       "If a tool result says a feature is OFF or an Android permission is missing, tell the user in one short sentence exactly what to switch on or grant in the Saara app; do not just say you cannot. " +
       // --- autonomous agent behaviour ---
       "AUTONOMY (very important): for any task with several steps (open an app, search, type, send, post, take a photo, answer a call...), complete the WHOLE task yourself by chaining tool calls one after another. " +
-      "Do not claim you can inspect the user's screen or local databases. Screen automation content is not sent to Gemini in privacy mode. " +
+      "When camera or screen sharing is ON, you receive live frames and can see the screen. Use them to understand the screen, ground taps and complete mobile tasks. Local databases are never sent. " +
       "Only ask the user when information is truly missing (which of two contacts, what text to write) or before irreversible/sensitive actions like payments or deleting data. " +
       "Do not narrate each step; when everything is done, say one short sentence with the result. " +
       "Follow the user's command in the simplest way: never make it complicated, never lecture, find a way to get it done. " +
@@ -269,7 +278,7 @@ ws?.send(payload.toString())
       // --- shop ---
       "Do not ask for private shop ledger details. Local ledger data is not sent to Gemini. " +
       "PRIVACY: Never ask for, reveal, infer, or request private local data. Contacts, SMS, call logs, chat history, learning facts, knowledge base, and sheet contents are stored only on this device. No private database content is provided in this session. Do not claim to have read local private data. " +
-      "Camera and screen frames are not sent to Gemini in privacy mode. Links and spreadsheet data are fetched and stored locally by the app, not by Gemini."
+      "Live camera and screen frames are sent to Gemini only while the user turns camera or screen sharing ON; the user can turn them off at any time. Links and spreadsheet data are fetched and stored locally by the app, not by Gemini."
     val s = JSONObject()
       .put("model", "models/$model")
       .put("generationConfig", JSONObject().put("responseModalities", JSONArray().put("AUDIO"))
