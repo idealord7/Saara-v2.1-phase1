@@ -43,7 +43,6 @@ class CallWatcher(
   @Volatile private var ringing = false
   @Volatile private var answered = false
   @Volatile private var number = ""
-  @Volatile private var prompted = false
   private var lastState = TelephonyManager.CALL_STATE_IDLE
   private var telephonyCallback: Any? = null
   private var legacyListener: PhoneStateListener? = null
@@ -140,7 +139,6 @@ class CallWatcher(
       TelephonyManager.CALL_STATE_RINGING -> if (!ringing) {
         ringing = true
         answered = false
-        prompted = false
         main.postDelayed({ announce() }, 650L)
       }
       TelephonyManager.CALL_STATE_OFFHOOK -> if (ringing && !answered) {
@@ -153,7 +151,6 @@ class CallWatcher(
       TelephonyManager.CALL_STATE_IDLE -> if (ringing || answered) {
         ringing = false
         answered = false
-        prompted = false
         number = ""
         stopListening()
         stopTts()
@@ -238,7 +235,6 @@ class CallWatcher(
     if (!SpeechRecognizer.isRecognitionAvailable(ctx)) return
     val r = try { SpeechRecognizer.createSpeechRecognizer(ctx) } catch (_: Exception) { return }
     recognizer = r
-    prompted = true
     r.setRecognitionListener(object : RecognitionListener {
       override fun onReadyForSpeech(params: Bundle?) {}
       override fun onBeginningOfSpeech() {}
