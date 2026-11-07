@@ -9,6 +9,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.os.SystemClock
 import android.provider.Settings
 import android.util.Base64
 import androidx.core.content.ContextCompat
@@ -34,6 +35,10 @@ class VoiceService : Service() {
   @Volatile private var micEnabled = true
   @Volatile private var wakeActive = false
   private var wake: WakeWord? = null
+  private var calls: CallWatcher? = null
+  @Volatile private var callActive = false
+  private val micLock = Any()
+  private var lastMicToggle = 0L
   private var micThread: Thread? = null
   private var audioRecord: AudioRecord? = null
   private var retries = 0
@@ -50,6 +55,14 @@ class VoiceService : Service() {
   fun isMicOn(): Boolean = micEnabled && micStarted
   fun isWakeOn(): Boolean = wakeActive && !micStarted
   fun toggleMic() {
+    synchronized(micLock) {
+    val now = SystemClock.elapsedRealtime()
+    if (now - lastMicToggle < 800L) return
+    lastMicToggle = now
+    if (callActive) {
+      Bus.add("system", "A call is in progress. I will keep the microphone off until it ends.", true)
+      return
+    }
     if (!micEnabled) {
       micEnabled = true
       Prefs.plain(this).edit().putBoolean("mic_enabled", true).apply()
@@ -68,13 +81,14 @@ class VoiceService : Service() {
       if (ready) Bus.setStatus("Connected · microphone muted")
     }
     Bus.ping()
+    }
   }
 
   private fun wakeOn() = Prefs.on(this, "wake_phrase", true)
 
   /** With the wake phrase on, the phone's local recognizer waits for "Hey Saara" before Gemini gets the mic. */
   fun refreshWake() {
-    if (!running || !ready) return
+    if (!running || !ready || callActive) return
     if (wakeOn()) {
       if (!micStarted) startWake()
     } else {
@@ -84,8 +98,47 @@ class VoiceService : Service() {
     Bus.ping()
   }
 
+  /** Starts/stops the local incoming-call announcer according to the feature toggle and permission. */
+  fun refreshCalls() {
+    if (!running) return
+    if (!Prefs.on(this, "f_calls", true) || !has(Manifest.permission.READ_PHONE_STATE)) {
+      calls?.stop(); calls = null
+      return
+    }
+    if (calls == null) {
+      calls = CallWatcher(this, ::onCallStarted, ::onCallAnswered, ::onCallEnded).also { it.start() }
+    }
+  }
+
+  private fun onCallStarted(caller: String) {
+    callActive = true
+    stopWake()
+    stopMic()
+    val who = if (caller.isBlank()) "an unknown number" else caller
+    Bus.setStatus("Incoming call" + if (caller.isBlank()) "" else " · $caller")
+    Bus.add("system", "Incoming call from $who. Say \"answer\" or \"reject\" — the caller details stay on this phone.", true)
+  }
+
+  private fun onCallAnswered() {
+    callActive = true
+    Bus.setStatus("Call active")
+    Bus.add("system", "Call answered. Saara will resume listening after the call ends.", true)
+  }
+
+  private fun onCallEnded() {
+    callActive = false
+    Bus.setStatus(if (ready) "Connected · Gemini active" else Bus.status)
+    Bus.add("system", "Call ended.", true)
+    main.postDelayed({
+      if (running && ready && !callActive && micEnabled && !micStarted) {
+        if (wakeOn()) startWake() else startMic()
+      }
+    }, 900L)
+    Bus.ping()
+  }
+
   private fun startWake() {
-    if (!running || !ready || !micEnabled || micStarted || wakeActive || !wakeOn()) return
+    if (!running || !ready || callActive || !micEnabled || micStarted || wakeActive || !wakeOn()) return
     val w = WakeWord(this, { onWakePhrase() }, { msg -> main.post { wakeUnavailable(msg) } })
     wake = w; wakeActive = true
     Bus.setStatus("Connected · say \"Hey Saara\"")
@@ -165,6 +218,7 @@ class VoiceService : Service() {
     refreshBubble()
     Bus.listen(busListener)
     Bus.add("system", "Connecting…", true)
+    refreshCalls()
     connect()
     return START_STICKY
   }
@@ -209,7 +263,7 @@ class VoiceService : Service() {
   private fun tellModel(t: String) { if (ready) ws?.send(JSONObject().put("realtimeInput", JSONObject().put("text", t)).toString()) }
 
   private fun startMic() {
-    if (!running || !ready || !micEnabled || micStarted) return
+    if (!running || !ready || callActive || !micEnabled || micStarted) return
     if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
       Bus.add("system", "Microphone permission is missing. Allow Microphone in Android app permissions.", true); return
     }
@@ -332,7 +386,11 @@ ws?.send(payload.toString())
       "AUTONOMY (very important): for any task with several steps (open an app, search, type, send, post, take a photo, answer a call...), complete the WHOLE task yourself by chaining tool calls one after another. " +
       "When camera or screen sharing is ON, you receive live frames and can see the screen. Use them to understand the screen, ground taps and complete mobile tasks. Private database contents are never sent. " +
       "If you need to see the current screen and screen sharing is OFF, call request_screen_share. It opens Android's permission prompt; after the user taps Allow, continue the task yourself. Call stop_screen_share when screen access is no longer needed. " +
-      "Only ask the user when information is truly missing (which of two contacts, what text to write) or before irreversible/sensitive actions like payments or deleting data. " +
+      "CONFIRMATION & SAFETY (very important): before starting ANY task that changes the phone or screen, sends something, calls, opens something, deletes, pays, orders, books, cancels or confirms, first reply with one short summary in the user's language and ask them to confirm. Then stop and wait for the user's next turn. Do NOT call an action tool until they reply. After they confirm, call action tools with confirmed=true and finish the whole task. Read-only questions can be answered immediately. Destructive steps (delete, erase, remove, cancel, process, pay, confirm, entry, exit) must be named in that summary. " +
+      "If the user says stop, wait, hold on, ruko, bas or changes their mind at any time, stop immediately, call no more action tools, and briefly acknowledge. If a tool fails, say briefly what failed and ask how to proceed; never pretend it worked. " +
+      "CLIPBOARD: use ui_action copy_text to copy given text (or the selected text), select_all, and paste. Use copy/paste for fields that reject typing. " +
+      "CALLS: incoming calls are announced locally by the app; caller details are never sent to Gemini. Answer/reject actions still need confirmation. " +
+      "Ask when information is truly missing (which of two contacts, what text to write) and always before confirmation-required actions. " +
       "Do not narrate each step; when everything is done, say one short sentence with the result. " +
       "Follow the user's command in the simplest way: never make it complicated, never lecture, find a way to get it done. " +
       "Photos: call device_control take_photo (it presses the shutter by itself; text=front for selfie). Calls: answer_call / end_call. " +
@@ -343,7 +401,7 @@ ws?.send(payload.toString())
       // --- shop ---
       "Do not ask for private shop ledger details. Local ledger data is not sent to Gemini. " +
       "PRIVACY: Never ask for, reveal, infer, or request private local data. Contacts, SMS, call logs, chat history, learning facts, knowledge base, and sheet contents are stored only on this device. No private database content is provided in this session. Do not claim to have read local private data. " +
-      "Live camera and screen frames are sent to Gemini only while the user turns camera or screen sharing ON; the user can turn them off at any time. Links and spreadsheet data are fetched and stored locally by the app, not by Gemini. " +
+      "Live camera and screen frames are sent to Gemini only while the user turns camera or screen sharing ON; the user can turn them off at any time. While Screen automation is ON, on-device tool results may include screen text so you can complete the task; private local database contents (Learning, Knowledge, contacts, messages, tasks, fetched pages) are withheld. Links and spreadsheet data are fetched and stored locally by the app, not by Gemini. " +
       if (taskMemory.isBlank()) "" else "The short task-memory hints below contain goal names, tool names and outcomes with numbers/emails redacted; they do not contain contacts, messages, ledger data, or screen text.\n$taskMemory"
     val s = JSONObject()
       .put("model", "models/$model")
@@ -374,9 +432,18 @@ ws?.send(payload.toString())
         val inl = parts.getJSONObject(i).optJSONObject("inlineData")
         if (inl != null) play(Base64.decode(inl.getString("data"), Base64.DEFAULT))
       }
-      sc.optJSONObject("inputTranscription")?.let { gotSpeech = true; Bus.add("you", it.optString("text")) }
+      sc.optJSONObject("inputTranscription")?.let {
+        gotSpeech = true
+        val heard = it.optString("text")
+        Bus.add("you", heard)
+        if (TaskControl.isStop(heard)) {
+          TaskControl.clear()
+          stopSpeaking()
+          Bus.add("system", "Stopped the current task.", true)
+        }
+      }
       sc.optJSONObject("outputTranscription")?.let { Bus.add("saara", it.optString("text")) }
-      if (sc.optBoolean("interrupted")) { audioQ.clear(); track?.pause(); track?.flush(); track?.play(); speakingUntil = 0 }
+      if (sc.optBoolean("interrupted")) { stopSpeaking() }
       if (sc.optBoolean("turnComplete")) {
         Bus.endTurn()
         if (gotSpeech) { gotSpeech = false; try { Db.get(this).usage("command", "turn") } catch (_: Exception) {} }
@@ -392,7 +459,7 @@ ws?.send(payload.toString())
         Bus.add("tool", "$name $args", true)
         val r = Tools.run(this, name, args)
         Bus.add("tool", "→ $r", true)
-        out.put(JSONObject().put("id", c.optString("id")).put("name", name).put("response", JSONObject().put("result", "Action handled on device. No local data or tool output is shared with Gemini.")))
+        out.put(JSONObject().put("id", c.optString("id")).put("name", name).put("response", JSONObject().put("result", Tools.modelResult(name, r))))
       }
       ws?.send(JSONObject().put("toolResponse", JSONObject().put("functionResponses", out)).toString())
     }.start()
@@ -402,6 +469,12 @@ ws?.send(payload.toString())
     if (track == null) return
     speakingUntil = maxOf(speakingUntil, System.currentTimeMillis()) + pcm.size / 48
     audioQ.offer(pcm)
+  }
+
+  private fun stopSpeaking() {
+    audioQ.clear()
+    try { track?.pause(); track?.flush(); track?.play() } catch (_: Exception) {}
+    speakingUntil = 0
   }
 
   fun sendText(t: String) {
@@ -414,6 +487,12 @@ ws?.send(payload.toString())
       Regex("\\b[+0-9][0-9 ()-]{7,}\\b").containsMatchIn(t) ||
       Regex("[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}", RegexOption.IGNORE_CASE).containsMatchIn(t)
     Bus.add("you", t, true)
+    if (TaskControl.isStop(t)) {
+      TaskControl.clear()
+      stopSpeaking()
+      Bus.add("saara", "Stopped.", true)
+      return
+    }
     if (sensitive) {
       Bus.add("saara", "This request appears to involve private information or a personal device action. I kept it on this phone and did not send it to Gemini.", true)
       return
@@ -441,6 +520,8 @@ ws?.send(payload.toString())
     stopWake()
     stopMic()
     Bus.unlisten(busListener)
+    calls?.stop(); calls = null; callActive = false
+    TaskControl.clear()
     audioQ.clear()
     cam?.stop(); cam = null; Bus.camOn = false
     screen?.stop(); screen = null; Bus.screenOn = false

@@ -10,6 +10,7 @@ import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.provider.Settings
 import android.provider.ContactsContract
 import android.text.InputType
@@ -64,6 +65,7 @@ class MainActivity : AppCompatActivity() {
   private var pendingStart = false
   private var pendingCam = false
   private var camFront = false
+  private var lastToggle = 0L
   private val fetchedModels = ArrayList<String>()
   // Contact provider I/O must never run on Android's main/UI thread.
   private val contactsExecutor = Executors.newSingleThreadExecutor()
@@ -336,6 +338,7 @@ class MainActivity : AppCompatActivity() {
       Prefs.plain(this).edit().putBoolean(key, v).apply()
       if (key == "f_bubble" || key == "f_overlay") VoiceService.instance?.refreshBubble()
       if (key == "wake_phrase") VoiceService.instance?.refreshWake()
+      if (key == "f_calls") VoiceService.instance?.refreshCalls()
     }
     top.addView(titles, LinearLayout.LayoutParams(0, -2, 1f)); top.addView(sw)
     c.addView(top)
@@ -368,6 +371,11 @@ class MainActivity : AppCompatActivity() {
       { has(Manifest.permission.CAMERA) }, "Allow camera", { requestPermissions(arrayOf(Manifest.permission.CAMERA), 3) })
     feature(root, "Wake phrase", "Say \"Hey Saara\" before talking instead of keeping the microphone open all the time. Uses your phone's speech recognition.", "wake_phrase", true,
       { has(Manifest.permission.RECORD_AUDIO) }, "Allow microphone", { requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO, Manifest.permission.POST_NOTIFICATIONS), 1) })
+    feature(root, "Incoming call announcements", "Announce the caller, ask answer or reject, and turn on the loudspeaker when no Bluetooth headset is connected.", "f_calls", true,
+      { has(Manifest.permission.READ_PHONE_STATE) && has(Manifest.permission.ANSWER_PHONE_CALLS) },
+      "Grant phone & call info", { requestPermissions(arrayOf(Manifest.permission.READ_PHONE_STATE, Manifest.permission.READ_CALL_LOG, Manifest.permission.ANSWER_PHONE_CALLS), 5) })
+    feature(root, "Clipboard copy & paste", "Copy text and paste it into fields during screen tasks", "f_clipboard", true,
+      { true }, "", {})
     feature(root, "Task self-learning", "Remember which screen steps worked or failed for repeated tasks. Stored on this phone; only short tool-step hints are shared to plan similar tasks.", "learn_tasks", true,
       { true }, "", {})
     feature(root, "Live caption overlay", "Transparent text over other apps showing what Saara hears, says and does", "f_overlay", true,
@@ -728,7 +736,7 @@ class MainActivity : AppCompatActivity() {
     val privacyOn = Prefs.on(this, "privacy_mode", true)
     val privacyLabel = tv("Privacy mode · " + if (privacyOn) "ON" else "OFF", 16f, if (privacyOn) GOOD else WARN, true)
     privacy.addView(privacyLabel)
-    privacy.addView(tv("ON: Saara locally filters likely personal requests before sending text. OFF: ordinary typed prompts go to Gemini directly. In BOTH modes, contacts, SMS, call history, chat history, Learning, Knowledge, Sheet contents and confidential records are never attached or uploaded. While the mic is ON, microphone audio is streamed to Gemini for live voice replies; mute it anytime. Live camera and screen frames are sent to Gemini only while their sharing chips are ON, regardless of privacy mode; turn them off anytime. Task self-learning stores tool steps on this phone and may send only short task-step hints with numbers and emails redacted; it never sends contacts, messages, ledger data, or screen text.", 12f, SUB))
+    privacy.addView(tv("ON: Saara locally filters likely personal requests before sending text. OFF: ordinary typed prompts go to Gemini directly. In BOTH modes, contacts, SMS, call history, chat history, Learning, Knowledge, Sheet contents and confidential records are never attached or uploaded. While the mic is ON, microphone audio is streamed to Gemini for live voice replies; mute it anytime. Live camera and screen frames are sent to Gemini only while their sharing chips are ON, regardless of privacy mode; turn them off anytime. While Screen automation is ON, tool results may include current screen text so Saara can finish the task; private databases stay local. Task self-learning stores tool steps on this phone and may send only short task-step hints with numbers and emails redacted; it never sends contacts, messages, ledger data, or screen text.", 12f, SUB))
     lateinit var privacyToggle: Button
     privacyToggle = btn(if (privacyOn) "Turn privacy mode OFF" else "Turn privacy mode ON", SURF2) {
       val next = !Prefs.on(this, "privacy_mode", true)
@@ -825,6 +833,11 @@ class MainActivity : AppCompatActivity() {
 
   // ---------- start / stop / permissions ----------
   private fun toggle() {
+    val now = SystemClock.elapsedRealtime()
+    if (now - lastToggle < 900L) return
+    lastToggle = now
+    startBtn.isEnabled = false
+    startBtn.postDelayed({ startBtn.isEnabled = true }, 900L)
     if (Bus.running) { startService(svc("STOP")); return }
     if (!has(Manifest.permission.RECORD_AUDIO)) {
       pendingStart = true
@@ -844,6 +857,10 @@ class MainActivity : AppCompatActivity() {
     if (pendingStart && has(Manifest.permission.RECORD_AUDIO)) { pendingStart = false; startSaara() }
     if (requestCode == 1 && has(Manifest.permission.RECORD_AUDIO)) VoiceService.instance?.refreshWake()
     if (pendingCam && has(Manifest.permission.CAMERA)) { pendingCam = false; if (Bus.running) startService(svc("CAM_START").putExtra("front", camFront)) }
+    if (requestCode == 5) {
+      if (has(Manifest.permission.READ_PHONE_STATE)) { toast("Incoming call announcements enabled"); VoiceService.instance?.refreshCalls() }
+      else toast("Phone permission was not granted, so call announcements stay off")
+    }
     if (requestCode == 4) {
       if (has(Manifest.permission.READ_CONTACTS)) { toast("Contacts access granted"); rebuildContacts() }
       else {

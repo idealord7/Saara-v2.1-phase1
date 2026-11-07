@@ -43,7 +43,21 @@ class SaaraAccessibility : AccessibilityService() {
         return if (tapSmart(t)) settled("tapped '$t'")
         else "not found: '$t'. Call dump_ui, try another label, scroll_down, or use tap_xy with bounds."
       }
+      "tap_id" -> {
+        val id = m.optString("id").trim()
+        if (id.isBlank()) return "error: id is required"
+        return if (tapId(id)) settled("tapped id '$id'")
+        else "not found: id '$id'. Call dump_ui and use the short id shown there."
+      }
       "tap_xy" -> { if (!m.has("x") || !m.has("y")) return "error: x and y are required"; tapXY(m.optDouble("x").toFloat(), m.optDouble("y").toFloat()); return settled("tapped xy") }
+      "double_tap" -> {
+        val t = m.optString("text")
+        if (t.isNotBlank()) {
+          val n = nodeForText(t) ?: return "not found: '$t'"
+          val b = bounds(n); doubleTap(b.exactCenterX(), b.exactCenterY())
+        } else doubleTap(m.optDouble("x").toFloat(), m.optDouble("y").toFloat())
+        return settled("double tapped")
+      }
       "long_press" -> {
         val t = m.optString("text")
         if (t.isNotBlank()) {
@@ -66,6 +80,10 @@ class SaaraAccessibility : AccessibilityService() {
       }
       "type" -> return typeText(m.optString("text"), m.optBoolean("replace", false))
       "clear_text" -> return typeText("", true)
+      "select_all" -> return selectAll()
+      "copy_text" -> return copyText(m.optString("text"))
+      "paste" -> return pasteText()
+      "wait_text" -> return waitText(m.optString("text"), m.optLong("timeout", 4000))
       "enter" -> return imeEnter()
       "back" -> { performGlobalAction(GLOBAL_ACTION_BACK); return settled("back") }
       "home" -> { performGlobalAction(GLOBAL_ACTION_HOME); return settled("home") }
@@ -127,13 +145,73 @@ class SaaraAccessibility : AccessibilityService() {
   // ---------- tapping ----------
   /** Self-healing: text/description/id/hint match on every window; click the clickable ancestor, else tap the bounds centre. */
   private fun tapSmart(t: String): Boolean {
+    val q = t.trim()
+    if (q.isEmpty()) return false
     for (r in allRoots()) {
-      var cands: List<AccessibilityNodeInfo> = r.findAccessibilityNodeInfosByText(t) ?: emptyList()
-      if (cands.isEmpty()) cands = find(r) { hay(it).contains(t, true) }
-      for (n in cands.sortedByDescending { it.isVisibleToUser }) if (clickNode(n)) return true
+      val cands = LinkedHashMap<Int, AccessibilityNodeInfo>()
+      (r.findAccessibilityNodeInfosByText(q) ?: emptyList()).forEach { cands[System.identityHashCode(it)] = it }
+      find(r) { hay(it).contains(q, true) }.forEach { cands[System.identityHashCode(it)] = it }
+      val sorted = cands.values.asSequence()
+        .filter { it.isVisibleToUser && !bounds(it).isEmpty }
+        .sortedWith(compareBy<AccessibilityNodeInfo>(
+          { matchRank(it, q) },
+          { if (it.isClickable) 0 else if (clickableAncestor(it) != null) 1 else 2 },
+          { -bounds(it).width() * bounds(it).height() }
+        ))
+        .toList()
+      for (n in sorted) if (clickNode(n)) return true
     }
     return false
   }
+
+  private fun tapId(id: String): Boolean {
+    val q = id.trim().trimStart('@')
+    if (q.isEmpty()) return false
+    for (r in allRoots()) {
+      val cands = find(r) {
+        val vid = it.viewIdResourceName ?: return@find false
+        val short = vid.substringAfterLast('/')
+        it.isVisibleToUser && (short == q || short.equals(q, true) || vid.endsWith(q) || short.contains(q, true))
+      }.sortedWith(compareBy<AccessibilityNodeInfo>(
+        { if ((it.viewIdResourceName ?: "").substringAfterLast('/') == q) 0 else 1 },
+        { if (it.isClickable) 0 else if (clickableAncestor(it) != null) 1 else 2 }
+      ))
+      for (n in cands) if (clickNode(n)) return true
+    }
+    return false
+  }
+
+  private fun matchRank(n: AccessibilityNodeInfo, q: String): Int {
+    val text = (n.text ?: n.contentDescription)?.toString()?.trim().orEmpty()
+    val id = n.viewIdResourceName ?: ""
+    return when {
+      text.equals(q, true) -> 0
+      text.startsWith(q, true) -> 1
+      text.contains(q, true) -> 2
+      id.substringAfterLast('/').equals(q, true) -> 3
+      id.contains(q, true) -> 4
+      else -> 5
+    }
+  }
+
+  private fun clickableAncestor(n: AccessibilityNodeInfo): AccessibilityNodeInfo? {
+    var p = n.parent
+    while (p != null) { if (p.isClickable) return p; p = p.parent }
+    return null
+  }
+
+  private fun nodeForText(t: String): AccessibilityNodeInfo? {
+    val q = t.trim()
+    for (r in allRoots()) {
+      val cands = LinkedHashMap<Int, AccessibilityNodeInfo>()
+      (r.findAccessibilityNodeInfosByText(q) ?: emptyList()).forEach { cands[System.identityHashCode(it)] = it }
+      find(r) { hay(it).contains(q, true) }.forEach { cands[System.identityHashCode(it)] = it }
+      cands.values.filter { it.isVisibleToUser && !bounds(it).isEmpty }
+        .minByOrNull { matchRank(it, q) }?.let { return it }
+    }
+    return null
+  }
+
   private fun clickNode(n: AccessibilityNodeInfo): Boolean {
     var p: AccessibilityNodeInfo? = n
     while (p != null && !p.isClickable) p = p.parent
@@ -149,6 +227,19 @@ class SaaraAccessibility : AccessibilityService() {
     return ok
   }
   private fun tapXY(x: Float, y: Float) { gesture(x, y, x, y, 80) }
+  private fun doubleTap(x: Float, y: Float) { tapXY(x, y); sleep(90); tapXY(x, y) }
+
+  private fun waitText(t: String, timeoutMs: Long): String {
+    val q = t.trim()
+    if (q.isEmpty()) return "error: text is required"
+    val timeout = timeoutMs.coerceIn(500, 15000)
+    val end = System.currentTimeMillis() + timeout
+    while (System.currentTimeMillis() < end) {
+      if (nodeForText(q) != null) return settled("found '$q'")
+      sleep(250)
+    }
+    return "not found: '$q' after ${timeout}ms. Screen now: " + dump(3000)
+  }
 
   private fun scrollNode(forward: Boolean): Boolean {
     val r = root() ?: return false
@@ -190,9 +281,35 @@ class SaaraAccessibility : AccessibilityService() {
     }
     return if (ok) settled("typed; field now contains: '${full.take(150)}'") else "error: this field would not accept text"
   }
+  private fun selectAll(): String {
+    val n = inputNode() ?: return "no text field found. Tap the field first."
+    val len = (n.text?.toString() ?: "").length
+    if (len == 0) return "the field is empty"
+    select(n, 0, len)
+    return settled("selected all text in the field")
+  }
+
+  private fun copyText(text: String): String {
+    val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+    if (text.isNotBlank()) {
+      cm.setPrimaryClip(ClipData.newPlainText("Saara", text))
+      return "copied ${text.length} character(s) to the clipboard"
+    }
+    val n = inputNode() ?: return "no focused field. Give text to copy, or select text first."
+    return if (n.performAction(AccessibilityNodeInfo.ACTION_COPY)) "copied the selected text"
+    else "could not copy. Select text first, or give the text to copy."
+  }
+
+  private fun pasteText(): String {
+    val n = inputNode() ?: return "no text field found. Tap the field first, then paste."
+    return if (n.performAction(AccessibilityNodeInfo.ACTION_PASTE)) settled("pasted from the clipboard")
+    else "this field does not accept paste"
+  }
+
   private fun imeEnter(): String {
     val n = inputNode() ?: return "no text field focused"
     if (Build.VERSION.SDK_INT >= 30 && n.performAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_IME_ENTER.id)) return settled("enter pressed")
+    for (k in listOf("Send", "Search", "Go", "Done")) if (tapSmart(k)) return settled("pressed '$k'")
     return "enter is not supported here; tap the Send/Search button with tap_text instead"
   }
 

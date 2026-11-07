@@ -32,8 +32,8 @@ import java.util.concurrent.TimeoutException
 /** Everything Saara can do on the phone, natively (no Termux needed). */
 object Tools {
   fun declarations(): JSONArray = JSONArray("""[{"functionDeclarations":[
-{"name":"device_control","description":"Phone controls. action is one of: torch_on, torch_off, volume_up, volume_down, volume_set (level 0-100), open_app (target = app name, e.g. WhatsApp, WhatsApp Business, Instagram, Camera), open_camera, take_photo (opens the camera AND presses the shutter by itself; text = front for a selfie), call (target = contact name or number), answer_call (answers the ringing incoming call), end_call, reject_call, sms (target + text), wifi_panel, bluetooth_panel (opens the system panel; then use ui_action tap_text to flip the switch). open_app returns the new screen contents.","parameters":{"type":"OBJECT","properties":{"action":{"type":"STRING"},"target":{"type":"STRING"},"text":{"type":"STRING"},"level":{"type":"NUMBER"}},"required":["action"]}},
-{"name":"ui_action","description":"Control the screen via accessibility. EVERY op returns the new screen contents, so you can keep going without asking the user. op is one of: dump_ui (read all screen elements with bounds), tap_text (text = visible label, content description or view id), tap_xy (x,y from bounds), long_press (text or x,y), type (text; ADDS to what is already in the field, set replace=true to overwrite), clear_text, enter (keyboard Enter/Search/Send), swipe (direction up/down/left/right, or x,y,x2,y2), scroll_down, scroll_up, wait (ms), back, home, recents, notifications, shutter (press the camera shutter), flip_camera.","parameters":{"type":"OBJECT","properties":{"op":{"type":"STRING"},"text":{"type":"STRING"},"x":{"type":"NUMBER"},"y":{"type":"NUMBER"},"x2":{"type":"NUMBER"},"y2":{"type":"NUMBER"},"direction":{"type":"STRING"},"ms":{"type":"NUMBER"},"replace":{"type":"BOOLEAN"}},"required":["op"]}},
+{"name":"device_control","description":"Phone controls. action is one of: torch_on, torch_off, volume_up, volume_down, volume_set (level 0-100), open_app (target = app name, e.g. WhatsApp, WhatsApp Business, Instagram, Camera), open_camera, take_photo (opens the camera AND presses the shutter by itself; text = front for a selfie), call (target = contact name or number), answer_call (answers the ringing incoming call), end_call, reject_call, sms (target + text), wifi_panel, bluetooth_panel (opens the system panel; then use ui_action tap_text to flip the switch). open_app returns the new screen contents. Set confirmed=true only after the user explicitly confirms in a new turn.","parameters":{"type":"OBJECT","properties":{"action":{"type":"STRING"},"target":{"type":"STRING"},"text":{"type":"STRING"},"level":{"type":"NUMBER"},"confirmed":{"type":"BOOLEAN"}},"required":["action"]}},
+{"name":"ui_action","description":"Control the screen via accessibility. EVERY op returns the new screen contents, so you can keep going after the user confirms the task. op is one of: dump_ui (read all screen elements with bounds), tap_text (text = visible label, content description or view id), tap_id (id = view id suffix), tap_xy (x,y from bounds), double_tap (text or x,y), long_press (text or x,y), type (text; ADDS to what is already in the field, set replace=true to overwrite), clear_text, select_all, copy_text (text = text to copy, or blank to copy the focused selection), paste (into the focused field), enter (keyboard Enter/Search/Send), swipe (direction up/down/left/right, or x,y,x2,y2), scroll_down, scroll_up, wait (ms), wait_text (text, timeout ms), back, home, recents, notifications, shutter (press the camera shutter), flip_camera. Set confirmed=true only after the user explicitly confirms in a new turn.","parameters":{"type":"OBJECT","properties":{"op":{"type":"STRING"},"text":{"type":"STRING"},"id":{"type":"STRING"},"x":{"type":"NUMBER"},"y":{"type":"NUMBER"},"x2":{"type":"NUMBER"},"y2":{"type":"NUMBER"},"direction":{"type":"STRING"},"ms":{"type":"NUMBER"},"timeout":{"type":"NUMBER"},"replace":{"type":"BOOLEAN"},"confirmed":{"type":"BOOLEAN"}},"required":["op"]}},
 {"name":"remember","description":"Save something you learned about the user so you keep improving: a preference, habit, routine, person/relationship, a correction, or HOW they like tasks done. Call it quietly whenever the user reveals such a thing; do not announce it. category = preference | habit | routine | person | correction | command_style | shop | general.","parameters":{"type":"OBJECT","properties":{"fact":{"type":"STRING"},"category":{"type":"STRING"}},"required":["fact"]}},
 {"name":"recall","description":"Search everything you have learned about the user (older than the list in your instructions). query = keywords.","parameters":{"type":"OBJECT","properties":{"query":{"type":"STRING"}},"required":["query"]}},
 {"name":"remember_task","description":"Save which tool steps worked for a repeated mobile task so future attempts improve. goal = the task, method = concise working steps. Never include contacts, messages, ledger data, URLs, or screen text.","parameters":{"type":"OBJECT","properties":{"goal":{"type":"STRING"},"method":{"type":"STRING"}},"required":["goal","method"]}},
@@ -42,10 +42,10 @@ object Tools {
 {"name":"stop_screen_share","description":"Stop live screen sharing when the task no longer needs to see the screen.","parameters":{"type":"OBJECT","properties":{}}},
 {"name":"shop_record","description":"Shop-owner ledger. kind = purchase (price the user BOUGHT stock at), sale (price SOLD at), cancellation (cancelled / returned order, price = refunded unit price), price (list or MRP price note). item, price per unit, qty, party = supplier or customer name, note.","parameters":{"type":"OBJECT","properties":{"item":{"type":"STRING"},"kind":{"type":"STRING"},"price":{"type":"NUMBER"},"qty":{"type":"NUMBER"},"party":{"type":"STRING"},"note":{"type":"STRING"}},"required":["item","kind","price"]}},
 {"name":"shop_report","description":"Read the shop ledger: purchase / sale prices, quantities, cancellations and margin per item. item optional (empty = all items).","parameters":{"type":"OBJECT","properties":{"item":{"type":"STRING"}}}},
-{"name":"schedule_task","description":"Schedule a task or reminder for later. text = what to do/say when it fires. Give in_minutes OR at (HH:mm 24h, or yyyy-MM-dd HH:mm). repeat = none | hourly | daily | weekly.","parameters":{"type":"OBJECT","properties":{"text":{"type":"STRING"},"in_minutes":{"type":"NUMBER"},"at":{"type":"STRING"},"repeat":{"type":"STRING"}},"required":["text"]}},
+{"name":"schedule_task","description":"Schedule a task or reminder for later. text = what to do/say when it fires. Give in_minutes OR at (HH:mm 24h, or yyyy-MM-dd HH:mm). repeat = none | hourly | daily | weekly. Set confirmed=true only after the user explicitly confirms in a new turn.","parameters":{"type":"OBJECT","properties":{"text":{"type":"STRING"},"in_minutes":{"type":"NUMBER"},"at":{"type":"STRING"},"repeat":{"type":"STRING"},"confirmed":{"type":"BOOLEAN"}},"required":["text"]}},
 {"name":"list_tasks","description":"List scheduled tasks.","parameters":{"type":"OBJECT","properties":{}}},
-{"name":"cancel_task","description":"Cancel a scheduled task by id.","parameters":{"type":"OBJECT","properties":{"id":{"type":"NUMBER"}},"required":["id"]}},
-{"name":"reply_notification","description":"Reply to an incoming notification (WhatsApp, WhatsApp Business, Telegram ...) by its key.","parameters":{"type":"OBJECT","properties":{"key":{"type":"STRING"},"text":{"type":"STRING"}},"required":["key","text"]}},
+{"name":"cancel_task","description":"Cancel a scheduled task by id. Set confirmed=true only after the user explicitly confirms in a new turn.","parameters":{"type":"OBJECT","properties":{"id":{"type":"NUMBER"},"confirmed":{"type":"BOOLEAN"}},"required":["id"]}},
+{"name":"reply_notification","description":"Reply to an incoming notification (WhatsApp, WhatsApp Business, Telegram ...) by its key. Set confirmed=true only after the user explicitly confirms in a new turn.","parameters":{"type":"OBJECT","properties":{"key":{"type":"STRING"},"text":{"type":"STRING"},"confirmed":{"type":"BOOLEAN"}},"required":["key","text"]}},
 {"name":"fetch_url","description":"Fetch a public webpage or Google Sheet shared as 'Anyone with the link' and return its readable text.","parameters":{"type":"OBJECT","properties":{"url":{"type":"STRING"}},"required":["url"]}}
 ]}]""")
 
@@ -101,7 +101,7 @@ object Tools {
         }
       }).build()
     return try {
-      val request = Request.Builder().url(target).header("User-Agent", "SaaraAndroid/2.2").get().build()
+      val request = Request.Builder().url(target).header("User-Agent", "SaaraAndroid/2.2.1").get().build()
       client.newCall(request).execute().use { response ->
         if (!response.isSuccessful) return "error: server returned HTTP ${response.code}. The page may require sign-in or sharing permission."
         val body = response.body?.string()?.take(2_000_000).orEmpty()
@@ -124,6 +124,13 @@ object Tools {
   private fun has(c: Context, p: String) = ContextCompat.checkSelfPermission(c, p) == PackageManager.PERMISSION_GRANTED
 
   fun run(c: Context, name: String, a: JSONObject): String {
+    val readOnly = setOf("remember", "recall", "remember_task", "recall_task", "shop_report", "list_tasks")
+    if (TaskControl.isStop(Bus.lastUser) && name !in readOnly && name != "stop_screen_share") {
+      TaskControl.clear()
+      return "STOPPED: the user interrupted the task. Do not continue. Acknowledge briefly and wait for a new instruction."
+    }
+    val confirmation = TaskControl.confirmationFor(name, a)
+    if (confirmation != null && !TaskControl.isApproved()) return TaskControl.request(confirmation)
     val result = try {
       when (name) {
         "device_control" -> { Db.get(c).usage("action", a.optString("action")); if (a.optString("action") == "open_app") Db.get(c).usage("app", a.optString("target")); device(c, a) }
@@ -162,12 +169,23 @@ object Tools {
         else -> "unknown tool"
       }
     } catch (e: Exception) { "error: ${e.message}" }
-    val readOnly = setOf("remember", "recall", "remember_task", "recall_task", "shop_report", "list_tasks")
     if (name !in readOnly && Prefs.on(c, "learn_tasks", true)) {
       try { TaskLearning.note(c, Bus.lastUser, name, a, result) } catch (_: Exception) {}
     }
     return result
   }
+
+  /** Tool output that may be returned to Gemini. Private local databases never go back to the model. */
+  fun modelResult(name: String, result: String): String {
+    if (name in setOf("recall", "recall_task", "shop_report", "shop_record", "list_tasks", "fetch_url")) {
+      return "Completed on this phone. Private local contents were kept on the device."
+    }
+    return redact(result).take(6000)
+  }
+
+  private fun redact(s: String): String = s
+    .replace(Regex("\\b[+0-9][0-9 ()-]{7,}\\b"), "[number]")
+    .replace(Regex("[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}", RegexOption.IGNORE_CASE), "[email]")
 
   private fun launch(c: Context, i: Intent) {
     val ctx: Context = SaaraAccessibility.instance ?: c
@@ -326,6 +344,7 @@ object Tools {
 
   private fun ui(c: Context, a: JSONObject): String {
     if (!Prefs.on(c, "f_ui")) return off("Screen automation")
+    if (a.optString("op") in setOf("copy_text", "paste") && !Prefs.on(c, "f_clipboard", true)) return off("Clipboard copy & paste")
     val inst = SaaraAccessibility.instance ?: return need("Accessibility service (enable Screen automation in the app)")
     val ex = Executors.newSingleThreadExecutor()
     val f = ex.submit(Callable { inst.handle(a) })

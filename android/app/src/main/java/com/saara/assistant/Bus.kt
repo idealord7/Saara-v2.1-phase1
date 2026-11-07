@@ -13,6 +13,8 @@ object Bus {
   @Volatile var camOn = false
   @Volatile var screenOn = false
   @Volatile var lastUser = ""
+  /** Increments only when a new user turn starts, not when a transcription chunk is appended. */
+  @Volatile var userSeq = 0
   private var lastRole = ""
   private var ended = true
   private var db: Db? = null
@@ -42,6 +44,7 @@ object Bus {
         val now = System.currentTimeMillis()
         val id = try { db?.chatInsert(role, text, now) ?: ++fallbackId } catch (_: Exception) { ++fallbackId }
         msgs.add(Msg(id, role, text, now))
+        if (role == "you") userSeq++
       }
       lastRole = role; ended = false
       if (role == "you") lastUser = msgs.lastOrNull { it.role == "you" }?.text ?: text
@@ -52,7 +55,7 @@ object Bus {
   fun endTurn() { synchronized(this) { ended = true } }
   fun setStatus(s: String) { st = s; fire() }
   fun ping() = fire()
-  fun clear() { synchronized(this) { msgs.clear(); lastRole = ""; lastUser = ""; ended = true; try { db?.chatClear() } catch (_: Exception) {} }; fire() }
+  fun clear() { synchronized(this) { msgs.clear(); lastRole = ""; lastUser = ""; userSeq++; ended = true; TaskControl.clear(); try { db?.chatClear() } catch (_: Exception) {} }; fire() }
   fun older(beforeId: Long, n: Int): List<Msg> = try { db?.chatBefore(beforeId, n) ?: emptyList() } catch (_: Exception) { emptyList() }
   private fun fire() { Handler(Looper.getMainLooper()).post { ls.forEach { it() } } }
 }

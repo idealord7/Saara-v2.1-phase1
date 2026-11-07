@@ -48,6 +48,19 @@ class SaaraNotifications : NotificationListenerService() {
       } catch (e: Exception) { "failed: $e" }
     }
 
+    /** Caller name/number shown on the active incoming-call notification, if notification access is enabled. */
+    fun callInfo(): Pair<String, String>? {
+      val s = svc ?: return null
+      val list = try { s.activeNotifications ?: return null } catch (_: Exception) { return null }
+      val call = list.asSequence()
+        .filter { it.notification.category == Notification.CATEGORY_CALL }
+        .maxByOrNull { it.postTime } ?: return null
+      val title = call.notification.extras.getCharSequence(Notification.EXTRA_TITLE)?.toString()?.trim().orEmpty()
+      val text = call.notification.extras.getCharSequence(Notification.EXTRA_TEXT)?.toString()?.trim().orEmpty()
+      if (title.isBlank() && text.isBlank()) return null
+      return title to text
+    }
+
     /** Clicks a button (Answer / Decline ...) on the ongoing call notification. */
     fun callAction(words: List<String>): Boolean {
       val s = svc ?: return false
