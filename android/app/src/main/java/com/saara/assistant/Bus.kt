@@ -12,6 +12,8 @@ object Bus {
   val status: String get() = st
   @Volatile var camOn = false
   @Volatile var screenOn = false
+  /** True when screen sharing was requested by Saara for one task and should stop itself when the task ends. */
+  @Volatile var screenAuto = false
   @Volatile var lastUser = ""
   /** Increments only when a new user turn starts, not when a transcription chunk is appended. */
   @Volatile var userSeq = 0

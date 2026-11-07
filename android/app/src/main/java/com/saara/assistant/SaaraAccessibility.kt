@@ -40,14 +40,14 @@ class SaaraAccessibility : AccessibilityService() {
       "tap_text" -> {
         val t = m.optString("text")
         if (t.isBlank()) return "error: text is required"
-        return if (tapSmart(t)) settled("tapped '$t'")
-        else "not found: '$t'. Call dump_ui, try another label, scroll_down, or use tap_xy with bounds."
+        return if (tapTextSmart(t)) settled("tapped '$t'")
+        else "not found: '$t' after retries. Call dump_ui, try a shorter label, scroll_down, or use tap_xy with bounds."
       }
       "tap_id" -> {
         val id = m.optString("id").trim()
         if (id.isBlank()) return "error: id is required"
-        return if (tapId(id)) settled("tapped id '$id'")
-        else "not found: id '$id'. Call dump_ui and use the short id shown there."
+        return if (tapIdSmart(id)) settled("tapped id '$id'")
+        else "not found: id '$id' after retries. Call dump_ui and use the short id shown there."
       }
       "tap_xy" -> { if (!m.has("x") || !m.has("y")) return "error: x and y are required"; tapXY(m.optDouble("x").toFloat(), m.optDouble("y").toFloat()); return settled("tapped xy") }
       "double_tap" -> {
@@ -100,7 +100,7 @@ class SaaraAccessibility : AccessibilityService() {
   }
 
   /** Short pause so the UI settles, then returns what is on screen now. */
-  private fun settled(msg: String): String { sleep(700); return "$msg. Screen now: " + dump(3000) }
+  private fun settled(msg: String): String { sleep(550); return "$msg. Screen now: " + dump(3000) }
 
   // ---------- reading the screen ----------
   private fun root(): AccessibilityNodeInfo? {
@@ -143,6 +143,26 @@ class SaaraAccessibility : AccessibilityService() {
   }
 
   // ---------- tapping ----------
+  /** Retries after a short settle, then falls back to a clickable node or its view id. */
+  private fun tapTextSmart(t: String): Boolean {
+    repeat(2) { attempt ->
+      if (tapSmart(t)) return true
+      if (attempt == 0) sleep(350)
+    }
+    val n = nodeForText(t) ?: return false
+    if (clickNode(n)) return true
+    val id = n.viewIdResourceName?.substringAfter('/') ?: return false
+    return id.isNotBlank() && tapId(id)
+  }
+
+  private fun tapIdSmart(id: String): Boolean {
+    repeat(2) { attempt ->
+      if (tapId(id)) return true
+      if (attempt == 0) sleep(350)
+    }
+    return false
+  }
+
   /** Self-healing: text/description/id/hint match on every window; click the clickable ancestor, else tap the bounds centre. */
   private fun tapSmart(t: String): Boolean {
     val q = t.trim()

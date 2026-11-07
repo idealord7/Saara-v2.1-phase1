@@ -26,8 +26,8 @@ class ScreenAskActivity : Activity() {
     super.onActivityResult(requestCode, resultCode, data)
     if (requestCode == 10) {
       if (resultCode == RESULT_OK && data != null) {
-        Bus.add("system", "Screen sharing allowed. Starting live frames…", true)
-        startService(Intent(this, VoiceService::class.java).setAction("SCREEN_START").putExtra("code", resultCode).putExtra("data", data))
+        Bus.add("system", "Screen sharing allowed for this task. Starting live frames…", true)
+        startService(Intent(this, VoiceService::class.java).setAction("SCREEN_START").putExtra("code", resultCode).putExtra("data", data).putExtra("auto", true))
       } else {
         Bus.add("system", "Screen sharing was not allowed. Tap the Screen chip when you are ready.", true)
       }

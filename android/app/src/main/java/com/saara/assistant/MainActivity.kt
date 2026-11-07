@@ -338,6 +338,7 @@ class MainActivity : AppCompatActivity() {
       Prefs.plain(this).edit().putBoolean(key, v).apply()
       if (key == "f_bubble" || key == "f_overlay") VoiceService.instance?.refreshBubble()
       if (key == "wake_phrase") VoiceService.instance?.refreshWake()
+      if (key == "auto_sleep") VoiceService.instance?.refreshSleep()
       if (key == "f_calls") VoiceService.instance?.refreshCalls()
     }
     top.addView(titles, LinearLayout.LayoutParams(0, -2, 1f)); top.addView(sw)
@@ -369,8 +370,10 @@ class MainActivity : AppCompatActivity() {
       })
     feature(root, "Camera & screen sharing", "Send live camera or screen frames to Saara while sharing is ON, so she can complete tasks", "f_share", true,
       { has(Manifest.permission.CAMERA) }, "Allow camera", { requestPermissions(arrayOf(Manifest.permission.CAMERA), 3) })
-    feature(root, "Wake phrase", "Say \"Hey Saara\" before talking instead of keeping the microphone open all the time. Uses your phone's speech recognition.", "wake_phrase", true,
+    feature(root, "Wake phrase", "Say \"Hey Saara\" to wake her. After waking, the Gemini mic stays ON without toggling; when you stop talking she quietly returns to the wake phrase.", "wake_phrase", true,
       { has(Manifest.permission.RECORD_AUDIO) }, "Allow microphone", { requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO, Manifest.permission.POST_NOTIFICATIONS), 1) })
+    feature(root, "Quiet wake listening", "Briefly silences the phone's recognizer start beep while it restarts. Playing music, alarms and calls are left alone.", "quiet_wake", true, { true }, "", {})
+    feature(root, "Sleep when idle", "After about 90 seconds without a user turn, return to the wake phrase so Saara does not listen to background conversation.", "auto_sleep", true, { true }, "", {})
     feature(root, "Incoming call announcements", "Announce the caller, ask answer or reject, and turn on the loudspeaker when no Bluetooth headset is connected.", "f_calls", true,
       { has(Manifest.permission.READ_PHONE_STATE) && has(Manifest.permission.ANSWER_PHONE_CALLS) },
       "Grant phone & call info", { requestPermissions(arrayOf(Manifest.permission.READ_PHONE_STATE, Manifest.permission.READ_CALL_LOG, Manifest.permission.ANSWER_PHONE_CALLS), 5) })
@@ -736,7 +739,7 @@ class MainActivity : AppCompatActivity() {
     val privacyOn = Prefs.on(this, "privacy_mode", true)
     val privacyLabel = tv("Privacy mode · " + if (privacyOn) "ON" else "OFF", 16f, if (privacyOn) GOOD else WARN, true)
     privacy.addView(privacyLabel)
-    privacy.addView(tv("ON: Saara locally filters likely personal requests before sending text. OFF: ordinary typed prompts go to Gemini directly. In BOTH modes, contacts, SMS, call history, chat history, Learning, Knowledge, Sheet contents and confidential records are never attached or uploaded. While the mic is ON, microphone audio is streamed to Gemini for live voice replies; mute it anytime. Live camera and screen frames are sent to Gemini only while their sharing chips are ON, regardless of privacy mode; turn them off anytime. While Screen automation is ON, tool results may include current screen text so Saara can finish the task; private databases stay local. Task self-learning stores tool steps on this phone and may send only short task-step hints with numbers and emails redacted; it never sends contacts, messages, ledger data, or screen text.", 12f, SUB))
+    privacy.addView(tv("ON: Saara locally filters likely personal requests before sending text. OFF: ordinary typed prompts go to Gemini directly. In BOTH modes, contacts, SMS, call history, chat history, Learning, Knowledge, Sheet contents and confidential records are never attached or uploaded. While the mic is ON, microphone audio is streamed to Gemini for live voice replies; mute it anytime. Live camera and screen frames are sent to Gemini only while sharing is ON, regardless of privacy mode; manual sharing stays on until you stop it, while sharing Saara requests for a task stops automatically when that task ends. While Screen automation is ON, tool results may include current screen text so Saara can finish the task; private databases stay local. Task self-learning stores tool steps on this phone and may send only short task-step hints with numbers and emails redacted; it never sends contacts, messages, ledger data, or screen text.", 12f, SUB))
     lateinit var privacyToggle: Button
     privacyToggle = btn(if (privacyOn) "Turn privacy mode OFF" else "Turn privacy mode ON", SURF2) {
       val next = !Prefs.on(this, "privacy_mode", true)
@@ -888,7 +891,7 @@ class MainActivity : AppCompatActivity() {
     camChip.text = if (Bus.camOn) "📷 Camera: ON" else "📷 Camera"
     camChip.background = bg(if (Bus.camOn) ACC2 else SURF2, 18)
     flipChip.visibility = if (Bus.camOn) View.VISIBLE else View.GONE
-    screenChip.text = if (Bus.screenOn) "🖥 Screen: ON" else "🖥 Screen"
+    screenChip.text = if (Bus.screenOn) (if (Bus.screenAuto) "🖥 Screen: AUTO" else "🖥 Screen: ON") else "🖥 Screen"
     screenChip.background = bg(if (Bus.screenOn) ACC2 else SURF2, 18)
 
     val snap = synchronized(Bus) { ArrayList(Bus.msgs) }

@@ -48,6 +48,9 @@ class VoiceService : Service() {
   private var overlay: Overlay? = null
   private var cam: CamShare? = null
   private var screen: ScreenShare? = null
+  @Volatile private var screenAuto = false
+  private val screenAutoStop = Runnable { if (Bus.screenOn && screenAuto) stopScreen(true) }
+  private val sleepTimer = Runnable { sleepNow() }
   private var gotSpeech = false
   private val main = Handler(Looper.getMainLooper())
   private val busListener: () -> Unit = { updateOverlay() }
@@ -73,7 +76,7 @@ class VoiceService : Service() {
     } else if (wakeActive && !micStarted) {
       stopWake()
       Bus.add("system", "Microphone ON for this turn. Your live voice query is sent to Gemini.", true)
-      startMic()
+      main.postDelayed({ startMic() }, 300L)
     } else {
       micEnabled = false
       Prefs.plain(this).edit().putBoolean("mic_enabled", false).apply()
@@ -86,6 +89,39 @@ class VoiceService : Service() {
 
   private fun wakeOn() = Prefs.on(this, "wake_phrase", true)
 
+  /** After a wake session, quietly return to the local wake phrase when the user stops talking. */
+  private fun armSleep(delayMs: Long = 90_000L) {
+    if (!running || !ready || callActive || !micEnabled || !micStarted) return
+    if (!wakeOn() || !Prefs.on(this, "auto_sleep", true)) return
+    main.removeCallbacks(sleepTimer)
+    main.postDelayed(sleepTimer, delayMs)
+  }
+
+  private fun cancelSleep() = main.removeCallbacks(sleepTimer)
+
+  private fun sleepNow() {
+    if (!running || !ready || callActive || !micEnabled || !micStarted) return
+    if (Bus.screenOn || Bus.camOn) { armSleep(60_000L); return }
+    stopMic()
+    Bus.add("system", "Sleeping until you say \"Hey Saara\".", true)
+    Bus.setStatus("Sleeping · say \"Hey Saara\"")
+    startWake()
+    Bus.ping()
+  }
+
+  fun refreshSleep() {
+    if (!running || !ready) return
+    if (!Prefs.on(this, "auto_sleep", true) || !wakeOn()) cancelSleep()
+    else if (micStarted) armSleep()
+  }
+
+  /** Keeps an AI-requested screen share from ever becoming a forgotten background capture. */
+  private fun armScreenAuto(delayMs: Long) {
+    if (!screenAuto || !Bus.screenOn) return
+    main.removeCallbacks(screenAutoStop)
+    main.postDelayed(screenAutoStop, delayMs)
+  }
+
   /** With the wake phrase on, the phone's local recognizer waits for "Hey Saara" before Gemini gets the mic. */
   fun refreshWake() {
     if (!running || !ready || callActive) return
@@ -93,7 +129,7 @@ class VoiceService : Service() {
       if (!micStarted) startWake()
     } else {
       stopWake()
-      if (micEnabled && !micStarted) { Bus.add("system", "Wake phrase off. Microphone ON.", true); startMic() }
+      if (micEnabled && !micStarted) { Bus.add("system", "Wake phrase off. Microphone ON.", true); main.postDelayed({ startMic() }, 300L) }
     }
     Bus.ping()
   }
@@ -112,6 +148,7 @@ class VoiceService : Service() {
 
   private fun onCallStarted(caller: String) {
     callActive = true
+    cancelSleep()
     stopWake()
     stopMic()
     val who = if (caller.isBlank()) "an unknown number" else caller
@@ -139,6 +176,7 @@ class VoiceService : Service() {
 
   private fun startWake() {
     if (!running || !ready || callActive || !micEnabled || micStarted || wakeActive || !wakeOn()) return
+    cancelSleep()
     val w = WakeWord(this, { onWakePhrase() }, { msg -> main.post { wakeUnavailable(msg) } })
     wake = w; wakeActive = true
     Bus.setStatus("Connected · say \"Hey Saara\"")
@@ -154,6 +192,8 @@ class VoiceService : Service() {
 
   private fun onWakePhrase() {
     if (!running || !ready || !micEnabled) return
+    cancelSleep()
+    armScreenAuto(300_000L)
     stopWake()
     Bus.add("system", "Wake phrase heard. Starting the microphone…", true)
     startMic()
@@ -161,9 +201,10 @@ class VoiceService : Service() {
   }
 
   private fun wakeUnavailable(msg: String) {
+    cancelSleep()
     stopWake()
-    Bus.add("system", msg + " Microphone is ready instead.", true)
-    if (running && ready && micEnabled && !micStarted) startMic()
+    Bus.add("system", msg + " Tap the Mic chip to talk, or turn off the Wake phrase feature.", true)
+    Bus.setStatus("Wake phrase unavailable · tap Mic")
     Bus.ping()
   }
 
@@ -253,7 +294,7 @@ class VoiceService : Service() {
     when (i.action) {
       "CAM_START" -> startCam(i.getBooleanExtra("front", false))
       "CAM_STOP" -> stopCam(true)
-      "SCREEN_START" -> startScreen(i.getIntExtra("code", 0), projData(i))
+      "SCREEN_START" -> startScreen(i.getIntExtra("code", 0), projData(i), i.getBooleanExtra("auto", false))
       "SCREEN_STOP" -> stopScreen(true)
     }
   }
@@ -291,10 +332,12 @@ ws?.send(payload.toString())
       }.also { it.name = "saara-microphone"; it.start() }
       Bus.add("system", "Microphone is active. Audio is streamed to Gemini for live processing; personal device databases remain local.", true)
       Bus.setStatus("Connected · microphone ON")
+      armSleep(120_000L)
     } catch (e: Exception) { micStarted = false; Bus.add("system", "Microphone error: ${e.message}", true) }
   }
 
   private fun stopMic() {
+    cancelSleep()
     micStarted = false
     try { audioRecord?.stop() } catch (_: Exception) {}
     try { audioRecord?.release() } catch (_: Exception) {}
@@ -316,17 +359,22 @@ ws?.send(payload.toString())
     if (Bus.camOn) { Bus.camOn = false; fg(); if (say) { Bus.add("system", "Camera sharing stopped.", true); tellModel("[System] Camera sharing stopped. Do not reply.") } }
     Bus.ping()
   }
-  private fun startScreen(code: Int, data: Intent?) {
+  private fun startScreen(code: Int, data: Intent?, auto: Boolean) {
     if (data == null || code == 0) { Bus.add("system", "Screen sharing was not allowed.", true); return }
+    main.removeCallbacks(screenAutoStop)
+    screenAuto = auto; Bus.screenAuto = auto
     Bus.screenOn = true; fg()
     val s = screen ?: ScreenShare(this, { sendFrame(it) }, { main.post { stopScreen(true) } }).also { screen = it }
     val err = s.start(code, data)
     if (err != null) { Bus.add("system", err, true); stopScreen(false); return }
-    Bus.add("system", "Screen sharing is ON.", true)
+    Bus.add("system", if (auto) "Screen sharing is ON for this task. It will stop automatically when the task ends." else "Screen sharing is ON. Tap the Screen chip to stop it.", true)
     Bus.add("system", "Live screen frames are being sent to Gemini.", true)
-    tellModel("[System] Screen sharing is now ON. Live screen frames are being sent to you. Use them to complete the user's mobile task.")
+    if (auto) armScreenAuto(300_000L)
+    tellModel("[System] Screen sharing is now ON. Live screen frames are being sent to you. Use them to complete the user's mobile task." + if (auto) " This sharing was requested for the current task; it will be turned off automatically when the task is done." else "")
   }
   private fun stopScreen(say: Boolean) {
+    main.removeCallbacks(screenAutoStop)
+    screenAuto = false; Bus.screenAuto = false
     screen?.stop(); screen = null
     if (Bus.screenOn) { Bus.screenOn = false; fg(); if (say) { Bus.add("system", "Screen sharing stopped.", true); tellModel("[System] Screen sharing stopped. Do not reply.") } }
     Bus.ping()
@@ -385,12 +433,13 @@ ws?.send(payload.toString())
       // --- autonomous agent behaviour ---
       "AUTONOMY (very important): for any task with several steps (open an app, search, type, send, post, take a photo, answer a call...), complete the WHOLE task yourself by chaining tool calls one after another. " +
       "When camera or screen sharing is ON, you receive live frames and can see the screen. Use them to understand the screen, ground taps and complete mobile tasks. Private database contents are never sent. " +
-      "If you need to see the current screen and screen sharing is OFF, call request_screen_share. It opens Android's permission prompt; after the user taps Allow, continue the task yourself. Call stop_screen_share when screen access is no longer needed. " +
-      "CONFIRMATION & SAFETY (very important): before starting ANY task that changes the phone or screen, sends something, calls, opens something, deletes, pays, orders, books, cancels or confirms, first reply with one short summary in the user's language and ask them to confirm. Then stop and wait for the user's next turn. Do NOT call an action tool until they reply. After they confirm, call action tools with confirmed=true and finish the whole task. Read-only questions can be answered immediately. Destructive steps (delete, erase, remove, cancel, process, pay, confirm, entry, exit) must be named in that summary. " +
-      "If the user says stop, wait, hold on, ruko, bas or changes their mind at any time, stop immediately, call no more action tools, and briefly acknowledge. If a tool fails, say briefly what failed and ask how to proceed; never pretend it worked. " +
+      "SCREEN SHARING: manual screen sharing stays ON until the user turns it off. If YOU request it with request_screen_share, it is for the current task and the app turns it off automatically when the task ends; do not tell the user to stop it manually. " +
+      "SPEED & SELF-HEALING: prefer the shortest direct path. After every tool result, read the returned screen and continue. If an element is missing or a tap did nothing, do not repeat the same call blindly: try a different label/id, a shorter label, tap_xy with bounds, scroll, wait_text, back, reopen the app, or another route. Try at most twice per exact action, then report one short sentence. Use maximum intelligence and keep going until the task is genuinely done. " +
+      "CONFIRMATION (be smart and low-friction): do NOT ask for confirmation for clear, short, reversible actions: open app, tap, scroll, type, search, copy/paste, take photo, volume, torch, calls or messages when the recipient and content are already clear. Only ask ONCE when the action is destructive or irreversible (delete, erase, remove, cancel, pay, order, book, reset, submit, logout, block, report) or when the target/content is genuinely ambiguous. If the user already told you clearly, just do it; never ask again just to repeat the same yes. After a required confirmation, finish the whole task without asking again. Read-only questions are answered immediately. " +
+      "If the user says stop, wait, hold on, ruko, bas or changes their mind at any time, stop immediately, call no more action tools, and briefly acknowledge. If a tool really fails after alternatives, say briefly what failed and ask how to proceed; never pretend it worked. " +
       "CLIPBOARD: use ui_action copy_text to copy given text (or the selected text), select_all, and paste. Use copy/paste for fields that reject typing. " +
-      "CALLS: incoming calls are announced locally by the app; caller details are never sent to Gemini. Answer/reject actions still need confirmation. " +
-      "Ask when information is truly missing (which of two contacts, what text to write) and always before confirmation-required actions. " +
+      "CALLS: incoming calls are announced locally by the app; caller details are never sent to Gemini. Answer or reject when the user's instruction is clear. " +
+      "Ask only when information is truly missing (which of two contacts, what text to write). " +
       "Do not narrate each step; when everything is done, say one short sentence with the result. " +
       "Follow the user's command in the simplest way: never make it complicated, never lecture, find a way to get it done. " +
       "Photos: call device_control take_photo (it presses the shutter by itself; text=front for selfie). Calls: answer_call / end_call. " +
@@ -436,6 +485,10 @@ ws?.send(payload.toString())
         gotSpeech = true
         val heard = it.optString("text")
         Bus.add("you", heard)
+        if (heard.isNotBlank()) {
+          armScreenAuto(300_000L)
+          armSleep(120_000L)
+        }
         if (TaskControl.isStop(heard)) {
           TaskControl.clear()
           stopSpeaking()
@@ -446,11 +499,15 @@ ws?.send(payload.toString())
       if (sc.optBoolean("interrupted")) { stopSpeaking() }
       if (sc.optBoolean("turnComplete")) {
         Bus.endTurn()
+        armScreenAuto(6000L)
+        armSleep(90_000L)
         if (gotSpeech) { gotSpeech = false; try { Db.get(this).usage("command", "turn") } catch (_: Exception) {} }
       }
     }
     val calls = m.optJSONObject("toolCall")?.optJSONArray("functionCalls")
     if (calls != null) Thread {
+      armScreenAuto(300_000L)
+      cancelSleep()
       val out = JSONArray()
       for (i in 0 until calls.length()) {
         val c = calls.getJSONObject(i)
@@ -487,6 +544,8 @@ ws?.send(payload.toString())
       Regex("\\b[+0-9][0-9 ()-]{7,}\\b").containsMatchIn(t) ||
       Regex("[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}", RegexOption.IGNORE_CASE).containsMatchIn(t)
     Bus.add("you", t, true)
+    armScreenAuto(300_000L)
+    armSleep(120_000L)
     if (TaskControl.isStop(t)) {
       TaskControl.clear()
       stopSpeaking()
@@ -517,6 +576,9 @@ ws?.send(payload.toString())
 
   override fun onDestroy() {
     running = false; ready = false
+    cancelSleep()
+    main.removeCallbacks(screenAutoStop)
+    screenAuto = false; Bus.screenAuto = false
     stopWake()
     stopMic()
     Bus.unlisten(busListener)
