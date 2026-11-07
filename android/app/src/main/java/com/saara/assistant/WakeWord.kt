@@ -16,9 +16,9 @@ class WakeWord(
   private val c: Context,
   private val onWake: () -> Unit,
   private val onUnavailable: (String) -> Unit
-) {
+) : HotwordDetector {
   companion object {
-    private fun normalize(text: String) = text.lowercase(Locale.ROOT)
+    internal fun normalize(text: String) = text.lowercase(Locale.ROOT)
       .replace(Regex("[^\\p{L}\\p{M}\\p{N}]+"), " ").trim()
     private val PHRASES = listOf(
       "hey saara", "hi saara", "ok saara", "okay saara", "hello saara", "arre saara", "are saara", "oye saara", "o saara",
@@ -26,7 +26,7 @@ class WakeWord(
       "हे सारा", "अरे सारा", "हाय सारा", "হে সারা", "আরে সারা"
     ).map { normalize(it) }
     private val BARE = setOf("saara", "sara", "सारा", "সারা").map { normalize(it) }.toSet()
-    private fun isWake(text: String): Boolean =
+    internal fun isWake(text: String): Boolean =
       text in BARE || PHRASES.any { text.contains(it) }
   }
 
@@ -43,9 +43,9 @@ class WakeWord(
   private val restoreQuiet = Runnable { restoreSystemSound() }
   private val watchdog = Runnable { if (running) { destroy(); schedule(600L) } }
 
-  fun isRunning() = running
+  override fun isRunning() = running
 
-  fun start() {
+  override fun start() {
     main.post {
       if (running) return@post
       if (!SpeechRecognizer.isRecognitionAvailable(c)) {
@@ -59,7 +59,7 @@ class WakeWord(
     }
   }
 
-  fun stop() {
+  override fun stop() {
     main.post {
       running = false
       generation++

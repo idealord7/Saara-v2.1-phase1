@@ -799,6 +799,66 @@ class MainActivity : AppCompatActivity() {
     val kb = btn("Get Free API Key / Muft API Key Prapt Karein", SURF2) { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://aistudio.google.com/app/apikey"))) }
     c3.addView(kb, lp1)
 
+    // offline wake word
+    val cw = card(root)
+    cw.addView(tv("Offline wake word · \"Hey Saara\"", 16f, bold = true))
+    cw.addView(tv("Fully offline engines: openWakeWord (default) or Picovoice Porcupine. openWakeWord needs melspectrogram.tflite + embedding_model.tflite in android/app/src/main/assets/openwakeword/. Then either add a trained hey_saara.tflite, or tap “Train on this phone” to learn your voice on-device — no PC needed. For Porcupine, add an AccessKey and keywords/hey_saara.ppn. Without these Saara uses the phone's speech recognizer (which may use the network).", 12f, SUB))
+    val pvSaved = !(Prefs.secure(this).getString("pvAccessKey", "") ?: "").isBlank()
+    val pvKey = edit(if (pvSaved) "Picovoice AccessKey saved ✓ (type a new one to replace)" else "Paste Picovoice AccessKey", true)
+    cw.addView(pvKey)
+    val pvSave = btn("Save wake word key") {
+      if (pvKey.text.isNotBlank()) {
+        Prefs.secure(this).edit().putString("pvAccessKey", pvKey.text.toString().trim()).apply()
+        pvKey.text.clear()
+        pvKey.hint = "Picovoice AccessKey saved ✓ (type a new one to replace)"
+        toast("Saved. Stop and Start Saara to apply.")
+        VoiceService.instance?.refreshWake()
+      } else toast("Paste your Picovoice AccessKey first")
+    }
+    cw.addView(pvSave, lp1)
+    val pvGet = btn("Get free Picovoice AccessKey", SURF2) { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://console.picovoice.ai/"))) }
+    cw.addView(pvGet, lp1)
+    val engineOrder = listOf("auto", "openwakeword", "porcupine", "speech")
+    val engineNames = mapOf(
+      "auto" to "Auto",
+      "openwakeword" to "openWakeWord (offline)",
+      "porcupine" to "Porcupine (offline)",
+      "speech" to "Phone recognizer"
+    )
+    fun currentEngine() = Prefs.plain(this).getString("wake_engine", "auto") ?: "auto"
+    lateinit var engineBtn: Button
+    engineBtn = btn("Wake engine: ${engineNames[currentEngine()]}", SURF2) {
+      val next = engineOrder[(engineOrder.indexOf(currentEngine()).coerceAtLeast(0) + 1) % engineOrder.size]
+      Prefs.plain(this).edit().putString("wake_engine", next).apply()
+      engineBtn.text = "Wake engine: ${engineNames[next]}"
+      toast("Wake engine: ${engineNames[next]}. Stop and Start Saara to apply.")
+      VoiceService.instance?.refreshWake()
+    }
+    cw.addView(engineBtn, lp1)
+    val trainedModel = WakeVerifier.exists(this)
+    val trainBtn = btn(if (trainedModel) "Retrain \"Hey Saara\" on this phone" else "Train \"Hey Saara\" on this phone", SURF2) {
+      if (!has(Manifest.permission.RECORD_AUDIO)) {
+        requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), 1)
+        toast("Allow Microphone, then tap again.")
+        return@btn
+      }
+      AlertDialog.Builder(this)
+        .setTitle("Train on this phone")
+        .setMessage("You will say \"Hey Saara\" 5 times, then any other phrase 5 times.\n\nTakes about 35 seconds. Saara pauses the microphone while recording. Use a quiet room and speak normally.")
+        .setPositiveButton("Start") { _, _ -> startEnrollment() }
+        .setNegativeButton("Cancel", null)
+        .show()
+    }
+    cw.addView(trainBtn, lp1)
+    if (trainedModel) {
+      val delBtn = btn("Delete trained voice model", SURF2) {
+        WakeVerifier.delete(this)
+        toast("Trained voice model deleted.")
+        VoiceService.instance?.refreshWake()
+      }
+      cw.addView(delBtn, lp1)
+    }
+
     // data
     val c4 = card(root)
     c4.addView(tv("Chat history", 16f, bold = true))

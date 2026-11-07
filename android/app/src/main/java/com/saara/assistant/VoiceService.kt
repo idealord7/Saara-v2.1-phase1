@@ -34,9 +34,10 @@ class VoiceService : Service() {
   @Volatile private var micStarted = false
   @Volatile private var micEnabled = true
   @Volatile private var wakeActive = false
-  private var wake: WakeWord? = null
+  private var wake: HotwordDetector? = null
   private var calls: CallWatcher? = null
   @Volatile private var callActive = false
+  @Volatile private var enrolling = false
   private val micLock = Any()
   private var lastMicToggle = 0L
   private var micThread: Thread? = null
@@ -122,7 +123,7 @@ class VoiceService : Service() {
     main.postDelayed(screenAutoStop, delayMs)
   }
 
-  /** With the wake phrase on, the phone's local recognizer waits for "Hey Saara" before Gemini gets the mic. */
+  /** With the wake phrase on, an offline hotword engine waits for "Hey Saara" before Gemini gets the mic. */
   fun refreshWake() {
     if (!running || !ready || callActive) return
     if (wakeOn()) {
@@ -132,6 +133,26 @@ class VoiceService : Service() {
       if (micEnabled && !micStarted) { Bus.add("system", "Wake phrase off. Microphone ON.", true); main.postDelayed({ startMic() }, 300L) }
     }
     Bus.ping()
+  }
+
+  /** Releases the mic so the on-device enrollment can record cleanly. */
+  fun suspendWakeForEnrollment() {
+    main.post {
+      enrolling = true
+      cancelSleep()
+      stopWake()
+      stopMic()
+      if (running) Bus.add("system", "Wake word paused for voice enrollment.", true)
+    }
+  }
+
+  /** Re-arms the wake phrase after enrollment finishes. */
+  fun resumeWakeAfterEnrollment() {
+    main.post {
+      enrolling = false
+      if (!running || !ready || callActive || !micEnabled || micStarted) return@post
+      if (wakeOn()) startWake() else startMic()
+    }
   }
 
   /** Starts/stops the local incoming-call announcer according to the feature toggle and permission. */
@@ -175,12 +196,56 @@ class VoiceService : Service() {
   }
 
   private fun startWake() {
-    if (!running || !ready || callActive || !micEnabled || micStarted || wakeActive || !wakeOn()) return
+    if (!running || !ready || callActive || enrolling || !micEnabled || micStarted || wakeActive || !wakeOn()) return
     cancelSleep()
-    val w = WakeWord(this, { onWakePhrase() }, { msg -> main.post { wakeUnavailable(msg) } })
+    val engine = Prefs.plain(this).getString("wake_engine", "auto") ?: "auto"
+    val pvKey = Prefs.secure(this).getString("pvAccessKey", "") ?: ""
+    val porcupineReady = pvKey.isNotBlank() && runCatching {
+      assets.list("keywords")?.contains("hey_saara.ppn") == true
+    }.getOrDefault(false)
+    val openWakeReady = OpenWakeWordDetector.modelsAvailable(this)
+    // auto: openWakeWord if its models are present, else Porcupine, else the phone recognizer.
+    val useOpenWake = when (engine) {
+      "openwakeword" -> openWakeReady
+      "porcupine", "speech" -> false
+      else -> openWakeReady
+    }
+    val usePorcupine = when {
+      useOpenWake -> false
+      engine == "porcupine" -> porcupineReady
+      engine == "openwakeword" || engine == "speech" -> false
+      else -> porcupineReady
+    }
+    val w: HotwordDetector = when {
+      useOpenWake -> OpenWakeWordDetector(
+        this,
+        { onWakePhrase() },
+        { msg -> main.post { wakeUnavailable(msg) } },
+        { msg -> main.post { Bus.add("system", msg, true) } }
+      )
+      usePorcupine -> PorcupineWakeWord(
+        this,
+        pvKey,
+        { onWakePhrase() },
+        { msg -> main.post { wakeUnavailable(msg) } },
+        { msg -> main.post { Bus.add("system", msg, true) } }
+      )
+      else -> WakeWord(this, { onWakePhrase() }, { msg -> main.post { wakeUnavailable(msg) } })
+    }
     wake = w; wakeActive = true
     Bus.setStatus("Connected · say \"Hey Saara\"")
-    Bus.add("system", "Wake phrase is listening. Say \"Hey Saara\" to talk.", true)
+    when {
+      useOpenWake -> Bus.add("system", "Offline wake phrase (openWakeWord) is listening. Say \"Hey Saara\" to talk.", true)
+      usePorcupine -> Bus.add("system", "Offline wake phrase (Porcupine) is listening. Say \"Hey Saara\" to talk.", true)
+      else -> Bus.add("system", "Wake phrase is listening. Say \"Hey Saara\" to talk.", true)
+    }
+    if (engine == "openwakeword" && !openWakeReady) {
+      Bus.add("system", "openWakeWord needs melspectrogram.tflite + embedding_model.tflite in assets/openwakeword/, plus either a hey_saara.tflite model or a voice model trained in Settings.", true)
+    }
+    if (engine == "porcupine" && !porcupineReady) {
+      Bus.add("system", "Porcupine needs an AccessKey and assets/keywords/hey_saara.ppn.", true)
+    }
+    refreshNotif()
     w.start()
   }
 
@@ -188,15 +253,18 @@ class VoiceService : Service() {
     wakeActive = false
     val w = wake; wake = null
     w?.stop()
+    refreshNotif()
   }
 
   private fun onWakePhrase() {
-    if (!running || !ready || !micEnabled) return
+    if (!running || !ready) return
+    if (!micEnabled) { stopWake(); return }
     cancelSleep()
     armScreenAuto(300_000L)
     stopWake()
     Bus.add("system", "Wake phrase heard. Starting the microphone…", true)
-    startMic()
+    // Give the hotword engine a moment to release the recording device before Gemini takes it.
+    main.postDelayed({ startMic() }, 150L)
     Bus.ping()
   }
 
@@ -214,18 +282,39 @@ class VoiceService : Service() {
     val stop = PendingIntent.getService(this, 0, Intent(this, VoiceService::class.java).setAction("STOP"), PendingIntent.FLAG_IMMUTABLE)
     val open = PendingIntent.getActivity(this, 1, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE)
     val sharing = listOfNotNull(if (Bus.camOn) "camera" else null, if (Bus.screenOn) "screen" else null)
-    val title = if (sharing.isEmpty()) "Saara is listening" else "Saara is listening • sharing ${sharing.joinToString(" & ")}"
+    val state = when {
+      !micEnabled -> "Saara · microphone muted"
+      micStarted -> "Saara is listening"
+      wakeActive -> "Saara · say \"Hey Saara\""
+      ready -> "Saara · starting…"
+      else -> "Saara · connecting…"
+    }
+    val title = if (sharing.isEmpty()) state else "$state • sharing ${sharing.joinToString(" & ")}"
     return Notification.Builder(this, "saara").setContentTitle(title).setSmallIcon(android.R.drawable.ic_btn_speak_now)
       .setContentIntent(open).addAction(Notification.Action.Builder(android.R.drawable.ic_media_pause, "Stop", stop).build()).build()
+  }
+
+  /** Refreshes the ongoing notification without changing the foreground service types. */
+  private fun refreshNotif() {
+    if (!running) return
+    try { getSystemService(NotificationManager::class.java).notify(1, notif()) } catch (_: Exception) {}
   }
 
   /** (Re)declares the foreground service types that are currently needed. */
   private fun fg() {
     try {
       if (Build.VERSION.SDK_INT >= 30) {
-        var t = ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
-        if (Bus.camOn) t = t or ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA
+        // Android 14+ throws SecurityException when a type is declared without its
+        // runtime permission/consent, so only include types that are allowed now.
+        var t = 0
+        if (has(Manifest.permission.RECORD_AUDIO)) t = t or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+        if (Bus.camOn && has(Manifest.permission.CAMERA)) t = t or ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA
         if (Bus.screenOn) t = t or ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+        if (t == 0) {
+          Bus.add("system", "Microphone permission is missing, so Saara cannot listen in the background.", true)
+          stopSelf()
+          return
+        }
         startForeground(1, notif(), t)
       } else startForeground(1, notif())
     } catch (e: Exception) { Bus.add("system", "Foreground service: ${e.message}", true) }
@@ -235,9 +324,21 @@ class VoiceService : Service() {
     Bus.init(this)
     when (i?.action) {
       "STOP" -> { stopSelf(); return START_NOT_STICKY }
+      "WAKE" -> {
+        if (!running) { stopSelf(); return START_NOT_STICKY }
+        if (ready && micEnabled && !micStarted && !callActive) {
+          stopWake()
+          main.postDelayed({ startMic() }, 150L)
+        }
+        return START_STICKY
+      }
       "CAM_START", "CAM_STOP", "SCREEN_START", "SCREEN_STOP" -> { if (!running) { stopSelf(); return START_NOT_STICKY }; share(i!!); return START_STICKY }
     }
     if (running) return START_STICKY
+    if (!has(Manifest.permission.RECORD_AUDIO)) {
+      Bus.add("system", "Microphone permission is missing. Allow Microphone in Android app permissions.", true)
+      stopSelf(); return START_NOT_STICKY
+    }
     running = true; instance = this; Bus.running = true
     micEnabled = Prefs.plain(this).getBoolean("mic_enabled", true)
     migrateFacts(this)
@@ -303,8 +404,8 @@ class VoiceService : Service() {
 
   private fun tellModel(t: String) { if (ready) ws?.send(JSONObject().put("realtimeInput", JSONObject().put("text", t)).toString()) }
 
-  private fun startMic() {
-    if (!running || !ready || callActive || !micEnabled || micStarted) return
+  private fun startMic(attempt: Int = 0) {
+    if (!running || !ready || callActive || enrolling || !micEnabled || micStarted) return
     if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
       Bus.add("system", "Microphone permission is missing. Allow Microphone in Android app permissions.", true); return
     }
@@ -314,7 +415,17 @@ class VoiceService : Service() {
       val rec = AudioRecord.Builder().setAudioSource(MediaRecorder.AudioSource.VOICE_RECOGNITION)
         .setAudioFormat(AudioFormat.Builder().setSampleRate(rate).setChannelMask(AudioFormat.CHANNEL_IN_MONO).setEncoding(AudioFormat.ENCODING_PCM_16BIT).build())
         .setBufferSizeInBytes(maxOf(min, rate)).build()
-      if (rec.state != AudioRecord.STATE_INITIALIZED) { rec.release(); Bus.add("system", "Microphone could not initialize on this phone.", true); return }
+      if (rec.state != AudioRecord.STATE_INITIALIZED) {
+        rec.release()
+        // The hotword engine may still be releasing the mic on slower devices.
+        if (attempt < 3) {
+          main.postDelayed({ startMic(attempt + 1) }, 150L * (attempt + 1))
+        } else {
+          Bus.add("system", "Microphone was busy after the wake word. Re-arming…", true)
+          startWake()
+        }
+        return
+      }
       audioRecord = rec; rec.startRecording(); micStarted = true
       micThread = Thread {
         val buf = ByteArray(6400)
@@ -332,7 +443,8 @@ ws?.send(payload.toString())
       }.also { it.name = "saara-microphone"; it.start() }
       Bus.add("system", "Microphone is active. Audio is streamed to Gemini for live processing; personal device databases remain local.", true)
       Bus.setStatus("Connected · microphone ON")
-      armSleep(120_000L)
+      refreshNotif()
+      armSleep(30_000L)
     } catch (e: Exception) { micStarted = false; Bus.add("system", "Microphone error: ${e.message}", true) }
   }
 
@@ -342,6 +454,7 @@ ws?.send(payload.toString())
     try { audioRecord?.stop() } catch (_: Exception) {}
     try { audioRecord?.release() } catch (_: Exception) {}
     audioRecord = null; micThread = null
+    refreshNotif()
   }
 
   private fun startCam(front: Boolean) {
@@ -500,7 +613,8 @@ ws?.send(payload.toString())
       if (sc.optBoolean("turnComplete")) {
         Bus.endTurn()
         armScreenAuto(6000L)
-        armSleep(90_000L)
+        // Short follow-up window, then hand the mic back to the offline wake word.
+        armSleep(20_000L)
         if (gotSpeech) { gotSpeech = false; try { Db.get(this).usage("command", "turn") } catch (_: Exception) {} }
       }
     }

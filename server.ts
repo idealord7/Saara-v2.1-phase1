@@ -18,7 +18,7 @@ app.get('/api/health', (req, res) => {
   res.json({
     status: 'ok',
     service: 'Saara AI Voice Assistant',
-    version: '2.1.1',
+    version: '2.2.2',
     hasServerKey: !!process.env.GEMINI_API_KEY
   });
 });
