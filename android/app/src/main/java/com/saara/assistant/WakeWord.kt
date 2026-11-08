@@ -84,6 +84,12 @@ class WakeWord(
     main.postDelayed(restart, delay)
   }
 
+  fun restartListening(delay: Long = 0L) {
+    if (!running) return
+    main.removeCallbacks(restart)
+    main.postDelayed(restart, delay)
+  }
+
   private fun listen() {
     if (!running) return
     val r = recognizer ?: createRecognizer() ?: return
@@ -123,7 +129,7 @@ class WakeWord(
           SpeechRecognizer.ERROR_NO_MATCH, SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> 1200L
           else -> (1300L + consecutiveErrors * 250L).coerceAtMost(4000L)
         }
-        schedule(delay)
+        restartListening(delay)
       }
       override fun onResults(results: Bundle?) { inspect(results, true) }
       override fun onPartialResults(partialResults: Bundle?) { inspect(partialResults, false) }
@@ -163,7 +169,7 @@ class WakeWord(
       restoreSystemSound()
       destroy()
       main.postDelayed({ if (!isRunning() && token == generation - 1) onWake() }, 250L)
-    } else if (finished) schedule(700L)
+    } else if (finished) restartListening(700L)
   }
 
   private fun quietStart() {

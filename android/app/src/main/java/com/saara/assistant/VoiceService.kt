@@ -34,6 +34,7 @@ class VoiceService : Service() {
   @Volatile private var micStarted = false
   @Volatile private var micEnabled = true
   @Volatile private var wakeActive = false
+  @Volatile var isSaraActive = false
   private var wake: HotwordDetector? = null
   private var calls: CallWatcher? = null
   @Volatile private var callActive = false
@@ -53,6 +54,8 @@ class VoiceService : Service() {
   @Volatile private var screenAuto = false
   private val screenAutoStop = Runnable { if (Bus.screenOn && screenAuto) stopScreen(true) }
   private val sleepTimer = Runnable { sleepNow() }
+  private val sessionTimer = object : Runnable { override fun run() { endSession() } }
+  private var sessionTimeoutMs = 8_000L
   private var gotSpeech = false
   private val main = Handler(Looper.getMainLooper())
   private val busListener: () -> Unit = { updateOverlay() }
@@ -87,6 +90,20 @@ class VoiceService : Service() {
     }
     Bus.ping()
     }
+  }
+
+  fun startSession() {
+    isSaraActive = true
+    main.removeCallbacks(sessionTimer)
+    main.postDelayed(sessionTimer, sessionTimeoutMs)
+  }
+
+  fun endSession() {
+    if (!isSaraActive) return
+    isSaraActive = false
+    main.removeCallbacks(sessionTimer)
+    stopMic()
+    startWake()
   }
 
   private fun wakeOn() = Prefs.on(this, "wake_phrase", true)
@@ -263,6 +280,8 @@ class VoiceService : Service() {
     cancelSleep()
     armScreenAuto(300_000L)
     stopWake()
+    isSaraActive = true
+    startSession()
     Bus.add("system", "Wake phrase heard. Starting the microphone…", true)
     // Give the hotword engine a moment to release the recording device before Gemini takes it.
     main.postDelayed({ startMic() }, 150L)
@@ -645,7 +664,7 @@ ws?.send(payload.toString())
 
   private fun play(pcm: ByteArray) {
     if (track == null) return
-    if (speakingUntil <= System.currentTimeMillis()) { stopWake(); stopMic() }
+    if (speakingUntil <= System.currentTimeMillis()) { stopWake(); stopMic(); endSession() }
     speakingUntil = maxOf(speakingUntil, System.currentTimeMillis()) + pcm.size / 48
     audioQ.offer(pcm)
   }
