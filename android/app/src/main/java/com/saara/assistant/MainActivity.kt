@@ -33,7 +33,7 @@ import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicInteger
 
 class MainActivity : AppCompatActivity() {
-  companion object { @Volatile var visible = false }
+  companion object { @Volatile var visible = false; private const val ASSISTANT_START_ACTION = "com.saara.assistant.action.START"; private const val SAARA_SCHEME = "saara"; private const val SAARA_DEEP_LINK_HOST = "start"; private const val ASSISTANT_COMMAND = "saara_command" }
 
   private val BG = 0xFF131314.toInt(); private val SURF = 0xFF1E1F20.toInt(); private val SURF2 = 0xFF2A2C2E.toInt()
   private val TXT = 0xFFE3E3E3.toInt(); private val SUB = 0xFF9AA0A6.toInt(); private val ACC = 0xFF4FA3F7.toInt(); private val ACC2 = 0xFF1A73E8.toInt()
@@ -64,6 +64,8 @@ class MainActivity : AppCompatActivity() {
   private var loadingOlder = false
   private var pendingStart = false
   private var pendingCam = false
+  private var assistantLaunch = false
+  private var pendingAssistantText: String? = null
   private var camFront = false
   private var lastToggle = 0L
   private val fetchedModels = ArrayList<String>()
@@ -127,15 +129,47 @@ class MainActivity : AppCompatActivity() {
   private fun notifOn() = NotificationManagerCompat.getEnabledListenerPackages(this).contains(packageName)
   private fun svc(a: String) = Intent(this, VoiceService::class.java).setAction(a)
 
+  private fun isAssistantLaunch(i: Intent?): Boolean {
+    if (i == null) return false
+    val action = i.action
+    if (action == Intent.ACTION_ASSIST || action == Intent.ACTION_VOICE_COMMAND || action == ASSISTANT_START_ACTION) return true
+    if (action == Intent.ACTION_VIEW) {
+      val d = i.data ?: return false
+      return d.scheme?.lowercase() == SAARA_SCHEME && d.host == SAARA_DEEP_LINK_HOST
+    }
+    return false
+  }
+
+  private fun startAssistantFlow(i: Intent? = null) {
+    if (Bus.running) return
+    val cmd = i?.let { it.getStringExtra(Intent.EXTRA_TEXT)?.trim()?.takeIf { s -> s.isNotEmpty() } ?: it.getStringExtra(VoiceService.ASSISTANT_COMMAND)?.trim()?.takeIf { s -> s.isNotEmpty() } }
+    if (cmd != null) pendingAssistantText = cmd
+    if (!has(Manifest.permission.RECORD_AUDIO)) {
+      pendingStart = true
+      requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO, Manifest.permission.POST_NOTIFICATIONS), 1)
+      return
+    }
+    startSaara()
+  }
+
   // ---------- screen skeleton ----------
   override fun onCreate(b: Bundle?) {
     try {
       super.onCreate(b)
+      assistantLaunch = isAssistantLaunch(intent)
       onCreateInner(b)
+      if (assistantLaunch) { assistantLaunch = false; startAssistantFlow(intent) }
     } catch (t: Throwable) {
       Crash.save(this, t, "MainActivity.onCreate")
       throw t
     }
+  }
+
+  override fun onNewIntent(intent: Intent?) {
+    super.onNewIntent(intent)
+    setIntent(intent)
+    assistantLaunch = isAssistantLaunch(intent)
+    if (assistantLaunch) startAssistantFlow(intent)
   }
 
   private fun onCreateInner(b: Bundle?) {
@@ -921,7 +955,11 @@ class MainActivity : AppCompatActivity() {
 
   private fun startSaara() {
     if ((Prefs.secure(this).getString("apiKey", "") ?: "").isBlank()) { toast("Paste your Gemini API key in Settings and tap Save"); select(4); return }
-    startForegroundService(Intent(this, VoiceService::class.java))
+    val i = Intent(this, VoiceService::class.java)
+    val cmd = pendingAssistantText
+    if (cmd != null) i.putExtra(VoiceService.ASSISTANT_COMMAND, cmd)
+    pendingAssistantText = null
+    startForegroundService(i)
   }
 
   override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {

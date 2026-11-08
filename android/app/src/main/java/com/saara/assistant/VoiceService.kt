@@ -24,7 +24,7 @@ import java.util.concurrent.TimeUnit
 
 /** Gemini Live text intelligence with device-local storage. Mic audio and camera/screen frames stream to Gemini only while the user enables them. */
 class VoiceService : Service() {
-  companion object { var instance: VoiceService? = null }
+  companion object { var instance: VoiceService? = null; const val ASSISTANT_COMMAND = "saara_command" }
   private val http = OkHttpClient.Builder().pingInterval(20, TimeUnit.SECONDS).build()
   private var ws: WebSocket? = null
   @Volatile private var running = false
@@ -43,6 +43,7 @@ class VoiceService : Service() {
   private var micThread: Thread? = null
   private var audioRecord: AudioRecord? = null
   private var retries = 0
+  private var pendingCommand: String? = null
   private var track: AudioTrack? = null
   private val audioQ = java.util.concurrent.LinkedBlockingQueue<ByteArray>()
   private var bubble: Bubble? = null
@@ -334,6 +335,8 @@ class VoiceService : Service() {
       }
       "CAM_START", "CAM_STOP", "SCREEN_START", "SCREEN_STOP" -> { if (!running) { stopSelf(); return START_NOT_STICKY }; share(i!!); return START_STICKY }
     }
+    val cmd = i?.getStringExtra(ASSISTANT_COMMAND)?.trim()?.takeIf { it.isNotEmpty() }
+    if (cmd != null) pendingCommand = cmd
     if (running) return START_STICKY
     if (!has(Manifest.permission.RECORD_AUDIO)) {
       Bus.add("system", "Microphone permission is missing. Allow Microphone in Android app permissions.", true)
@@ -580,6 +583,9 @@ ws?.send(payload.toString())
     val m = try { JSONObject(s) } catch (e: Exception) { return }
     if (m.has("setupComplete")) {
       ready = true; retries = 0; Bus.setStatus("Connected · Gemini active")
+      val cmd = pendingCommand
+      pendingCommand = null
+      if (cmd != null) sendText(cmd)
       if (micEnabled) {
         if (wakeOn()) startWake() else startMic()
       } else {
