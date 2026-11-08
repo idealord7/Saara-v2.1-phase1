@@ -33,7 +33,7 @@ import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicInteger
 
 class MainActivity : AppCompatActivity() {
-  companion object { @Volatile var visible = false; private const val ASSISTANT_START_ACTION = "com.saara.assistant.action.START"; private const val SAARA_SCHEME = "saara"; private const val SAARA_DEEP_LINK_HOST = "start"; private const val ASSISTANT_COMMAND = "saara_command" }
+  companion object { @Volatile var visible = false; private const val ASSISTANT_START_ACTION = "custom.actions.intent.START_SAARA"; private const val SAARA_SCHEME = "saara"; private const val SAARA_DEEP_LINK_HOST = "start"; private const val ASSISTANT_COMMAND = "saara_command" }
 
   private val BG = 0xFF131314.toInt(); private val SURF = 0xFF1E1F20.toInt(); private val SURF2 = 0xFF2A2C2E.toInt()
   private val TXT = 0xFFE3E3E3.toInt(); private val SUB = 0xFF9AA0A6.toInt(); private val ACC = 0xFF4FA3F7.toInt(); private val ACC2 = 0xFF1A73E8.toInt()

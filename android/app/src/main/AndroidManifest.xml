@@ -32,7 +32,7 @@
         <category android:name="android.intent.category.DEFAULT"/>
       </intent-filter>
       <intent-filter>
-        <action android:name="com.saara.assistant.action.START"/>
+        <action android:name="custom.actions.intent.START_SAARA"/>
         <category android:name="android.intent.category.DEFAULT"/>
       </intent-filter>
       <intent-filter>
