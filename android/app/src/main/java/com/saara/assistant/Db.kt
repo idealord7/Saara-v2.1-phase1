@@ -9,6 +9,7 @@ data class Fact(val id: Long, val cat: String, val text: String, val ts: Long)
 data class ShopRow(val id: Long, val item: String, val kind: String, val price: Double, val qty: Double, val party: String, val note: String, val ts: Long)
 data class TaskRow(val id: Long, val whenMs: Long, val text: String, val repeatMs: Long)
 data class TaskStep(val id: Long, val goal: String, val tool: String, val args: String, val result: String, val ok: Boolean, val ts: Long)
+data class Rule(val id: Long, val text: String, val enabled: Boolean, val ts: Long)
 
 /** Local SQLite store: chat history, learned facts, shop ledger, usage stats, scheduled tasks, task steps. */
 class Db private constructor(c: Context) : SQLiteOpenHelper(c.applicationContext, "saara.db", null, 6) {
@@ -171,7 +172,7 @@ class Db private constructor(c: Context) : SQLiteOpenHelper(c.applicationContext
     val rs = rules().filter { it.enabled && it.text.isNotBlank() }.take(max)
     if (rs.isEmpty()) return ""
     val sb = StringBuilder("\nUser rules (must follow before taking any action/tool/response):\n")
-    rs.forEachIndexed { i, r -> sb.append(i + 1).append(". ").append(r.text.replace('\n', ' ').take(220)).append('\n') }
+    rs.forEachIndexed { i: Int, r: Rule -> sb.append(i + 1).append(". ").append(r.text.replace('\n', ' ').take(220)).append('\n') }
     return sb.toString()
   }
 
