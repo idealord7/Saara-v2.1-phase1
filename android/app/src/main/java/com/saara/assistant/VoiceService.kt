@@ -469,7 +469,9 @@ class VoiceService : Service() {
               } catch (_: Exception) {}
               continue
             }
-            // ACTIVE: stream to Gemini. During TTS we still forward so barge-in is possible (echo guards applied on transcripts).
+            // ACTIVE: do NOT stream mic to Gemini while Saara is speaking — prevents self-voice feedback loop (mic hears TTS).
+            // Barge-in via voice is disabled during playback; listening resumes after speaking guard.
+            if (speaking) continue
             val socket = ws ?: continue
             val chunk = ByteArray(n)
             System.arraycopy(buf, 0, chunk, 0, n)
@@ -734,7 +736,7 @@ class VoiceService : Service() {
         val parts = sc.optJSONObject("modelTurn")?.optJSONArray("parts")
         if (parts != null) for (i in 0 until parts.length()) {
           val inl = parts.getJSONObject(i).optJSONObject("inlineData")
-          if (inl != null) play(Base64.decode(inl.getString("data"), Base64.DEFAULT))
+          if (inl != null) { speakingUntil = maxOf(speakingUntil, System.currentTimeMillis() + 400L); play(Base64.decode(inl.getString("data"), Base64.DEFAULT)) }
         }
         sc.optJSONObject("outputTranscription")?.let {
           val txt = it.optString("text")
@@ -784,8 +786,7 @@ class VoiceService : Service() {
   private fun stopSpeaking() {
     audioQ.clear()
     try { track?.pause(); track?.flush(); track?.play() } catch (_: Exception) {}
-    speakingUntil = 0
-    lastReplyNorm = ""
+    speakingUntil = System.currentTimeMillis() + 500L
   }
 
   override fun onDestroy() {
