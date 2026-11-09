@@ -175,9 +175,13 @@ object Tools {
     return result
   }
 
-  /** Tool output that may be returned to Gemini. Private local databases never go back to the model. */
+  /** Tool output that may be returned to Gemini. Sensitive local DB contents are limited/redacted. */
   fun modelResult(name: String, result: String): String {
-    if (name in setOf("recall", "recall_task", "shop_report", "shop_record", "list_tasks", "fetch_url")) {
+    if (name in setOf("recall", "recall_task")) {
+      // Allow Saara to use user-taught learning/task methods (stored locally), but redact obvious PII patterns and limit size.
+      return redact(result).take(4000).ifBlank { "nothing found" }
+    }
+    if (name in setOf("shop_report", "shop_record", "list_tasks", "fetch_url")) {
       return "Completed on this phone. Private local contents were kept on the device."
     }
     return redact(result).take(6000)
