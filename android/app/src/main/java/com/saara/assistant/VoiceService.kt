@@ -48,7 +48,7 @@ class VoiceService : Service() {
     const val PREF_SESSION_TIMEOUT_SEC = "session_timeout_sec"
     const val PREF_SESSION_TIMEOUT_ENABLED = "session_timeout_enabled"
     const val DEFAULT_SESSION_TIMEOUT_SEC = 9
-    private const val ECHO_GUARD_MS = 1800L
+    private const val ECHO_GUARD_MS = 350L
     val DEFAULT_WAKE_PHRASES = listOf(
       "hey sara", "hey saara", "ok saara", "okay saara", "oye saara", "oye sara", "saara", "sara", "সারা", "سارا"
     )
@@ -284,13 +284,12 @@ class VoiceService : Service() {
     val now = System.currentTimeMillis()
     val norm = normForCompare(heard)
     // Echo/self-voice guards. Saara can hear her own TTS via mic; ignore likely echoes of the last reply.
-    val speakingNow = now < speakingUntil + ECHO_GUARD_MS
+    val speakingNow = now < speakingUntil
     if (norm.isNotEmpty()) {
-      if (norm == lastHeardNorm && (now - lastHeardAt) < 2500L) return
-      if (lastReplyNorm.isNotEmpty() && norm == lastReplyNorm && (now - lastReplyAt) < 12000L) return
-      if (lastReplyNorm.isNotEmpty() && (now - lastReplyAt) < 8000L && (lastReplyNorm.contains(norm) || norm.contains(lastReplyNorm)) && norm.length > 2) return
-      if (speakingNow && isSaraActive) return // prevent Saara hearing her own voice while speaking; resume after playback
-      if (speakingNow && !isSaraActive) return
+      if (norm == lastHeardNorm && (now - lastHeardAt) < 2000L) return
+      if (lastReplyNorm.isNotEmpty() && norm == lastReplyNorm && (now - lastReplyAt) < 10000L) return
+      if (lastReplyNorm.isNotEmpty() && (now - lastReplyAt) < 7000L && (lastReplyNorm.contains(norm) || norm.contains(lastReplyNorm)) && norm.length > 2) return
+      if (speakingNow) return // prevent self-voice loop while TTS is playing
       lastHeardNorm = norm; lastHeardAt = now
     } else if (speakingNow) return
 
@@ -740,13 +739,25 @@ class VoiceService : Service() {
         }
         sc.optJSONObject("outputTranscription")?.let {
           val txt = it.optString("text")
-          Bus.add("saara", txt)
-          val rn = normForCompare(txt)
-          if (rn.isNotEmpty()) { lastReplyNorm = rn; lastReplyAt = System.currentTimeMillis() }
+          if (txt.isNotBlank()) {
+            val last = synchronized(Bus) { Bus.msgs.lastOrNull()?.takeIf { m -> m.role == "saara" }?.text ?: "" }
+            val add = when {
+              last.isEmpty() -> txt
+              txt.startsWith(last) -> txt.substring(last.length)
+              last.endsWith(txt) -> ""
+              txt == last -> ""
+              else -> txt
+            }
+            if (add.isNotEmpty()) Bus.add("saara", add)
+            val shown = synchronized(Bus) { Bus.msgs.lastOrNull()?.takeIf { m -> m.role == "saara" }?.text ?: txt }
+            val rn = normForCompare(shown)
+            if (rn.isNotEmpty()) { lastReplyNorm = rn; lastReplyAt = System.currentTimeMillis() }
+          }
         }
-        if (sc.optBoolean("interrupted")) { stopSpeaking() }
+        if (sc.optBoolean("interrupted")) { stopSpeaking(); resetSessionTimerIfActive() }
         if (sc.optBoolean("turnComplete")) {
           Bus.endTurn(); armScreenAuto(6000L)
+          resetSessionTimerIfActive()
           try { Db.get(this).usage("command", "turn") } catch (_: Exception) {}
         }
       } else {
@@ -786,7 +797,7 @@ class VoiceService : Service() {
   private fun stopSpeaking() {
     audioQ.clear()
     try { track?.pause(); track?.flush(); track?.play() } catch (_: Exception) {}
-    speakingUntil = System.currentTimeMillis() + 500L
+    speakingUntil = System.currentTimeMillis() + 300L
   }
 
   override fun onDestroy() {
