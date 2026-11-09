@@ -48,7 +48,7 @@ class VoiceService : Service() {
     const val PREF_SESSION_TIMEOUT_SEC = "session_timeout_sec"
     const val PREF_SESSION_TIMEOUT_ENABLED = "session_timeout_enabled"
     const val DEFAULT_SESSION_TIMEOUT_SEC = 9
-    private const val ECHO_GUARD_MS = 1200L
+    private const val ECHO_GUARD_MS = 1800L
     val DEFAULT_WAKE_PHRASES = listOf(
       "hey sara", "hey saara", "ok saara", "okay saara", "oye saara", "oye sara", "saara", "sara", "সারা", "سارا"
     )
@@ -283,14 +283,16 @@ class VoiceService : Service() {
     if (heard.isBlank()) return
     val now = System.currentTimeMillis()
     val norm = normForCompare(heard)
-    // Echo/dup guards. In active mode allow barge-in (don't block all speech while TTS plays); in idle be stricter.
+    // Echo/self-voice guards. Saara can hear her own TTS via mic; ignore likely echoes of the last reply.
+    val speakingNow = now < speakingUntil + ECHO_GUARD_MS
     if (norm.isNotEmpty()) {
       if (norm == lastHeardNorm && (now - lastHeardAt) < 2500L) return
-      if (lastReplyNorm.isNotEmpty() && norm == lastReplyNorm && (now - lastReplyAt) < 8000L) return
-      if (lastReplyNorm.isNotEmpty() && (now - lastReplyAt) < 5000L && (lastReplyNorm.contains(norm) || norm.contains(lastReplyNorm)) && norm.length > 3) return
-      if (!isSaraActive && now < speakingUntil + ECHO_GUARD_MS) return
+      if (lastReplyNorm.isNotEmpty() && norm == lastReplyNorm && (now - lastReplyAt) < 12000L) return
+      if (lastReplyNorm.isNotEmpty() && (now - lastReplyAt) < 8000L && (lastReplyNorm.contains(norm) || norm.contains(lastReplyNorm)) && norm.length > 2) return
+      if (speakingNow && isSaraActive) return // prevent Saara hearing her own voice while speaking; resume after playback
+      if (speakingNow && !isSaraActive) return
       lastHeardNorm = norm; lastHeardAt = now
-    } else if (!isSaraActive && now < speakingUntil + ECHO_GUARD_MS) return
+    } else if (speakingNow) return
 
     if (!isSaraActive) {
       val afterWake = extractWakeCommand(heard) ?: return // software: ignore all non-wake/background
@@ -696,11 +698,12 @@ class VoiceService : Service() {
       "Do not ask for private shop ledger details. Local ledger data is not sent to Gemini. " +
       "Live camera and screen frames are sent to Gemini only while the user turns camera or screen sharing ON; the user can turn them off at any time. While Screen automation is ON, on-device tool results may include screen text so you can complete the task; private local database contents (Learning, Knowledge, contacts, messages, tasks, fetched pages) are withheld. Links and spreadsheet data are fetched and stored locally by the app, not by Gemini. " +
       if (taskMemory.isBlank()) "" else "The short task-memory hints below contain goal names, tool names and outcomes with numbers/emails redacted; they do not contain contacts, messages, ledger data, or screen text.\n$taskMemory"
+    val rules = try { Db.get(this).rulesPrompt() } catch (_: Exception) { "" }
     val s = JSONObject()
       .put("model", "models/$model")
       .put("generationConfig", JSONObject().put("responseModalities", JSONArray().put("AUDIO"))
         .put("speechConfig", JSONObject().put("voiceConfig", JSONObject().put("prebuiltVoiceConfig", JSONObject().put("voiceName", voice)))))
-      .put("systemInstruction", JSONObject().put("parts", JSONArray().put(JSONObject().put("text", ins))))
+      .put("systemInstruction", JSONObject().put("parts", JSONArray().put(JSONObject().put("text", ins + rules))))
       .put("tools", Tools.declarations())
       .put("inputAudioTranscription", JSONObject())
       .put("outputAudioTranscription", JSONObject())

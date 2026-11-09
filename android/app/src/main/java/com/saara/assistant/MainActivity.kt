@@ -514,6 +514,40 @@ class MainActivity : AppCompatActivity() {
     }
     val tlp = LinearLayout.LayoutParams(-1, -2); tlp.topMargin = dp(6); teach.addView(tb, tlp)
 
+    val rulesCard = card(learnBox)
+    rulesCard.addView(tv("Rules (applied before actions)", 16f, bold = true))
+    rulesCard.addView(tv("Saara must follow enabled rules before taking any action, using tools, or replying. Edit/add/delete as needed.", 12f, SUB))
+    val ri = edit("Add a rule, e.g. Ask before sending SMS"); rulesCard.addView(ri)
+    val rb = btn("Add rule") {
+      val t = ri.text.toString().trim()
+      if (t.isNotEmpty()) { db.ruleAdd(t); rebuildLearning() }
+    }
+    val rlp = LinearLayout.LayoutParams(-1, -2); rlp.topMargin = dp(6); rulesCard.addView(rb, rlp)
+    val rules = db.rules()
+    if (rules.isEmpty()) rulesCard.addView(tv("No rules yet.", 13f, SUB))
+    for (r in rules) {
+      val row = LinearLayout(this); row.orientation = LinearLayout.VERTICAL; row.setPadding(0, dp(8), 0, dp(8))
+      val sw = Switch(this)
+      sw.text = if (r.enabled) "ON" else "OFF"
+      sw.isChecked = r.enabled
+      sw.setOnCheckedChangeListener { _, v -> db.ruleSetEnabled(r.id, v); rebuildLearning() }
+      row.addView(sw)
+      row.addView(tv(r.text, 14f))
+      val acts = LinearLayout(this); acts.orientation = LinearLayout.HORIZONTAL
+      val editB = btn("Edit", SURF2) {
+        val input = edit("Rule"); input.setText(r.text)
+        AlertDialog.Builder(this).setTitle("Edit rule").setView(input)
+          .setPositiveButton("Save") { _, _ -> db.ruleUpdate(r.id, input.text.toString()); rebuildLearning() }
+          .setNegativeButton("Cancel", null).show()
+      }
+      val delB = btn("Delete", SURF2) { db.ruleDelete(r.id); rebuildLearning() }
+      acts.addView(editB, LinearLayout.LayoutParams(0, -2, 1f))
+      val sp = Space(this); acts.addView(sp, LinearLayout.LayoutParams(dp(8), 1))
+      acts.addView(delB, LinearLayout.LayoutParams(0, -2, 1f))
+      row.addView(acts)
+      rulesCard.addView(row)
+    }
+
     if (facts.isNotEmpty()) {
       for ((cat, list) in facts.groupBy { it.cat }) {
         val c = card(learnBox)
