@@ -52,6 +52,7 @@ class WakeEngine(
   private val preds = ArrayDeque<Float>()
   private var lastHit = 0L
   private var settled = false
+  @Volatile private var failed = false
 
   fun available(): Boolean = OpenWakeWordFeatures.available(c) &&
     (OpenWakeWordDetector.wakeModel(c) != null || WakeVerifier.exists(c))
@@ -77,15 +78,24 @@ class WakeEngine(
             OpenWakeWordFeatures.loadModel(c, wakePath),
             Interpreter.Options().setNumThreads(1)
           )
-          val shape = interp.getInputTensor(0).shape()
-          window = if (shape.size >= 2 && shape[1] > 0) shape[1] else DEFAULT_WINDOW
-          interp.resizeInput(0, intArrayOf(1, window, EMB_DIM))
-          interp.allocateTensors()
+          try {
+            val shape = interp.getInputTensor(0).shape()
+            window = if (shape.size >= 2 && shape[1] > 0) shape[1] else DEFAULT_WINDOW
+            interp.allocateTensors()
+          } catch (e: Exception) {
+            try {
+              val shape = interp.getInputTensor(0).shape()
+              window = if (shape.size >= 2 && shape[1] > 0) shape[1] else DEFAULT_WINDOW
+              interp.resizeInput(0, intArrayOf(1, window, EMB_DIM))
+              interp.allocateTensors()
+            } catch (e2: Exception) { throw e2 }
+          }
           wake = interp
         } else {
           window = DEFAULT_WINDOW
         }
         resetState()
+        failed = false
         running = true
         when {
           wakePath == null -> onNotice("Using on-device trained voice model for wake.")
@@ -129,60 +139,59 @@ class WakeEngine(
     }
   }
 
-  fun feedBytesPcm16(bytes: ByteArray, count: Int) {
-    if (!running || count < 2) return
-    val n = (count / 2)
-    val shorts = ShortArray(n)
-    var j = 0
-    var i = 0
-    while (i + 1 < count && j < n) {
-      val lo = bytes[i].toInt() and 0xff
-      val hi = bytes[i + 1].toInt()
-      shorts[j++] = ((hi shl 8) or lo).toShort()
-      i += 2
-    }
-    feed(shorts, j)
-  }
-
   private fun processChunk() {
+    if (failed) return
     val f = features ?: return
-    val embedding = f.accept(audio) ?: return
+    val embedding = try { f.accept(audio) } catch (e: Exception) { fail(e); return } ?: return
     feats.addLast(embedding)
     while (feats.size > FEATURE_MAX) feats.removeFirst()
     if (feats.size < VERIFIER_WINDOW) return
 
-    val baseScore = if (wake != null && feats.size >= window) {
-      val input = FloatArray(window * EMB_DIM)
-      val win = lastN(feats, window)
-      var idx = 0
-      for (row in win) {
-        System.arraycopy(row, 0, input, idx, EMB_DIM)
-        idx += EMB_DIM
+    try {
+      val baseScore = if (wake != null && feats.size >= window) {
+        val input = FloatArray(window * EMB_DIM)
+        val win = lastN(feats, window)
+        var idx = 0
+        for (row in win) {
+          val copy = minOf(row.size, EMB_DIM)
+          if (copy > 0) System.arraycopy(row, 0, input, idx, copy)
+          idx += EMB_DIM
+        }
+        val out = OpenWakeWordFeatures.runModel(wake!!, input)
+        if (out.size > 1) (out.maxOrNull() ?: 0f) else out[0]
+      } else 1f
+
+      val verifierScore = verifier?.let { it.score(WakeVerifier.pool(lastN(feats, VERIFIER_WINDOW))) } ?: 1f
+
+      val hit = when {
+        wake != null && verifier != null ->
+          baseScore >= THRESHOLD && verifierScore >= VERIFIER_GATE_THRESHOLD
+        wake != null -> baseScore >= THRESHOLD
+        verifier != null -> verifierScore >= VERIFIER_PRIMARY_THRESHOLD
+        else -> false
       }
-      val out = OpenWakeWordFeatures.runModel(wake!!, input)
-      if (out.size > 1) (out.maxOrNull() ?: 0f) else out[0]
-    } else 1f
 
-    val verifierScore = verifier?.let { it.score(WakeVerifier.pool(lastN(feats, VERIFIER_WINDOW))) } ?: 1f
+      if (preds.size >= 5) settled = true
+      preds.addLast(if (hit) 1f else 0f)
+      while (preds.size > PRED_MAX) preds.removeFirst()
 
-    val hit = when {
-      wake != null && verifier != null ->
-        baseScore >= THRESHOLD && verifierScore >= VERIFIER_GATE_THRESHOLD
-      wake != null -> baseScore >= THRESHOLD
-      verifier != null -> verifierScore >= VERIFIER_PRIMARY_THRESHOLD
-      else -> false
+      val now = SystemClock.elapsedRealtime()
+      if (settled && hit && now - lastHit > DEBOUNCE_MS) {
+        lastHit = now
+        running = false
+        main.post { onWake() }
+      }
+    } catch (e: Exception) {
+      fail(e)
     }
+  }
 
-    if (preds.size >= 5) settled = true
-    preds.addLast(if (hit) 1f else 0f)
-    while (preds.size > PRED_MAX) preds.removeFirst()
-
-    val now = SystemClock.elapsedRealtime()
-    if (settled && hit && now - lastHit > DEBOUNCE_MS) {
-      lastHit = now
-      running = false
-      main.post { onWake() }
-    }
+  private fun fail(e: Exception) {
+    if (failed) return
+    failed = true
+    running = false
+    val msg = "Wake engine failed: ${e.message}"
+    main.post { onUnavailable(msg) }
   }
 
   private fun lastN(q: ArrayDeque<FloatArray>, n: Int): List<FloatArray> {
