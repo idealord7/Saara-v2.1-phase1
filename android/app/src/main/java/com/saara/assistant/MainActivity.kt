@@ -229,7 +229,7 @@ class MainActivity : AppCompatActivity() {
     val big = ImageView(this); big.setImageResource(R.drawable.logo_full); big.alpha = 0.95f
     e.addView(big, LinearLayout.LayoutParams(dp(200), dp(200)))
     val hi = tv("Hi, I'm Saara", 22f, bold = true); hi.gravity = Gravity.CENTER; e.addView(hi)
-    val sub = tv("Tap Start to connect Gemini. General questions go to Gemini automatically; personal device records stay on this phone.", 13f, SUB); sub.gravity = Gravity.CENTER; sub.setPadding(dp(24), dp(6), dp(24), 0); e.addView(sub)
+    val sub = tv("Tap Start to connect Gemini. Say \"Hey Sara\" or \"سارا\" to activate; then speak your commands.", 13f, SUB); sub.gravity = Gravity.CENTER; sub.setPadding(dp(24), dp(6), dp(24), 0); e.addView(sub)
     fr.addView(e, FrameLayout.LayoutParams(-1, -1))
     box.addView(fr, LinearLayout.LayoutParams(-1, 0, 1f))
 
@@ -256,9 +256,6 @@ class MainActivity : AppCompatActivity() {
         else if (extractHttpUrl(t) != null) {
           input.text.clear()
           fetchAndSaveUrl(extractHttpUrl(t)!!)
-        } else if ((Prefs.on(this, "privacy_mode", true) && looksPersonal(t)) || Db.get(this).recall(t, 5).any { it.cat == "web_source" }) {
-          input.text.clear()
-          answerFromLocalKnowledge(t)
         } else {
           s.sendText(t)
           input.text.clear()
@@ -371,8 +368,6 @@ class MainActivity : AppCompatActivity() {
     sw.setOnCheckedChangeListener { _, v ->
       Prefs.plain(this).edit().putBoolean(key, v).apply()
       if (key == "f_bubble" || key == "f_overlay") VoiceService.instance?.refreshBubble()
-      if (key == "wake_phrase") VoiceService.instance?.refreshWake()
-      if (key == "auto_sleep") VoiceService.instance?.refreshSleep()
       if (key == "f_calls") VoiceService.instance?.refreshCalls()
     }
     top.addView(titles, LinearLayout.LayoutParams(0, -2, 1f)); top.addView(sw)
@@ -404,10 +399,6 @@ class MainActivity : AppCompatActivity() {
       })
     feature(root, "Camera & screen sharing", "Send live camera or screen frames to Saara while sharing is ON, so she can complete tasks", "f_share", true,
       { has(Manifest.permission.CAMERA) }, "Allow camera", { requestPermissions(arrayOf(Manifest.permission.CAMERA), 3) })
-    feature(root, "Wake phrase", "Say \"Hey Saara\" to wake her. After waking, the Gemini mic stays ON without toggling; when you stop talking she quietly returns to the wake phrase.", "wake_phrase", true,
-      { has(Manifest.permission.RECORD_AUDIO) }, "Allow microphone", { requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO, Manifest.permission.POST_NOTIFICATIONS), 1) })
-    feature(root, "Quiet wake listening", "Briefly silences the phone's recognizer start beep while it restarts. Playing music, alarms and calls are left alone.", "quiet_wake", true, { true }, "", {})
-    feature(root, "Sleep when idle", "After about 90 seconds without a user turn, return to the wake phrase so Saara does not listen to background conversation.", "auto_sleep", true, { true }, "", {})
     feature(root, "Incoming call announcements", "Announce the caller, ask answer or reject, and turn on the loudspeaker when no Bluetooth headset is connected.", "f_calls", true,
       { has(Manifest.permission.READ_PHONE_STATE) && has(Manifest.permission.ANSWER_PHONE_CALLS) },
       "Grant phone & call info", { requestPermissions(arrayOf(Manifest.permission.READ_PHONE_STATE, Manifest.permission.READ_CALL_LOG, Manifest.permission.ANSWER_PHONE_CALLS), 5) })
@@ -552,23 +543,8 @@ class MainActivity : AppCompatActivity() {
     }
   }
 
-  // ---------- LOCAL PRIVACY / URL IMPORT ----------
+  // ---------- URL IMPORT ----------
   private fun extractHttpUrl(text: String): String? = Regex("""https?://[^\s<>"']+""", RegexOption.IGNORE_CASE).find(text)?.value?.trimEnd('.', ',', ')', ']')
-
-  private fun looksPersonal(text: String): Boolean {
-    val q = text.lowercase(Locale.ROOT)
-    return listOf("my contact", "my contacts", "my phone", "phone number", "my address", "home address", "bank account", "account number", "call history", "call log", "sms history", "my messages", "message from", "my email", "my whatsapp", "my saved learning", "my knowledge", "my sheet", "my spreadsheet", "my call", "আমার নম্বর", "আমার কন্টাক্ট", "আমার মেসেজ", "আমার কল", "আমার ঠিকানা", "মেসেজ থেকে", "কল হিস্ট্রি", "मेरा नंबर", "मेरे संपर्क", "मेरे मैसेज", "मेरी कॉल हिस्ट्री", "मेरा पता").any { q.contains(it) } ||
-      Regex("\\b[+0-9][0-9 ()-]{7,}\\b").containsMatchIn(text) ||
-      Regex("[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}", RegexOption.IGNORE_CASE).containsMatchIn(text)
-  }
-
-  private fun answerFromLocalKnowledge(query: String) {
-    Bus.add("you", query, true)
-    val matches = Db.get(this).recall(query, 8)
-    val answer = if (matches.isEmpty()) "I checked Saara's on-device Knowledge and Learning database. No matching saved information was found. Nothing was sent to Gemini." else
-      "I found this on your device:\n" + matches.joinToString("\n") { "• [${it.cat}] ${it.text}" } + "\n\nThis information stayed on this phone."
-    Bus.add("saara", answer, true)
-  }
 
   private fun fetchAndSaveUrl(url: String) {
     toast("Fetching link locally. Content will stay on this device…")
@@ -769,21 +745,6 @@ class MainActivity : AppCompatActivity() {
     val (sv, root) = page()
     heading(root, "Settings")
 
-    val privacy = card(root)
-    val privacyOn = Prefs.on(this, "privacy_mode", true)
-    val privacyLabel = tv("Privacy mode · " + if (privacyOn) "ON" else "OFF", 16f, if (privacyOn) GOOD else WARN, true)
-    privacy.addView(privacyLabel)
-    privacy.addView(tv("ON: Saara locally filters likely personal requests before sending text. OFF: ordinary typed prompts go to Gemini directly. In BOTH modes, contacts, SMS, call history, chat history, Learning, Knowledge, Sheet contents and confidential records are never attached or uploaded. While the mic is ON, microphone audio is streamed to Gemini for live voice replies; mute it anytime. Live camera and screen frames are sent to Gemini only while sharing is ON, regardless of privacy mode; manual sharing stays on until you stop it, while sharing Saara requests for a task stops automatically when that task ends. While Screen automation is ON, tool results may include current screen text so Saara can finish the task; private databases stay local. Task self-learning stores tool steps on this phone and may send only short task-step hints with numbers and emails redacted; it never sends contacts, messages, ledger data, or screen text.", 12f, SUB))
-    var privacyToggle: Button? = null
-    privacyToggle = btn(if (privacyOn) "Turn privacy mode OFF" else "Turn privacy mode ON", SURF2) {
-      val next = !Prefs.on(this, "privacy_mode", true)
-      Prefs.plain(this).edit().putBoolean("privacy_mode", next).apply()
-      privacyLabel.text = "Privacy mode · " + if (next) "ON" else "OFF"
-      privacyLabel.setTextColor(if (next) GOOD else WARN)
-      privacyToggle?.text = if (next) "Turn privacy mode OFF" else "Turn privacy mode ON"
-      toast(if (next) "Privacy mode ON. Personal requests are filtered locally." else "Privacy mode OFF. Ordinary typed prompts go to Gemini; local databases remain private.")
-    }
-    privacy.addView(privacyToggle!!)
     addFeatures(root)
 
     // language priority
@@ -833,66 +794,6 @@ class MainActivity : AppCompatActivity() {
     val kb = btn("Get Free API Key / Muft API Key Prapt Karein", SURF2) { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://aistudio.google.com/app/apikey"))) }
     c3.addView(kb, lp1)
 
-    // offline wake word
-    val cw = card(root)
-    cw.addView(tv("Offline wake word · \"Hey Saara\"", 16f, bold = true))
-    cw.addView(tv("Fully offline engines: openWakeWord (default) or Picovoice Porcupine. openWakeWord needs melspectrogram.tflite + embedding_model.tflite in android/app/src/main/assets/openwakeword/. Then either add a trained hey_saara.tflite, or tap “Train on this phone” to learn your voice on-device — no PC needed. For Porcupine, add an AccessKey and keywords/hey_saara.ppn. Without these Saara uses the phone's speech recognizer (which may use the network).", 12f, SUB))
-    val pvSaved = !(Prefs.secure(this).getString("pvAccessKey", "") ?: "").isBlank()
-    val pvKey = edit(if (pvSaved) "Picovoice AccessKey saved ✓ (type a new one to replace)" else "Paste Picovoice AccessKey", true)
-    cw.addView(pvKey)
-    val pvSave = btn("Save wake word key") {
-      if (pvKey.text.isNotBlank()) {
-        Prefs.secure(this).edit().putString("pvAccessKey", pvKey.text.toString().trim()).apply()
-        pvKey.text.clear()
-        pvKey.hint = "Picovoice AccessKey saved ✓ (type a new one to replace)"
-        toast("Saved. Stop and Start Saara to apply.")
-        VoiceService.instance?.refreshWake()
-      } else toast("Paste your Picovoice AccessKey first")
-    }
-    cw.addView(pvSave, lp1)
-    val pvGet = btn("Get free Picovoice AccessKey", SURF2) { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://console.picovoice.ai/"))) }
-    cw.addView(pvGet, lp1)
-    val engineOrder = listOf("auto", "openwakeword", "porcupine", "speech")
-    val engineNames = mapOf(
-      "auto" to "Auto",
-      "openwakeword" to "openWakeWord (offline)",
-      "porcupine" to "Porcupine (offline)",
-      "speech" to "Phone recognizer"
-    )
-    fun currentEngine() = Prefs.plain(this).getString("wake_engine", "auto") ?: "auto"
-    var engineBtn: Button? = null
-    engineBtn = btn("Wake engine: ${engineNames[currentEngine()]}", SURF2) {
-      val next = engineOrder[(engineOrder.indexOf(currentEngine()).coerceAtLeast(0) + 1) % engineOrder.size]
-      Prefs.plain(this).edit().putString("wake_engine", next).apply()
-      engineBtn?.text = "Wake engine: ${engineNames[next]}"
-      toast("Wake engine: ${engineNames[next]}. Stop and Start Saara to apply.")
-      VoiceService.instance?.refreshWake()
-    }
-    cw.addView(engineBtn!!, lp1)
-    val trainedModel = WakeVerifier.exists(this)
-    val trainBtn = btn(if (trainedModel) "Retrain \"Hey Saara\" on this phone" else "Train \"Hey Saara\" on this phone", SURF2) {
-      if (!has(Manifest.permission.RECORD_AUDIO)) {
-        requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), 1)
-        toast("Allow Microphone, then tap again.")
-        return@btn
-      }
-      AlertDialog.Builder(this)
-        .setTitle("Train on this phone")
-        .setMessage("You will say \"Hey Saara\" 5 times, then any other phrase 5 times.\n\nTakes about 35 seconds. Saara pauses the microphone while recording. Use a quiet room and speak normally.")
-        .setPositiveButton("Start") { _, _ -> startEnrollment() }
-        .setNegativeButton("Cancel", null)
-        .show()
-    }
-    cw.addView(trainBtn, lp1)
-    if (trainedModel) {
-      val delBtn = btn("Delete trained voice model", SURF2) {
-        WakeVerifier.delete(this)
-        toast("Trained voice model deleted.")
-        VoiceService.instance?.refreshWake()
-      }
-      cw.addView(delBtn, lp1)
-    }
-
     // data
     val c4 = card(root)
     c4.addView(tv("Chat history", 16f, bold = true))
@@ -908,15 +809,6 @@ class MainActivity : AppCompatActivity() {
     c5.addView(img, LinearLayout.LayoutParams(dp(120), dp(120)))
     val ab = tv("Saara AI Agent", 14f, SUB); ab.gravity = Gravity.CENTER; c5.addView(ab)
     return sv
-  }
-
-  private fun startEnrollment() {
-    VoiceService.instance?.suspendWakeForEnrollment()
-    val enrollment = WakeEnrollment(this)
-    enrollment.train(
-      onPrompt = { msg -> Bus.add("system", msg, true) },
-      onDone = { msg -> VoiceService.instance?.resumeWakeAfterEnrollment(); Bus.add("system", msg, true) }
-    )
   }
 
   private fun fetchModels(key: String, done: (List<String>) -> Unit) {
@@ -965,7 +857,6 @@ class MainActivity : AppCompatActivity() {
   override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
     super.onRequestPermissionsResult(requestCode, permissions, grantResults)
     if (pendingStart && has(Manifest.permission.RECORD_AUDIO)) { pendingStart = false; startSaara() }
-    if (requestCode == 1 && has(Manifest.permission.RECORD_AUDIO)) VoiceService.instance?.refreshWake()
     if (pendingCam && has(Manifest.permission.CAMERA)) { pendingCam = false; if (Bus.running) startService(svc("CAM_START").putExtra("front", camFront)) }
     if (requestCode == 5) {
       if (has(Manifest.permission.READ_PHONE_STATE)) { toast("Incoming call announcements enabled"); VoiceService.instance?.refreshCalls() }
@@ -992,9 +883,8 @@ class MainActivity : AppCompatActivity() {
     startBtn.text = if (Bus.running) "Stop" else "Start"
     startBtn.background = bg(if (Bus.running) 0xFFB3261E.toInt() else ACC2, 20)
     val micOn = VoiceService.instance?.isMicOn() ?: false
-    val wakeOn = VoiceService.instance?.isWakeOn() ?: false
-    muteChip.text = when { micOn -> "🎤 Mic: ON"; wakeOn -> "🎤 Wake: ON"; else -> "🎤 Mic: OFF" }
-    muteChip.background = bg(if (micOn || wakeOn) ACC2 else SURF2, 18)
+    muteChip.text = if (micOn) "🎤 Mic: ON" else "🎤 Mic: OFF"
+    muteChip.background = bg(if (micOn) ACC2 else SURF2, 18)
     camChip.text = if (Bus.camOn) "📷 Camera: ON" else "📷 Camera"
     camChip.background = bg(if (Bus.camOn) ACC2 else SURF2, 18)
     flipChip.visibility = if (Bus.camOn) View.VISIBLE else View.GONE

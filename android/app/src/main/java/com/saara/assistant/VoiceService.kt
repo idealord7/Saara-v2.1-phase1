@@ -6,11 +6,15 @@ import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.media.*
 import android.os.Build
+import android.os.Bundle
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.os.SystemClock
 import android.provider.Settings
+import android.speech.RecognitionListener
+import android.speech.RecognizerIntent
+import android.speech.SpeechRecognizer
 import android.util.Base64
 import androidx.core.content.ContextCompat
 import okhttp3.*
@@ -22,7 +26,9 @@ import java.util.Date
 import java.util.Locale
 import java.util.concurrent.TimeUnit
 
-/** Gemini Live text intelligence with device-local storage. Mic audio and camera/screen frames stream to Gemini only while the user enables them. */
+/** Gemini Live text intelligence with continuous background speech recognition.
+ *  Speech is ignored until "Hey Sara"/"سارا"/"সারা" is detected; once active, follow-ups are processed
+ *  without repeating the wake word until an 8–10s silence timeout resets the session. */
 class VoiceService : Service() {
   companion object { var instance: VoiceService? = null; const val ASSISTANT_COMMAND = "saara_command" }
   private val http = OkHttpClient.Builder().pingInterval(20, TimeUnit.SECONDS).build()
@@ -31,18 +37,16 @@ class VoiceService : Service() {
   @Volatile private var ready = false
   @Volatile private var speakingUntil = 0L
   @Volatile var muted = false
-  @Volatile private var micStarted = false
-  @Volatile private var micEnabled = true
-  @Volatile private var wakeActive = false
   @Volatile var isSaraActive = false
-  private var wake: HotwordDetector? = null
+  @Volatile private var listening = false
+  @Volatile private var recognizerBusy = false
+  @Volatile private var micEnabled = true
+  private var recognizer: SpeechRecognizer? = null
   private var calls: CallWatcher? = null
   @Volatile private var callActive = false
   @Volatile private var enrolling = false
   private val micLock = Any()
   private var lastMicToggle = 0L
-  private var micThread: Thread? = null
-  private var audioRecord: AudioRecord? = null
   private var retries = 0
   private var pendingCommand: String? = null
   private var track: AudioTrack? = null
@@ -53,85 +57,85 @@ class VoiceService : Service() {
   private var screen: ScreenShare? = null
   @Volatile private var screenAuto = false
   private val screenAutoStop = Runnable { if (Bus.screenOn && screenAuto) stopScreen(true) }
-  private val sleepTimer = Runnable { sleepNow() }
-  private val sessionTimer = object : Runnable { override fun run() { endSession() } }
-  private var sessionTimeoutMs = 8_000L
-  private var gotSpeech = false
+  private var sessionTimeoutMs = 9_000L
   private val main = Handler(Looper.getMainLooper())
   private val busListener: () -> Unit = { updateOverlay() }
+  private val sessionTimer = Runnable { endSession() }
+  private val restartRunnable = Runnable { startListeningInternal() }
+  private val recognitionListener = object : RecognitionListener {
+    override fun onReadyForSpeech(params: Bundle?) { recognizerBusy = true }
+    override fun onBeginningOfSpeech() { recognizerBusy = true }
+    override fun onRmsChanged(rmsdB: Float) {}
+    override fun onBufferReceived(buffer: ByteArray?) {}
+    override fun onEndOfSpeech() {}
+    override fun onEvent(eventType: Int, params: Bundle?) {}
+    override fun onPartialResults(partialResults: Bundle?) { resetSessionTimerIfActive() }
+    override fun onResults(results: Bundle?) {
+      recognizerBusy = false
+      handleRecognitionResults(results)
+      restartListening(250L)
+    }
+    override fun onError(error: Int) {
+      recognizerBusy = false
+      if (!running) return
+      if (error == SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS) {
+        Bus.add("system", "Microphone permission is missing.", true)
+        return
+      }
+      // Keep listening continuously through SpeechTimeout / NoMatch / network hiccups.
+      val delay = when (error) {
+        SpeechRecognizer.ERROR_NO_MATCH, SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> 300L
+        SpeechRecognizer.ERROR_RECOGNIZER_BUSY, SpeechRecognizer.ERROR_CLIENT -> 700L
+        SpeechRecognizer.ERROR_AUDIO -> 500L
+        else -> 600L
+      }
+      restartListening(delay)
+    }
+  }
 
-  fun isMicOn(): Boolean = micEnabled && micStarted
-  fun isWakeOn(): Boolean = wakeActive && !micStarted
+  fun isMicOn(): Boolean = micEnabled && listening
   fun toggleMic() {
     synchronized(micLock) {
-    val now = SystemClock.elapsedRealtime()
-    if (now - lastMicToggle < 800L) return
-    lastMicToggle = now
-    if (callActive) {
-      Bus.add("system", "A call is in progress. I will keep the microphone off until it ends.", true)
-      return
-    }
-    if (!micEnabled) {
-      micEnabled = true
-      Prefs.plain(this).edit().putBoolean("mic_enabled", true).apply()
-      if (ready) {
-        if (wakeOn()) startWake() else startMic()
+      val now = SystemClock.elapsedRealtime()
+      if (now - lastMicToggle < 800L) return
+      lastMicToggle = now
+      if (callActive) {
+        Bus.add("system", "A call is in progress. I will keep the microphone off until it ends.", true)
+        return
       }
-      Bus.add("system", if (wakeOn()) "Microphone armed. Say \"Hey Saara\" to talk." else "Microphone ON. Your live voice query is sent to Gemini; local contacts and saved records are never attached.", true)
-    } else if (wakeActive && !micStarted) {
-      stopWake()
-      Bus.add("system", "Microphone ON for this turn. Your live voice query is sent to Gemini.", true)
-      main.postDelayed({ startMic() }, 300L)
-    } else {
-      micEnabled = false
-      Prefs.plain(this).edit().putBoolean("mic_enabled", false).apply()
-      stopWake(); stopMic(); Bus.add("system", "Microphone muted.", true)
-      if (ready) Bus.setStatus("Connected · microphone muted")
-    }
-    Bus.ping()
+      micEnabled = !micEnabled
+      Prefs.plain(this).edit().putBoolean("mic_enabled", micEnabled).apply()
+      if (micEnabled) {
+        Bus.add("system", "Microphone ON. Say \"Hey Sara\" or \"سارا\" to start.", true)
+        startListening()
+      } else {
+        endSession()
+        stopListening()
+        Bus.add("system", "Microphone muted.", true)
+      }
+      Bus.ping()
     }
   }
 
   fun startSession() {
     isSaraActive = true
+    resetSessionTimer()
+  }
+
+  private fun resetSessionTimer() {
     main.removeCallbacks(sessionTimer)
-    main.postDelayed(sessionTimer, sessionTimeoutMs)
+    if (isSaraActive) main.postDelayed(sessionTimer, sessionTimeoutMs)
+  }
+
+  private fun resetSessionTimerIfActive() {
+    if (isSaraActive) resetSessionTimer()
   }
 
   fun endSession() {
     if (!isSaraActive) return
     isSaraActive = false
     main.removeCallbacks(sessionTimer)
-    stopMic()
-    startWake()
-  }
-
-  private fun wakeOn() = Prefs.on(this, "wake_phrase", true)
-
-  /** After a wake session, quietly return to the local wake phrase when the user stops talking. */
-  private fun armSleep(delayMs: Long = 90_000L) {
-    if (!running || !ready || callActive || !micEnabled || !micStarted) return
-    if (!wakeOn() || !Prefs.on(this, "auto_sleep", true)) return
-    main.removeCallbacks(sleepTimer)
-    main.postDelayed(sleepTimer, delayMs)
-  }
-
-  private fun cancelSleep() = main.removeCallbacks(sleepTimer)
-
-  private fun sleepNow() {
-    if (!running || !ready || callActive || !micEnabled || !micStarted) return
-    if (Bus.screenOn || Bus.camOn) { armSleep(60_000L); return }
-    stopMic()
-    Bus.add("system", "Sleeping until you say \"Hey Saara\".", true)
-    Bus.setStatus("Sleeping · say \"Hey Saara\"")
-    startWake()
-    Bus.ping()
-  }
-
-  fun refreshSleep() {
-    if (!running || !ready) return
-    if (!Prefs.on(this, "auto_sleep", true) || !wakeOn()) cancelSleep()
-    else if (micStarted) armSleep()
+    Bus.add("system", "Session ended. Say \"Hey Sara\" or \"سارا\" to start again.", true)
   }
 
   /** Keeps an AI-requested screen share from ever becoming a forgotten background capture. */
@@ -141,35 +145,20 @@ class VoiceService : Service() {
     main.postDelayed(screenAutoStop, delayMs)
   }
 
-  /** With the wake phrase on, an offline hotword engine waits for "Hey Saara" before Gemini gets the mic. */
-  fun refreshWake() {
-    if (!running || !ready || callActive) return
-    if (wakeOn()) {
-      if (!micStarted) startWake()
-    } else {
-      stopWake()
-      if (micEnabled && !micStarted) { Bus.add("system", "Wake phrase off. Microphone ON.", true); main.postDelayed({ startMic() }, 300L) }
-    }
-    Bus.ping()
-  }
-
   /** Releases the mic so the on-device enrollment can record cleanly. */
   fun suspendWakeForEnrollment() {
     main.post {
       enrolling = true
-      cancelSleep()
-      stopWake()
-      stopMic()
-      if (running) Bus.add("system", "Wake word paused for voice enrollment.", true)
+      stopListening()
+      if (running) Bus.add("system", "Voice recognition paused for enrollment.", true)
     }
   }
 
-  /** Re-arms the wake phrase after enrollment finishes. */
+  /** Re-arms listening after enrollment finishes. */
   fun resumeWakeAfterEnrollment() {
     main.post {
       enrolling = false
-      if (!running || !ready || callActive || !micEnabled || micStarted) return@post
-      if (wakeOn()) startWake() else startMic()
+      if (running && ready && !callActive && micEnabled) startListening()
     }
   }
 
@@ -187,9 +176,7 @@ class VoiceService : Service() {
 
   private fun onCallStarted(caller: String) {
     callActive = true
-    cancelSleep()
-    stopWake()
-    stopMic()
+    stopListening()
     val who = if (caller.isBlank()) "an unknown number" else caller
     Bus.setStatus("Incoming call" + if (caller.isBlank()) "" else " · $caller")
     Bus.add("system", "Incoming call from $who. Say \"answer\" or \"reject\" — the caller details stay on this phone.", true)
@@ -203,97 +190,66 @@ class VoiceService : Service() {
 
   private fun onCallEnded() {
     callActive = false
-    Bus.setStatus(if (ready) "Connected · Gemini active" else Bus.status)
+    Bus.setStatus(if (ready) "Connected · listening" else Bus.status)
     Bus.add("system", "Call ended.", true)
     main.postDelayed({
-      if (running && ready && !callActive && micEnabled && !micStarted) {
-        if (wakeOn()) startWake() else startMic()
-      }
+      if (running && ready && !callActive && micEnabled) startListening()
     }, 900L)
     Bus.ping()
   }
 
-  private fun startWake() {
-    if (!running || !ready || callActive || enrolling || !micEnabled || micStarted || wakeActive || !wakeOn()) return
-    cancelSleep()
-    val engine = Prefs.plain(this).getString("wake_engine", "auto") ?: "auto"
-    val pvKey = Prefs.secure(this).getString("pvAccessKey", "") ?: ""
-    val porcupineReady = pvKey.isNotBlank() && runCatching {
-      assets.list("keywords")?.contains("hey_saara.ppn") == true
-    }.getOrDefault(false)
-    val openWakeReady = OpenWakeWordDetector.modelsAvailable(this)
-    // auto: openWakeWord if its models are present, else Porcupine, else the phone recognizer.
-    val useOpenWake = when (engine) {
-      "openwakeword" -> openWakeReady
-      "porcupine", "speech" -> false
-      else -> openWakeReady
+  private fun handleRecognitionResults(bundle: Bundle?) {
+    val matches = bundle?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION).orEmpty()
+    val heard = matches.firstOrNull { it.isNotBlank() }?.trim().orEmpty()
+    if (heard.isBlank()) return
+    if (!isSaraActive) {
+      val afterWake = extractWakeCommand(heard)
+      if (afterWake == null) return // idle: ignore all speech until wake word
+      isSaraActive = true
+      resetSessionTimer()
+      Bus.add("system", "Wake word heard.", true)
+      if (afterWake.isNotBlank()) processUtterance(afterWake)
+      return
     }
-    val usePorcupine = when {
-      useOpenWake -> false
-      engine == "porcupine" -> porcupineReady
-      engine == "openwakeword" || engine == "speech" -> false
-      else -> porcupineReady
-    }
-    val w: HotwordDetector = when {
-      useOpenWake -> OpenWakeWordDetector(
-        this,
-        { onWakePhrase() },
-        { msg -> main.post { wakeUnavailable(msg) } },
-        { msg -> main.post { Bus.add("system", msg, true) } }
-      )
-      usePorcupine -> PorcupineWakeWord(
-        this,
-        pvKey,
-        { onWakePhrase() },
-        { msg -> main.post { wakeUnavailable(msg) } },
-        { msg -> main.post { Bus.add("system", msg, true) } }
-      )
-      else -> WakeWord(this, { onWakePhrase() }, { msg -> main.post { wakeUnavailable(msg) } })
-    }
-    wake = w; wakeActive = true
-    Bus.setStatus("Connected · say \"Hey Saara\"")
-    when {
-      useOpenWake -> Bus.add("system", "Offline wake phrase (openWakeWord) is listening. Say \"Hey Saara\" to talk.", true)
-      usePorcupine -> Bus.add("system", "Offline wake phrase (Porcupine) is listening. Say \"Hey Saara\" to talk.", true)
-      else -> Bus.add("system", "Wake phrase is listening. Say \"Hey Saara\" to talk.", true)
-    }
-    if (engine == "openwakeword" && !openWakeReady) {
-      Bus.add("system", "openWakeWord needs melspectrogram.tflite + embedding_model.tflite in assets/openwakeword/, plus either a hey_saara.tflite model or a voice model trained in Settings.", true)
-    }
-    if (engine == "porcupine" && !porcupineReady) {
-      Bus.add("system", "Porcupine needs an AccessKey and assets/keywords/hey_saara.ppn.", true)
-    }
-    refreshNotif()
-    w.start()
+    // Active conversation flow: process directly without repeating wake word.
+    resetSessionTimer()
+    processUtterance(heard)
   }
 
-  private fun stopWake() {
-    wakeActive = false
-    val w = wake; wake = null
-    w?.stop()
-    refreshNotif()
-  }
-
-  private fun onWakePhrase() {
-    if (!running || !ready) return
-    if (!micEnabled) { stopWake(); return }
-    cancelSleep()
+  private fun processUtterance(text: String) {
+    if (text.isBlank()) return
+    val cleaned = extractWakeCommand(text) ?: text
+    if (cleaned.isBlank()) { resetSessionTimer(); return }
     armScreenAuto(300_000L)
-    stopWake()
-    isSaraActive = true
-    startSession()
-    Bus.add("system", "Wake phrase heard. Starting the microphone…", true)
-    // Give the hotword engine a moment to release the recording device before Gemini takes it.
-    main.postDelayed({ startMic() }, 150L)
-    Bus.ping()
+    Bus.add("you", cleaned, true)
+    if (TaskControl.isStop(cleaned)) {
+      TaskControl.clear()
+      stopSpeaking()
+      Bus.add("system", "Stopped the current task.", true)
+      resetSessionTimer()
+      return
+    }
+    try { Db.get(this).usage("command", "turn") } catch (_: Exception) {}
+    if (ready) ws?.send(JSONObject().put("realtimeInput", JSONObject().put("text", cleaned)).toString())
+    else Bus.add("saara", "Gemini is not connected yet. Check the API key and connection in Settings.", true)
   }
 
-  private fun wakeUnavailable(msg: String) {
-    cancelSleep()
-    stopWake()
-    Bus.add("system", msg + " Tap the Mic chip to talk, or turn off the Wake phrase feature.", true)
-    Bus.setStatus("Wake phrase unavailable · tap Mic")
-    Bus.ping()
+  /** Returns command text after a wake phrase, empty string if only wake phrase was said, or null if no wake phrase present. */
+  private fun extractWakeCommand(raw: String): String? {
+    val patterns = listOf(
+      Regex("""(?i)\bhey\s+sara\b[,!\s]*(.*)$"""),
+      Regex("""(?i)\bhi\s+sara\b[,!\s]*(.*)$"""),
+      Regex("""(?i)\bhello\s+sara\b[,!\s]*(.*)$"""),
+      Regex("""(?i)\bok\s+sara\b[,!\s]*(.*)$"""),
+      Regex("""سارا[,!\s]*(.*)$"""),
+      Regex("""সারা[,!\s]*(.*)$"""),
+      Regex("""(?i)\bsara\b[,!\s]*(.*)$""") // bare name fallback
+    )
+    for (p in patterns) {
+      val m = p.find(raw)
+      if (m != null) return m.groupValues.getOrNull(1)?.trim().orEmpty()
+    }
+    return null
   }
 
   override fun onBind(i: Intent?): IBinder? = null
@@ -304,8 +260,8 @@ class VoiceService : Service() {
     val sharing = listOfNotNull(if (Bus.camOn) "camera" else null, if (Bus.screenOn) "screen" else null)
     val state = when {
       !micEnabled -> "Saara · microphone muted"
-      micStarted -> "Saara is listening"
-      wakeActive -> "Saara · say \"Hey Saara\""
+      listening && isSaraActive -> "Saara · listening (active)"
+      listening -> "Saara · say \"Hey Sara\""
       ready -> "Saara · starting…"
       else -> "Saara · connecting…"
     }
@@ -314,26 +270,21 @@ class VoiceService : Service() {
       .setContentIntent(open).addAction(Notification.Action.Builder(android.R.drawable.ic_media_pause, "Stop", stop).build()).build()
   }
 
-  /** Refreshes the ongoing notification without changing the foreground service types. */
   private fun refreshNotif() {
     if (!running) return
     try { getSystemService(NotificationManager::class.java).notify(1, notif()) } catch (_: Exception) {}
   }
 
-  /** (Re)declares the foreground service types that are currently needed. */
   private fun fg() {
     try {
       if (Build.VERSION.SDK_INT >= 30) {
-        // Android 14+ throws SecurityException when a type is declared without its
-        // runtime permission/consent, so only include types that are allowed now.
         var t = 0
         if (has(Manifest.permission.RECORD_AUDIO)) t = t or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
         if (Bus.camOn && has(Manifest.permission.CAMERA)) t = t or ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA
         if (Bus.screenOn) t = t or ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
         if (t == 0) {
           Bus.add("system", "Microphone permission is missing, so Saara cannot listen in the background.", true)
-          stopSelf()
-          return
+          stopSelf(); return
         }
         startForeground(1, notif(), t)
       } else startForeground(1, notif())
@@ -345,11 +296,7 @@ class VoiceService : Service() {
     when (i?.action) {
       "STOP" -> { stopSelf(); return START_NOT_STICKY }
       "WAKE" -> {
-        if (!running) { stopSelf(); return START_NOT_STICKY }
-        if (ready && micEnabled && !micStarted && !callActive) {
-          stopWake()
-          main.postDelayed({ startMic() }, 150L)
-        }
+        if (running && ready && micEnabled && !callActive) startListening()
         return START_STICKY
       }
       "CAM_START", "CAM_STOP", "SCREEN_START", "SCREEN_STOP" -> { if (!running) { stopSelf(); return START_NOT_STICKY }; share(i!!); return START_STICKY }
@@ -366,13 +313,11 @@ class VoiceService : Service() {
     migrateFacts(this)
     getSystemService(NotificationManager::class.java).createNotificationChannel(NotificationChannel("saara", "Saara", NotificationManager.IMPORTANCE_LOW))
     fg()
-    // USAGE_MEDIA => loudspeaker (USAGE_VOICE_COMMUNICATION is routed to the earpiece). Also makes the volume tools (STREAM_MUSIC) control Saara's voice.
     val minBuf = AudioTrack.getMinBufferSize(24000, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT)
     track = AudioTrack.Builder()
       .setAudioAttributes(AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_MEDIA).setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build())
       .setAudioFormat(AudioFormat.Builder().setEncoding(AudioFormat.ENCODING_PCM_16BIT).setSampleRate(24000).setChannelMask(AudioFormat.CHANNEL_OUT_MONO).build())
       .setBufferSizeInBytes(maxOf(48000, minBuf)).build().also { it.play() }
-    // Separate playback thread so a full audio buffer never blocks the websocket (tool calls / interruptions stay responsive).
     Thread {
       while (running) {
         val b: ByteArray = (try { audioQ.poll(200, TimeUnit.MILLISECONDS) } catch (e: InterruptedException) { null }) ?: continue
@@ -387,7 +332,8 @@ class VoiceService : Service() {
     return START_STICKY
   }
 
-  // ---------- floating bubble + caption overlay ----------
+  private fun has(p: String) = ContextCompat.checkSelfPermission(this, p) == PackageManager.PERMISSION_GRANTED
+
   fun refreshBubble() {
     if (Prefs.on(this, "f_bubble", false)) {
       if (bubble == null) bubble = Bubble(this) { startActivity(Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }
@@ -400,10 +346,7 @@ class VoiceService : Service() {
     if (!running) return
     if (!Prefs.on(this, "f_overlay", true) || !Settings.canDrawOverlays(this)) { overlay?.hide(); return }
     if (overlay == null) overlay = Overlay(this)
-    if (Bus.camOn) {
-      overlay?.show("📷 LIVE CAMERA SHARING ON\nLive camera frames are being sent to Gemini.", true)
-      return
-    }
+    if (Bus.camOn) { overlay?.show("📷 LIVE CAMERA SHARING ON\nLive camera frames are being sent to Gemini.", true); return }
     if (MainActivity.visible) { overlay?.hide(); return }
     val m = synchronized(Bus) { Bus.msgs.lastOrNull() } ?: return
     val icon = when (m.role) { "you" -> "🧑 "; "saara" -> "✨ "; "tool" -> "⚙️ "; else -> "ℹ️ " }
@@ -411,8 +354,6 @@ class VoiceService : Service() {
   }
 
   // ---------- camera / screen sharing ----------
-  private fun has(p: String) = ContextCompat.checkSelfPermission(this, p) == PackageManager.PERMISSION_GRANTED
-
   private fun share(i: Intent) {
     when (i.action) {
       "CAM_START" -> startCam(i.getBooleanExtra("front", false))
@@ -423,61 +364,7 @@ class VoiceService : Service() {
   }
   @Suppress("DEPRECATION")
   private fun projData(i: Intent): Intent? = if (Build.VERSION.SDK_INT >= 33) i.getParcelableExtra("data", Intent::class.java) else i.getParcelableExtra("data")
-
   private fun tellModel(t: String) { if (ready) ws?.send(JSONObject().put("realtimeInput", JSONObject().put("text", t)).toString()) }
-
-  private fun startMic(attempt: Int = 0) {
-    if (!running || !ready || callActive || enrolling || !micEnabled || micStarted) return
-    if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
-      Bus.add("system", "Microphone permission is missing. Allow Microphone in Android app permissions.", true); return
-    }
-    try {
-      val rate = 16000
-      val min = AudioRecord.getMinBufferSize(rate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
-      val rec = AudioRecord.Builder().setAudioSource(MediaRecorder.AudioSource.VOICE_RECOGNITION)
-        .setAudioFormat(AudioFormat.Builder().setSampleRate(rate).setChannelMask(AudioFormat.CHANNEL_IN_MONO).setEncoding(AudioFormat.ENCODING_PCM_16BIT).build())
-        .setBufferSizeInBytes(maxOf(min, rate)).build()
-      if (rec.state != AudioRecord.STATE_INITIALIZED) {
-        rec.release()
-        // The hotword engine may still be releasing the mic on slower devices.
-        if (attempt < 3) {
-          main.postDelayed({ startMic(attempt + 1) }, 150L * (attempt + 1))
-        } else {
-          Bus.add("system", "Microphone was busy after the wake word. Re-arming…", true)
-          startWake()
-        }
-        return
-      }
-      audioRecord = rec; rec.startRecording(); micStarted = true
-      micThread = Thread {
-        val buf = ByteArray(6400)
-        while (running && micEnabled && micStarted) {
-          val n = try { rec.read(buf, 0, buf.size) } catch (_: Exception) { -1 }
-          if (n > 0 && ready) {
-            val chunk = ByteArray(n); System.arraycopy(buf, 0, chunk, 0, n)
-            val data = Base64.encodeToString(chunk, Base64.NO_WRAP)
-            // ADD this fixed code block:
-val payload = JSONObject().put("realtimeInput", JSONObject().put("audio", JSONObject().put("data", data).put("mime_type", "audio/pcm;rate=16000")))
-ws?.send(payload.toString())
-
-          } else if (n < 0) break
-        }
-      }.also { it.name = "saara-microphone"; it.start() }
-      Bus.add("system", "Microphone is active. Audio is streamed to Gemini for live processing; personal device databases remain local.", true)
-      Bus.setStatus("Connected · microphone ON")
-      refreshNotif()
-      armSleep(30_000L)
-    } catch (e: Exception) { micStarted = false; Bus.add("system", "Microphone error: ${e.message}", true) }
-  }
-
-  private fun stopMic() {
-    cancelSleep()
-    micStarted = false
-    try { audioRecord?.stop() } catch (_: Exception) {}
-    try { audioRecord?.release() } catch (_: Exception) {}
-    audioRecord = null; micThread = null
-    refreshNotif()
-  }
 
   private fun startCam(front: Boolean) {
     if (!has(Manifest.permission.CAMERA)) { Bus.add("system", "Camera permission missing. Allow it in the Saara app.", true); return }
@@ -515,7 +402,6 @@ ws?.send(payload.toString())
     Bus.ping()
   }
 
-  /** Sends a camera/screen JPEG frame to the live Gemini session (max ~1 frame per second). */
   fun sendFrame(jpeg: ByteArray) {
     if (!running || !ready) return
     val socket = ws ?: return
@@ -524,6 +410,67 @@ ws?.send(payload.toString())
       val blob = JSONObject().put("data", data).put("mimeType", "image/jpeg")
       socket.send(JSONObject().put("realtimeInput", JSONObject().put("video", blob)).toString())
     } catch (_: Exception) {}
+  }
+
+  // ---------- Speech recognition (continuous loop) ----------
+  fun startListening() { main.post { startListeningInternal() } }
+
+  fun restartListening(delayMs: Long = 0L) {
+    if (!running) return
+    main.removeCallbacks(restartRunnable)
+    main.postDelayed(restartRunnable, delayMs)
+  }
+
+  private fun startListeningInternal() {
+    if (!running || !micEnabled || callActive || enrolling) return
+    if (!SpeechRecognizer.isRecognitionAvailable(this)) {
+      Bus.add("system", "Speech recognition is not available on this device.", true)
+      return
+    }
+    if (recognizerBusy) { restartListening(300L); return }
+    listening = true
+    refreshNotif()
+    val r = recognizer ?: run {
+      val nr = SpeechRecognizer.createSpeechRecognizer(this)
+      nr.setRecognitionListener(recognitionListener)
+      recognizer = nr
+      nr
+    }
+    try {
+      r.cancel()
+      recognizerBusy = false
+      r.startListening(buildRecognizerIntent())
+      Bus.setStatus(if (isSaraActive) "Connected · listening" else "Connected · say \"Hey Sara\"")
+    } catch (_: Exception) {
+      recognizerBusy = false
+      restartListening(700L)
+    }
+  }
+
+  private fun buildRecognizerIntent(): Intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+    putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+    putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
+    putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3)
+    putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, packageName)
+    // Let the recognizer listen a bit longer so active conversation doesn't cut off mid-thought.
+    putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 1500L)
+    putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 1500L)
+  }
+
+  fun stopListening() {
+    listening = false
+    recognizerBusy = false
+    main.removeCallbacks(restartRunnable)
+    try { recognizer?.cancel() } catch (_: Exception) {}
+    refreshNotif()
+  }
+
+  private fun destroyRecognizer() {
+    main.removeCallbacks(restartRunnable)
+    try { recognizer?.cancel() } catch (_: Exception) {}
+    try { recognizer?.destroy() } catch (_: Exception) {}
+    recognizer = null
+    recognizerBusy = false
   }
 
   // ---------- Gemini Live connection ----------
@@ -546,8 +493,6 @@ ws?.send(payload.toString())
 
   private fun lost(msg: String) {
     ready = false
-    stopWake()
-    stopMic()
     if (!running) return
     Bus.add("system", msg, true)
     if (++retries > 3) { Bus.add("system", "Stopped after repeated failures. Check API key / model name in Settings.", true); main.post { stopSelf() }; return }
@@ -555,17 +500,16 @@ ws?.send(payload.toString())
     main.postDelayed({ connect() }, 3000)
   }
 
-    private fun setup(): String {
+  private fun setup(): String {
     val p = Prefs.plain(this)
     val model = p.getString("model", "gemini-3.1-flash-live-preview") ?: "gemini-3.1-flash-live-preview"
     val voice = p.getString("voice", "Aoede") ?: "Aoede"
     val now = SimpleDateFormat("EEEE, d MMMM yyyy, HH:mm", Locale.US).format(Date())
     val taskMemory = if (Prefs.on(this, "learn_tasks", true)) try { TaskLearning.prompt(this) } catch (_: Exception) { "" } else ""
     val ins = "You are Saara, an elegant, proactive, warm FEMALE voice assistant (use feminine forms when speaking Hindi, e.g. 'main kar rahi hoon'). Be concise. " + langRule(this) + " " +
-      "Current local time: $now. The user may start with 'Hey Saara'; that is only the wake phrase, not part of the request. " +
+      "Current local time: $now. " +
       "You can use device_control and local task tools for permitted phone actions. Do not request or reveal contacts, SMS, call logs, notifications, local knowledge, learning, chat history, or sheet contents. URL imports are handled locally by the app. Never ask for private data to be pasted into Gemini. " +
       "If a tool result says a feature is OFF or an Android permission is missing, tell the user in one short sentence exactly what to switch on or grant in the Saara app; do not just say you cannot. " +
-      // --- autonomous agent behaviour ---
       "AUTONOMY (very important): for any task with several steps (open an app, search, type, send, post, take a photo, answer a call...), complete the WHOLE task yourself by chaining tool calls one after another. " +
       "When camera or screen sharing is ON, you receive live frames and can see the screen. Use them to understand the screen, ground taps and complete mobile tasks. Private database contents are never sent. " +
       "SCREEN SHARING: manual screen sharing stays ON until the user turns it off. If YOU request it with request_screen_share, it is for the current task and the app turns it off automatically when the task ends; do not tell the user to stop it manually. " +
@@ -579,12 +523,9 @@ ws?.send(payload.toString())
       "Follow the user's command in the simplest way: never make it complicated, never lecture, find a way to get it done. " +
       "Photos: call device_control take_photo (it presses the shutter by itself; text=front for selfie). Calls: answer_call / end_call. " +
       "Notifications and scheduled-task text are private local data and are never forwarded to Gemini. " +
-      // --- learning ---
       "Do not store personal facts in Gemini. The app stores Learning and Knowledge locally on the phone. " +
       "SELF-LEARNING: before repeating a multi-step task, call recall_task to check which steps worked or failed. After solving a new task or discovering a better method, call remember_task with concise working steps. Never put contacts, messages, ledger data, URLs, or screen text into remember_task. " +
-      // --- shop ---
       "Do not ask for private shop ledger details. Local ledger data is not sent to Gemini. " +
-      "PRIVACY: Never ask for, reveal, infer, or request private local data. Contacts, SMS, call logs, chat history, learning facts, knowledge base, and sheet contents are stored only on this device. No private database content is provided in this session. Do not claim to have read local private data. " +
       "Live camera and screen frames are sent to Gemini only while the user turns camera or screen sharing ON; the user can turn them off at any time. While Screen automation is ON, on-device tool results may include screen text so you can complete the task; private local database contents (Learning, Knowledge, contacts, messages, tasks, fetched pages) are withheld. Links and spreadsheet data are fetched and stored locally by the app, not by Gemini. " +
       if (taskMemory.isBlank()) "" else "The short task-memory hints below contain goal names, tool names and outcomes with numbers/emails redacted; they do not contain contacts, messages, ledger data, or screen text.\n$taskMemory"
     val s = JSONObject()
@@ -593,7 +534,6 @@ ws?.send(payload.toString())
         .put("speechConfig", JSONObject().put("voiceConfig", JSONObject().put("prebuiltVoiceConfig", JSONObject().put("voiceName", voice)))))
       .put("systemInstruction", JSONObject().put("parts", JSONArray().put(JSONObject().put("text", ins))))
       .put("tools", Tools.declarations())
-      .put("inputAudioTranscription", JSONObject())
       .put("outputAudioTranscription", JSONObject())
     return JSONObject().put("setup", s).toString()
   }
@@ -601,15 +541,11 @@ ws?.send(payload.toString())
   private fun handle(s: String) {
     val m = try { JSONObject(s) } catch (e: Exception) { return }
     if (m.has("setupComplete")) {
-      ready = true; retries = 0; Bus.setStatus("Connected · Gemini active")
+      ready = true; retries = 0; Bus.setStatus("Connected · say \"Hey Sara\"")
       val cmd = pendingCommand
       pendingCommand = null
-      if (cmd != null) sendText(cmd)
-      if (micEnabled) {
-        if (wakeOn()) startWake() else startMic()
-      } else {
-        stopWake(); Bus.add("system", "Gemini connected. Microphone is muted.", true)
-      }
+      if (cmd != null) processUtterance(cmd)
+      if (micEnabled) startListening() else Bus.add("system", "Gemini connected. Microphone is muted.", true)
     }
     if (m.has("error")) Bus.add("system", "Gemini error: " + m.optString("error"), true)
     val sc = m.optJSONObject("serverContent")
@@ -619,35 +555,18 @@ ws?.send(payload.toString())
         val inl = parts.getJSONObject(i).optJSONObject("inlineData")
         if (inl != null) play(Base64.decode(inl.getString("data"), Base64.DEFAULT))
       }
-      sc.optJSONObject("inputTranscription")?.let {
-        gotSpeech = true
-        val heard = it.optString("text")
-        Bus.add("you", heard)
-        if (heard.isNotBlank()) {
-          armScreenAuto(300_000L)
-          armSleep(120_000L)
-        }
-        if (TaskControl.isStop(heard)) {
-          TaskControl.clear()
-          stopSpeaking()
-          Bus.add("system", "Stopped the current task.", true)
-        }
-      }
       sc.optJSONObject("outputTranscription")?.let { Bus.add("saara", it.optString("text")) }
       if (sc.optBoolean("interrupted")) { stopSpeaking() }
       if (sc.optBoolean("turnComplete")) {
         Bus.endTurn()
         armScreenAuto(6000L)
-        // Short follow-up window, then hand the mic back to the offline wake word.
-        armSleep(20_000L)
-        refreshWake()
-        if (gotSpeech) { gotSpeech = false; try { Db.get(this).usage("command", "turn") } catch (_: Exception) {} }
+        try { Db.get(this).usage("command", "turn") } catch (_: Exception) {}
       }
     }
     val calls = m.optJSONObject("toolCall")?.optJSONArray("functionCalls")
     if (calls != null) Thread {
       armScreenAuto(300_000L)
-      cancelSleep()
+      resetSessionTimerIfActive()
       val out = JSONArray()
       for (i in 0 until calls.length()) {
         val c = calls.getJSONObject(i)
@@ -664,7 +583,6 @@ ws?.send(payload.toString())
 
   private fun play(pcm: ByteArray) {
     if (track == null) return
-    if (speakingUntil <= System.currentTimeMillis()) { stopWake(); stopMic(); endSession() }
     speakingUntil = maxOf(speakingUntil, System.currentTimeMillis()) + pcm.size / 48
     audioQ.offer(pcm)
   }
@@ -676,52 +594,27 @@ ws?.send(payload.toString())
   }
 
   fun sendText(t: String) {
-    val q = t.lowercase(Locale.ROOT)
-    val sensitivePhrase = Prefs.on(this, "privacy_mode", true) && listOf(
-      "my contact", "my contacts", "my phone", "my address", "call history", "call log", "sms history", "my messages", "message from", "my email", "my whatsapp", "my saved learning", "my knowledge", "my sheet", "my spreadsheet", "my call", "dial ", "send sms", "remind me", "schedule ",
-      "আমার নম্বর", "আমার কন্টাক্ট", "আমার যোগাযোগ", "আমার মেসেজ", "আমার কল", "আমার ঠিকানা", "ব্যাংক অ্যাকাউন্ট", "मेरा नंबर", "मेरे संपर्क", "मेरे मैसेज", "मेरी कॉल हिस्ट्री", "मेरा पता", "बैंक खाता"
-    ).any { q.contains(it) }
-    val sensitive = sensitivePhrase || listOf("phone number", "home address", "bank account", "account number").any { q.contains(it) } ||
-      Regex("\\b[+0-9][0-9 ()-]{7,}\\b").containsMatchIn(t) ||
-      Regex("[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}", RegexOption.IGNORE_CASE).containsMatchIn(t)
-    Bus.add("you", t, true)
-    armScreenAuto(300_000L)
-    armSleep(120_000L)
-    if (TaskControl.isStop(t)) {
-      TaskControl.clear()
-      stopSpeaking()
-      Bus.add("saara", "Stopped.", true)
-      return
-    }
-    if (sensitive) {
-      Bus.add("saara", "This request appears to involve private information or a personal device action. I kept it on this phone and did not send it to Gemini.", true)
-      return
-    }
-    try { Db.get(this).usage("command", "turn") } catch (_: Exception) {}
-    if (ready) ws?.send(JSONObject().put("realtimeInput", JSONObject().put("text", t)).toString())
-    else Bus.add("saara", "Gemini is not connected yet. Check the API key and connection in Settings.", true)
+    // Typed input from UI: activate session and process directly.
+    startSession()
+    processUtterance(t)
   }
 
-  /** Fired by the scheduler. Returns false when Saara is not connected (the caller then shows a notification). */
   fun runScheduled(text: String): Boolean {
     Bus.add("system", "Scheduled task fired at ${SimpleDateFormat("dd MMM yyyy, hh:mm:ss a", Locale.getDefault()).format(Date())}: $text", true)
-    // Scheduled task text can contain private details; never forward it to Gemini.
     return false
   }
 
   fun onNotification(key: String, pkg: String, title: String, text: String) {
-    // Notification content is private local data. Never forward it to Gemini.
     Bus.add("system", "A notification arrived from $pkg. Its contents were kept on this device.", true)
   }
 
-
   override fun onDestroy() {
     running = false; ready = false
-    cancelSleep()
+    main.removeCallbacks(sessionTimer)
     main.removeCallbacks(screenAutoStop)
     screenAuto = false; Bus.screenAuto = false
-    stopWake()
-    stopMic()
+    stopListening()
+    destroyRecognizer()
     Bus.unlisten(busListener)
     calls?.stop(); calls = null; callActive = false
     TaskControl.clear()
