@@ -332,11 +332,11 @@ class VoiceService : Service() {
       return m.groupValues.getOrNull(1)?.trim().orEmpty()
     }
     // Fallback tolerant matching for transcription variants (sara/saara/sarah, hey/hi/ok/okay/oye)
-    if (Regex("\b(hey|hi|hello|ok|okay|oye|are|arre|o)\s+sa+ra+h?\b", RegexOption.IGNORE_CASE).containsMatchIn(norm)) {
-      return Regex("(?i)\b(?:hey|hi|hello|ok|okay|oye|are|arre|o)\s+sa+ra+h?\b[,!?. ]*(.*)$").find(norm)?.groupValues?.getOrNull(1)?.trim().orEmpty() ?: ""
+    if (Regex("\\b(hey|hi|hello|ok|okay|oye|are|arre|o)\\s+sa+ra+h?\\b", RegexOption.IGNORE_CASE).containsMatchIn(norm)) {
+      return Regex("(?i)\\b(?:hey|hi|hello|ok|okay|oye|are|arre|o)\\s+sa+ra+h?\\b[,!?. ]*(.*)$").find(norm)?.groupValues?.getOrNull(1)?.trim().orEmpty() ?: ""
     }
-    if (Regex("\bsa+ra+h?\b", RegexOption.IGNORE_CASE).containsMatchIn(norm) && norm.split(" ").size <= 4) {
-      return Regex("(?i)\bsa+ra+h?\b[,!?. ]*(.*)$").find(norm)?.groupValues?.getOrNull(1)?.trim().orEmpty() ?: ""
+    if (Regex("\\bsa+ra+h?\\b", RegexOption.IGNORE_CASE).containsMatchIn(norm) && norm.split(" ").size <= 4) {
+      return Regex("(?i)\\bsa+ra+h?\\b[,!?. ]*(.*)$").find(norm)?.groupValues?.getOrNull(1)?.trim().orEmpty() ?: ""
     }
     return null
   }
