@@ -47,14 +47,14 @@ class OpenWakeWordFeatures(private val c: Context) {
     fun runModel(interpreter: Interpreter, input: FloatArray): FloatArray {
       val outShape = interpreter.getOutputTensor(0).shape()
       var outSize = 1
-      for (d in outShape) outSize *= if (d > 0) d else 1
+      for (d in outShape) outSize *= d
 
       val inBuf = ByteBuffer.allocateDirect(input.size * 4).order(ByteOrder.nativeOrder())
       inBuf.asFloatBuffer().put(input)
-      val outBuf = ByteBuffer.allocateDirect(outSize.coerceAtLeast(1) * 4).order(ByteOrder.nativeOrder())
+      val outBuf = ByteBuffer.allocateDirect(outSize * 4).order(ByteOrder.nativeOrder())
       interpreter.run(inBuf, outBuf)
 
-      val out = FloatArray(outSize.coerceAtLeast(1))
+      val out = FloatArray(outSize)
       outBuf.rewind()
       outBuf.asFloatBuffer().get(out)
       return out

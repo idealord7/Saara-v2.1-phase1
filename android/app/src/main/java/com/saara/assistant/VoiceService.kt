@@ -110,6 +110,7 @@ class VoiceService : Service() {
   private var wakeEngine: WakeEngine? = null
   private val wakeLock = Any()
   @Volatile private var localWakeUnavailable = false
+  @Volatile private var localWakeWarned = false
 
   private fun sessionTimeoutEnabled(): Boolean =
     Prefs.plain(this).getBoolean(PREF_SESSION_TIMEOUT_ENABLED, true)
@@ -123,6 +124,7 @@ class VoiceService : Service() {
   fun refreshWakeConfig() {
     main.post {
       wakePatterns = buildWakePatterns(loadWakePhrases(Prefs.plain(this)))
+    localWakeUnavailable = false; localWakeWarned = false
       if (isSaraActive) resetSessionTimer()
     }
   }
@@ -352,23 +354,26 @@ class VoiceService : Service() {
       val eng = WakeEngine(applicationContext,
         onWake = { main.post { onLocalWakeDetected() } },
         onUnavailable = { msg -> main.post {
-          if (!localWakeUnavailable) {
-            localWakeUnavailable = true
-            if (running) Bus.add("system", "Wake engine unavailable: $msg Falling back to cloud transcription wake gating.", true)
-          }
+          localWakeUnavailable = true
           stopIdleWakeEngine()
-          if (running && !isSaraActive && captureRunning) Bus.setStatus("Connected · listening for wake phrase")
+          if (!localWakeWarned) {
+            localWakeWarned = true
+            if (running) Bus.add("system", "Wake engine failed: $msg Idle cloud audio streaming is disabled to prevent noise/background actions. Fix on-device wake models for this device.", true)
+          }
+          if (running && !isSaraActive && captureRunning) Bus.setStatus("Connected · wake engine unavailable")
         } },
         onNotice = { msg -> main.post { if (running) Bus.add("system", msg, true) } }
       )
       if (eng.start()) {
         localWakeUnavailable = false
+        localWakeWarned = false
         wakeEngine = eng
-        Bus.setStatus("Connected · say a wake phrase")
+        Bus.setStatus("Connected · say a wake phrase (on-device)")
       } else {
         localWakeUnavailable = true
         wakeEngine = null
-        Bus.setStatus("Connected · listening for wake phrase")
+        if (!localWakeWarned) { localWakeWarned = true; Bus.add("system", "On-device wake engine unavailable. No cloud audio is streamed in idle, so background noise cannot trigger actions. Check openwakeword TFLite assets/models for this device.", true) }
+        Bus.setStatus("Connected · wake engine unavailable")
       }
     }
   }
@@ -426,10 +431,10 @@ class VoiceService : Service() {
             if (!micEnabled || callActive || enrolling || !ready) continue
             val speaking = System.currentTimeMillis() < speakingUntil + 350L
             if (!isSaraActive) {
-              val useLocalWake = !localWakeUnavailable && wakeEngine?.running == true
-              if (useLocalWake) {
-                // IDLE: on-device wake only. No audio to Gemini => background noise/actions won't trigger Saara.
-                if (!speaking) {
+              // IDLE: on-device wake only. NEVER stream audio to Gemini in idle (prevents noise/background/TV from triggering actions).
+              if (!speaking) {
+                val eng = wakeEngine
+                if (eng != null && eng.running) {
                   var si = 0; var bi = 0
                   val scount = n / 2
                   while (bi + 1 < n && si < scount) {
@@ -438,21 +443,9 @@ class VoiceService : Service() {
                     shorts[si++] = ((hi shl 8) or lo).toShort()
                     bi += 2
                   }
-                  try { wakeEngine?.feed(shorts, si) } catch (_: Exception) {}
+                  try { eng.feed(shorts, si) } catch (_: Exception) {}
                 }
-                continue
               }
-              // Fallback: stream audio to Gemini in idle; handleHeardText() accepts only wake phrases.
-              if (speaking) continue
-              val socket = ws ?: continue
-              val chunk = ByteArray(n)
-              System.arraycopy(buf, 0, chunk, 0, n)
-              try {
-                val data = Base64.encodeToString(chunk, Base64.NO_WRAP)
-                val payload = JSONObject().put("realtimeInput", JSONObject().put("audio",
-                  JSONObject().put("data", data).put("mimeType", "audio/pcm;rate=16000")))
-                socket.send(payload.toString())
-              } catch (_: Exception) {}
               continue
             }
             // ACTIVE: stream to Gemini so Saara hears commands/content.
@@ -546,6 +539,7 @@ class VoiceService : Service() {
     running = true; instance = this; Bus.running = true
     micEnabled = Prefs.plain(this).getBoolean("mic_enabled", true)
     wakePatterns = buildWakePatterns(loadWakePhrases(Prefs.plain(this)))
+    localWakeUnavailable = false; localWakeWarned = false
     migrateFacts(this)
     getSystemService(NotificationManager::class.java).createNotificationChannel(NotificationChannel("saara", "Saara", NotificationManager.IMPORTANCE_LOW))
     fg()
