@@ -751,19 +751,22 @@ class VoiceService : Service() {
       }
     }
     val calls = m.optJSONObject("toolCall")?.optJSONArray("functionCalls")
-    if (calls != null && isSaraActive) Thread {
-      armScreenAuto(300_000L); resetSessionTimerIfActive()
-      val out = JSONArray()
-      for (i in 0 until calls.length()) {
-        val c = calls.getJSONObject(i)
-        val name = c.getString("name"); val args = c.optJSONObject("args") ?: JSONObject()
-        Bus.add("tool", "$name $args", true)
-        val r = Tools.run(this, name, args)
-        Bus.add("tool", "→ $r", true)
-        out.put(JSONObject().put("id", c.optString("id")).put("name", name).put("response", JSONObject().put("result", Tools.modelResult(name, r))))
+    if (calls != null) {
+      if (isSaraActive) {
+        Thread {
+          armScreenAuto(300_000L); resetSessionTimerIfActive()
+          val out = JSONArray()
+          for (i in 0 until calls.length()) {
+            val c = calls.getJSONObject(i)
+            val name = c.getString("name"); val args = c.optJSONObject("args") ?: JSONObject()
+            Bus.add("tool", "$name $args", true)
+            val r = Tools.run(this, name, args)
+            Bus.add("tool", "→ $r", true)
+            out.put(JSONObject().put("id", c.optString("id")).put("name", name).put("response", JSONObject().put("result", Tools.modelResult(name, r))))
+          }
+          ws?.send(JSONObject().put("toolResponse", JSONObject().put("functionResponses", out)).toString())
+        }.start()
       }
-      ws?.send(JSONObject().put("toolResponse", JSONObject().put("functionResponses", out)).toString())
-    }.start() else if (calls != null) {
       // idle: do not execute tools
     }
   }
