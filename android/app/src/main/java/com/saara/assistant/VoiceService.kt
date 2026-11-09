@@ -13,9 +13,6 @@ import android.os.IBinder
 import android.os.Looper
 import android.os.SystemClock
 import android.provider.Settings
-import android.speech.RecognitionListener
-import android.speech.RecognizerIntent
-import android.speech.SpeechRecognizer
 import android.util.Base64
 import android.util.Log
 import androidx.core.content.ContextCompat
@@ -30,24 +27,17 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * Production Saara voice service with a persistent, single-instance [SpeechRecognizer] session.
+ * Foreground Saara voice service.
  *
- * Stability goals (mic/privacy indicator/beep reduction):
- * - ONE lazy-loaded SpeechRecognizer created with [getApplicationContext], kept for the entire
- *   Foreground Service lifecycle, and released ONLY in [onDestroy].
- * - NO [SpeechRecognizer.stopListening]/[SpeechRecognizer.cancel] in normal [onEndOfSpeech],
- *   [onResults], or [onError] flows (except the service is explicitly paused/muted/call/enroll/destroyed).
- * - Restarts are coalesced through a single main-thread [Handler]: 120–220ms debounce for normal
- *   completions and NO_MATCH/SPEECH_TIMEOUT, ~500–900ms backoff for RECOGNIZER_BUSY, controlled
- *   recovery for other errors — without tearing down the recognizer instance.
- *
- * Conversation flow:
- * - Idle (![isSaraActive]): ignore all speech unless a configured wake phrase is heard.
- * - Active ([isSaraActive]=true): process follow-ups directly without repeating the wake phrase.
- * - Session timeout (configurable seconds, can be turned OFF) resets [isSaraActive]=false after inactivity; listening continues.
- *
- * Note: Android’s speech recognition service/OEM ultimately controls mic cues; this architecture
- * minimizes app-side churn that commonly causes rapid toggling/flicker/beeps.
+ * Audio strategy (software-gated, hardware-stable):
+ * - Microphone capture uses ONE continuous [AudioRecord] thread for the service lifetime while enabled
+ *   (no SpeechRecognizer start/stop cycles => avoids recognizer beeps/session toggles).
+ * - Software gating controls what Saara "hears"/acts on:
+ *     - Idle (![isSaraActive]): ignore everything except configured wake phrases.
+ *     - Active ([isSaraActive]=true): process follow-up utterances without repeating wake phrase.
+ * - Session timeout (seconds, configurable, can be OFF) resets [isSaraActive]=false after inactivity.
+ * - Wake phrase detection + transcription use Gemini Live input audio/transcription; [inputTranscription]
+ *   is gated in software so Saara does not act on non-wake/background speech while idle.
  */
 class VoiceService : Service() {
   companion object {
@@ -61,15 +51,6 @@ class VoiceService : Service() {
     val DEFAULT_WAKE_PHRASES = listOf(
       "hey sara", "hey saara", "ok saara", "okay saara", "oye saara", "oye sara", "saara", "sara", "সারা", "سارا"
     )
-
-    private const val RESTART_RESULT_MS = 160L
-    private const val RESTART_NO_MATCH_MS = 220L
-    private const val RESTART_TIMEOUT_MS = 220L
-    private const val RESTART_BUSY_MS = 700L
-    private const val RESTART_CLIENT_MS = 350L
-    private const val RESTART_NETWORK_MS = 900L
-    private const val RESTART_DEFAULT_MS = 450L
-    private const val START_RETRY_MS = 500L
 
     fun loadWakePhrases(p: android.content.SharedPreferences): MutableList<String> {
       val raw = p.getString(PREF_WAKE_PHRASES, null)
@@ -93,8 +74,8 @@ class VoiceService : Service() {
   @Volatile private var speakingUntil = 0L
   @Volatile var muted = false
   @Volatile var isSaraActive = false
-  @Volatile private var listeningEnabled = false
   @Volatile private var micEnabled = true
+  @Volatile private var captureRunning = false
   private var retries = 0
   private var pendingCommand: String? = null
   private var track: AudioTrack? = null
@@ -113,47 +94,14 @@ class VoiceService : Service() {
   private val main = Handler(Looper.getMainLooper())
   private val busListener: () -> Unit = { updateOverlay() }
 
-  // --- Single persistent SpeechRecognizer (destroy ONLY in onDestroy) ---
-  private var speechRecognizer: SpeechRecognizer? = null
-  private var recognizerIntent: Intent? = null
-  private val startPosted = AtomicBoolean(false)
+  // --- Continuous hardware capture (single thread) ---
+  private var audioRecord: AudioRecord? = null
+  private var captureThread: Thread? = null
+  private val captureStarting = AtomicBoolean(false)
+
+  // --- Session / wake ---
   private val sessionTimer = Runnable { onSessionTimeout() }
-  private val restartRunnable = Runnable {
-    startPosted.set(false)
-    startListeningInternal()
-  }
   @Volatile private var wakePatterns: List<Regex> = emptyList()
-
-  // Best-effort: reduce OEM start cues on some devices (not universally controllable).
-  private var beepMuted = false
-  private var savedNotifVol = -1
-  private var savedSystemVol = -1
-  private val unmuteBeeps = Runnable { restoreBeepStreams() }
-
-  private fun muteBeepStreams() {
-    try {
-      val am = getSystemService(AudioManager::class.java) ?: return
-      if (!beepMuted) {
-        try { savedNotifVol = am.getStreamVolume(AudioManager.STREAM_NOTIFICATION) } catch (_: Exception) { savedNotifVol = -1 }
-        try { savedSystemVol = am.getStreamVolume(AudioManager.STREAM_SYSTEM) } catch (_: Exception) { savedSystemVol = -1 }
-        beepMuted = true
-      }
-      // Avoid STREAM_MUSIC: Saara TTS playback uses it.
-      try { am.setStreamVolume(AudioManager.STREAM_NOTIFICATION, 0, 0) } catch (_: Exception) {}
-      try { am.setStreamVolume(AudioManager.STREAM_SYSTEM, 0, 0) } catch (_: Exception) {}
-    } catch (_: Exception) {}
-  }
-
-  private fun restoreBeepStreams() {
-    if (!beepMuted) return
-    try {
-      val am = getSystemService(AudioManager::class.java) ?: return
-      if (savedNotifVol >= 0) try { am.setStreamVolume(AudioManager.STREAM_NOTIFICATION, savedNotifVol, 0) } catch (_: Exception) {}
-      if (savedSystemVol >= 0) try { am.setStreamVolume(AudioManager.STREAM_SYSTEM, savedSystemVol, 0) } catch (_: Exception) {}
-    } catch (_: Exception) {}
-    beepMuted = false
-    savedNotifVol = -1; savedSystemVol = -1
-  }
 
   private fun sessionTimeoutEnabled(): Boolean =
     Prefs.plain(this).getBoolean(PREF_SESSION_TIMEOUT_ENABLED, true)
@@ -193,63 +141,8 @@ class VoiceService : Service() {
   private fun normalizePhrase(s: String): String =
     s.lowercase(Locale.ROOT).replace(Regex("[,!?।]+"), " ").replace(Regex("\\s+"), " ").trim()
 
-  private val recognitionListener = object : RecognitionListener {
-    override fun onReadyForSpeech(params: Bundle?) {
-      main.removeCallbacks(unmuteBeeps)
-      main.postDelayed(unmuteBeeps, 180L)
-    }
-
-    override fun onBeginningOfSpeech() {
-      resetSessionTimerIfActive()
-    }
-
-    override fun onRmsChanged(rmsdB: Float) {}
-    override fun onBufferReceived(buffer: ByteArray?) {}
-    override fun onEvent(eventType: Int, params: Bundle?) {}
-
-    override fun onPartialResults(partialResults: Bundle?) {
-      // Smoothly extend the active conversation window while the user is still speaking.
-      resetSessionTimerIfActive()
-    }
-
-    override fun onEndOfSpeech() {
-      // Intentionally no stop/cancel: keep the persistent recognizer session stable.
-    }
-
-    override fun onResults(results: Bundle?) {
-      main.removeCallbacks(unmuteBeeps); restoreBeepStreams()
-      if (running && listeningEnabled) {
-        handleRecognitionResults(results)
-        scheduleRestart(RESTART_RESULT_MS)
-      }
-    }
-
-    override fun onError(error: Int) {
-      main.removeCallbacks(unmuteBeeps); restoreBeepStreams()
-      if (!running || !listeningEnabled) return
-      when (error) {
-        SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> {
-          listeningEnabled = false
-          Bus.add("system", "Microphone permission is missing.", true)
-        }
-        SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> scheduleRestart(RESTART_BUSY_MS)
-        SpeechRecognizer.ERROR_NO_MATCH -> scheduleRestart(RESTART_NO_MATCH_MS)
-        SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> scheduleRestart(RESTART_TIMEOUT_MS)
-        SpeechRecognizer.ERROR_CLIENT -> scheduleRestart(RESTART_CLIENT_MS)
-        SpeechRecognizer.ERROR_NETWORK,
-        SpeechRecognizer.ERROR_NETWORK_TIMEOUT,
-        SpeechRecognizer.ERROR_SERVER -> scheduleRestart(RESTART_NETWORK_MS)
-        SpeechRecognizer.ERROR_AUDIO -> scheduleRestart(RESTART_DEFAULT_MS)
-        else -> {
-          Log.w(TAG, "SpeechRecognizer error: $error")
-          scheduleRestart(RESTART_DEFAULT_MS)
-        }
-      }
-    }
-  }
-
   // ---------- Public API used by the app ----------
-  fun isMicOn(): Boolean = micEnabled && listeningEnabled
+  fun isMicOn(): Boolean = micEnabled && captureRunning
 
   fun toggleMic() {
     synchronized(micLock) {
@@ -257,21 +150,23 @@ class VoiceService : Service() {
       if (now - lastMicToggle < 800L) return
       lastMicToggle = now
       if (callActive) {
-        Bus.add("system", "A call is in progress. I will keep the microphone off until it ends.", true)
+        Bus.add("system", "A call is in progress. Microphone input stays off until it ends.", true)
         return
       }
       micEnabled = !micEnabled
       Prefs.plain(this).edit().putBoolean("mic_enabled", micEnabled).apply()
       if (micEnabled) {
-        Bus.add("system", "Microphone ON. Say a wake phrase to start.", true)
-        requestStart()
+        isSaraActive = false
+        main.removeCallbacks(sessionTimer)
+        Bus.add("system", "Microphone ON (software). Say a wake phrase to start; background speech is ignored until wake.", true)
+        ensureCaptureStarted()
       } else {
         isSaraActive = false
         main.removeCallbacks(sessionTimer)
-        pauseListening()
+        stopCapture() // software OFF: stop forwarding/processing and release capture
         Bus.add("system", "Microphone muted.", true)
       }
-      Bus.ping()
+      refreshNotif(); Bus.ping()
     }
   }
 
@@ -305,11 +200,14 @@ class VoiceService : Service() {
   }
 
   fun suspendWakeForEnrollment() {
-    main.post { enrolling = true; pauseListening(); if (running) Bus.add("system", "Voice recognition paused for enrollment.", true) }
+    main.post { enrolling = true; stopCapture(); if (running) Bus.add("system", "Voice capture paused for enrollment.", true) }
   }
 
   fun resumeWakeAfterEnrollment() {
-    main.post { enrolling = false; if (running && ready && !callActive && micEnabled) requestStart() }
+    main.post {
+      enrolling = false
+      if (running && ready && !callActive && micEnabled) ensureCaptureStarted()
+    }
   }
 
   fun refreshCalls() {
@@ -320,7 +218,7 @@ class VoiceService : Service() {
 
   private fun onCallStarted(caller: String) {
     callActive = true
-    pauseListening()
+    stopCapture()
     val who = if (caller.isBlank()) "an unknown number" else caller
     Bus.setStatus("Incoming call" + if (caller.isBlank()) "" else " · $caller")
     Bus.add("system", "Incoming call from $who. Say \"answer\" or \"reject\" — the caller details stay on this phone.", true)
@@ -336,7 +234,7 @@ class VoiceService : Service() {
     callActive = false
     Bus.setStatus(if (ready) "Connected · listening" else Bus.status)
     Bus.add("system", "Call ended.", true)
-    main.postDelayed({ if (running && ready && !callActive && micEnabled) requestStart() }, 900L)
+    main.postDelayed({ if (running && ready && !callActive && micEnabled) ensureCaptureStarted() }, 900L)
     Bus.ping()
   }
 
@@ -359,14 +257,13 @@ class VoiceService : Service() {
     Bus.add("system", "A notification arrived from $pkg. Its contents were kept on this device.", true)
   }
 
-  // ---------- Wake/idle + continuous conversation ----------
-  private fun handleRecognitionResults(bundle: Bundle?) {
-    val matches = bundle?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION).orEmpty()
-    val heard = matches.firstOrNull { it.isNotBlank() }?.trim().orEmpty()
+  // ---------- Wake/idle + continuous conversation (software gating) ----------
+  private fun handleHeardText(raw: String) {
+    val heard = raw.trim()
     if (heard.isBlank()) return
 
     if (!isSaraActive) {
-      val afterWake = extractWakeCommand(heard) ?: return
+      val afterWake = extractWakeCommand(heard) ?: return // software: ignore all non-wake/background
       isSaraActive = true
       resetSessionTimer()
       Bus.add("system", "Wake word heard.", true)
@@ -409,89 +306,68 @@ class VoiceService : Service() {
     return null
   }
 
-  // ---------- Persistent recognizer lifecycle ----------
-  fun startListening() { requestStart() }
-
-  private fun requestStart() {
-    if (!running || !micEnabled || callActive || enrolling) return
-    listeningEnabled = true
-    scheduleRestart(0L)
-  }
-
-  private fun scheduleRestart(delayMs: Long) {
-    if (!running || !listeningEnabled || callActive || enrolling || !micEnabled) return
-    if (startPosted.compareAndSet(false, true)) {
-      main.removeCallbacks(restartRunnable)
-      main.postDelayed(restartRunnable, delayMs.coerceAtLeast(0L))
-    }
-  }
-
-  private fun ensureRecognizer(): SpeechRecognizer? {
-    speechRecognizer?.let { return it }
-    if (!SpeechRecognizer.isRecognitionAvailable(applicationContext)) return null
-    val sr = SpeechRecognizer.createSpeechRecognizer(applicationContext)
-    sr.setRecognitionListener(recognitionListener)
-    speechRecognizer = sr
-    return sr
-  }
-
-  private fun buildRecognizerIntent(): Intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-    putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-    putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
-    putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3)
-    putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, packageName)
-    // Longer silence windows reduce end/start cycles (less mic session churn).
-    putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 2500L)
-    putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 2500L)
-    putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, 1200L)
-  }
-
-  private fun startListeningInternal() {
-    if (!running || !micEnabled || callActive || enrolling || !listeningEnabled) return
-    val sr = ensureRecognizer()
-    if (sr == null) {
-      Bus.add("system", "Speech recognition is not available on this device.", true)
-      listeningEnabled = false
+  // ---------- Continuous AudioRecord capture (hardware on, software gated) ----------
+  private fun ensureCaptureStarted() {
+    if (!running || !ready || !micEnabled || callActive || enrolling || captureRunning) return
+    if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+      Bus.add("system", "Microphone permission is missing. Allow Microphone in Android app permissions.", true)
       return
     }
-    refreshNotif()
-    val intent = recognizerIntent ?: buildRecognizerIntent().also { recognizerIntent = it }
+    if (!captureStarting.compareAndSet(false, true)) return
     try {
-      muteBeepStreams()
-      // Critical: no cancel()/stopListening() before startListening() in the normal continuous loop.
-      sr.startListening(intent)
+      val rate = 16000
+      val min = AudioRecord.getMinBufferSize(rate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
+      val rec = AudioRecord.Builder()
+        .setAudioSource(MediaRecorder.AudioSource.VOICE_RECOGNITION)
+        .setAudioFormat(AudioFormat.Builder().setSampleRate(rate).setChannelMask(AudioFormat.CHANNEL_IN_MONO).setEncoding(AudioFormat.ENCODING_PCM_16BIT).build())
+        .setBufferSizeInBytes(maxOf(min, 6400)).build()
+      if (rec.state != AudioRecord.STATE_INITIALIZED) {
+        rec.release()
+        Bus.add("system", "Microphone could not start.", true)
+        return
+      }
+      audioRecord = rec
+      rec.startRecording()
+      captureRunning = true
+      refreshNotif()
       Bus.setStatus(if (isSaraActive) "Connected · listening" else "Connected · say a wake phrase")
-    } catch (e: IllegalStateException) {
-      Log.w(TAG, "startListening illegal state", e)
-      main.removeCallbacks(unmuteBeeps); restoreBeepStreams()
-      scheduleRestart(START_RETRY_MS)
+      captureThread = Thread {
+        val buf = ByteArray(3200)
+        while (running && captureRunning) {
+          val n = try { rec.read(buf, 0, buf.size) } catch (_: Exception) { -1 }
+          if (n > 0) {
+            // Software gate: when muted, call, or enrolling, do not forward/process.
+            if (!micEnabled || callActive || enrolling || !ready) continue
+            val socket = ws ?: continue
+            val chunk = ByteArray(n)
+            System.arraycopy(buf, 0, chunk, 0, n)
+            try {
+              val data = Base64.encodeToString(chunk, Base64.NO_WRAP)
+              val payload = JSONObject().put("realtimeInput", JSONObject().put("audio",
+                JSONObject().put("data", data).put("mimeType", "audio/pcm;rate=16000")))
+              socket.send(payload.toString())
+            } catch (_: Exception) {}
+          } else if (n < 0) {
+            try { Thread.sleep(120) } catch (_: InterruptedException) {}
+          }
+        }
+      }.also { it.name = "saara-capture"; it.isDaemon = true; it.start() }
     } catch (e: Exception) {
-      Log.w(TAG, "startListening failed", e)
-      main.removeCallbacks(unmuteBeeps); restoreBeepStreams()
-      scheduleRestart(RESTART_DEFAULT_MS)
+      Log.w(TAG, "capture start failed", e)
+      captureRunning = false
+      Bus.add("system", "Microphone error: ${e.message}", true)
+    } finally {
+      captureStarting.set(false)
     }
   }
 
-  /** Explicit pause (mute/call/enroll/destroy) — allowed to touch the mic session. */
-  private fun pauseListening() {
-    listeningEnabled = false
-    startPosted.set(false)
-    main.removeCallbacks(restartRunnable)
-    main.removeCallbacks(unmuteBeeps); restoreBeepStreams()
-    try { speechRecognizer?.stopListening() } catch (_: Exception) {}
-    try { speechRecognizer?.cancel() } catch (_: Exception) {}
+  private fun stopCapture() {
+    captureRunning = false
+    try { audioRecord?.stop() } catch (_: Exception) {}
+    try { audioRecord?.release() } catch (_: Exception) {}
+    audioRecord = null
+    captureThread = null
     refreshNotif()
-  }
-
-  private fun destroyRecognizer() {
-    startPosted.set(false)
-    main.removeCallbacks(restartRunnable)
-    main.removeCallbacks(unmuteBeeps); restoreBeepStreams()
-    try { speechRecognizer?.cancel() } catch (_: Exception) {}
-    try { speechRecognizer?.destroy() } catch (_: Exception) {}
-    speechRecognizer = null
-    recognizerIntent = null
-    listeningEnabled = false
   }
 
   // ---------- Foreground service / UI ----------
@@ -503,8 +379,8 @@ class VoiceService : Service() {
     val sharing = listOfNotNull(if (Bus.camOn) "camera" else null, if (Bus.screenOn) "screen" else null)
     val state = when {
       !micEnabled -> "Saara · microphone muted"
-      listeningEnabled && isSaraActive -> "Saara · listening (active)"
-      listeningEnabled -> "Saara · say a wake phrase"
+      captureRunning && isSaraActive -> "Saara · listening (active)"
+      captureRunning -> "Saara · say a wake phrase"
       ready -> "Saara · starting…"
       else -> "Saara · connecting…"
     }
@@ -537,7 +413,7 @@ class VoiceService : Service() {
     Bus.init(this)
     when (i?.action) {
       "STOP" -> { stopSelf(); return START_NOT_STICKY }
-      "WAKE" -> { if (running && ready && micEnabled && !callActive) requestStart(); return START_STICKY }
+      "WAKE" -> { if (running && ready && micEnabled && !callActive) ensureCaptureStarted(); return START_STICKY }
       "CAM_START", "CAM_STOP", "SCREEN_START", "SCREEN_STOP" -> { if (!running) { stopSelf(); return START_NOT_STICKY }; share(i!!); return START_STICKY }
     }
     val cmd = i?.getStringExtra(ASSISTANT_COMMAND)?.trim()?.takeIf { it.isNotEmpty() }
@@ -563,7 +439,7 @@ class VoiceService : Service() {
         val b: ByteArray = (try { audioQ.poll(200, TimeUnit.MILLISECONDS) } catch (_: InterruptedException) { null }) ?: continue
         try { track?.write(b, 0, b.size) } catch (_: Exception) {}
       }
-    }.start()
+    }.apply { name = "saara-playback"; isDaemon = true; start() }
     refreshBubble(); Bus.listen(busListener); Bus.add("system", "Connecting…", true); refreshCalls(); connect()
     return START_STICKY
   }
@@ -694,6 +570,7 @@ class VoiceService : Service() {
         .put("speechConfig", JSONObject().put("voiceConfig", JSONObject().put("prebuiltVoiceConfig", JSONObject().put("voiceName", voice)))))
       .put("systemInstruction", JSONObject().put("parts", JSONArray().put(JSONObject().put("text", ins))))
       .put("tools", Tools.declarations())
+      .put("inputAudioTranscription", JSONObject())
       .put("outputAudioTranscription", JSONObject())
     return JSONObject().put("setup", s).toString()
   }
@@ -704,7 +581,7 @@ class VoiceService : Service() {
       ready = true; retries = 0; Bus.setStatus("Connected · say a wake phrase")
       val cmd = pendingCommand; pendingCommand = null
       if (cmd != null) processUtterance(cmd)
-      if (micEnabled) requestStart() else Bus.add("system", "Gemini connected. Microphone is muted.", true)
+      if (micEnabled) ensureCaptureStarted() else Bus.add("system", "Gemini connected. Microphone is muted.", true)
     }
     if (m.has("error")) Bus.add("system", "Gemini error: " + m.optString("error"), true)
     val sc = m.optJSONObject("serverContent")
@@ -713,6 +590,14 @@ class VoiceService : Service() {
       if (parts != null) for (i in 0 until parts.length()) {
         val inl = parts.getJSONObject(i).optJSONObject("inlineData")
         if (inl != null) play(Base64.decode(inl.getString("data"), Base64.DEFAULT))
+      }
+      sc.optJSONObject("inputTranscription")?.let {
+        val heard = it.optString("text")
+        if (heard.isNotBlank()) {
+          armScreenAuto(300_000L)
+          // Software gate: only wake phrases in idle; all speech in active session.
+          handleHeardText(heard)
+        }
       }
       sc.optJSONObject("outputTranscription")?.let { Bus.add("saara", it.optString("text")) }
       if (sc.optBoolean("interrupted")) { stopSpeaking() }
@@ -753,7 +638,7 @@ class VoiceService : Service() {
     running = false; ready = false; isSaraActive = false
     main.removeCallbacks(sessionTimer); main.removeCallbacks(screenAutoStop)
     screenAuto = false; Bus.screenAuto = false
-    destroyRecognizer() // ONLY place the recognizer is destroyed.
+    stopCapture()
     Bus.unlisten(busListener)
     calls?.stop(); calls = null; callActive = false
     TaskControl.clear(); audioQ.clear()
