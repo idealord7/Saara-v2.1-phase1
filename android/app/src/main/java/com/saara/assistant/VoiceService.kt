@@ -109,6 +109,7 @@ class VoiceService : Service() {
   @Volatile private var wakePatterns: List<Regex> = emptyList()
   private var wakeEngine: WakeEngine? = null
   private val wakeLock = Any()
+  @Volatile private var localWakeUnavailable = false
 
   private fun sessionTimeoutEnabled(): Boolean =
     Prefs.plain(this).getBoolean(PREF_SESSION_TIMEOUT_ENABLED, true)
@@ -330,11 +331,19 @@ class VoiceService : Service() {
       val m = p.find(text) ?: p.find(norm) ?: continue
       return m.groupValues.getOrNull(1)?.trim().orEmpty()
     }
+    // Fallback tolerant matching for transcription variants (sara/saara/sarah, hey/hi/ok/okay/oye)
+    if (Regex("\b(hey|hi|hello|ok|okay|oye|are|arre|o)\s+sa+ra+h?\b", RegexOption.IGNORE_CASE).containsMatchIn(norm)) {
+      return Regex("(?i)\b(?:hey|hi|hello|ok|okay|oye|are|arre|o)\s+sa+ra+h?\b[,!?. ]*(.*)$").find(norm)?.groupValues?.getOrNull(1)?.trim().orEmpty() ?: ""
+    }
+    if (Regex("\bsa+ra+h?\b", RegexOption.IGNORE_CASE).containsMatchIn(norm) && norm.split(" ").size <= 4) {
+      return Regex("(?i)\bsa+ra+h?\b[,!?. ]*(.*)$").find(norm)?.groupValues?.getOrNull(1)?.trim().orEmpty() ?: ""
+    }
     return null
   }
 
   // ---------- On-device OpenWakeWord/TFLite (idle: local wake only, no Gemini stream) ----------
   private fun maybeStartIdleWakeEngine() {
+    if (localWakeUnavailable) return
     if (!running || !ready || !micEnabled || callActive || enrolling || isSaraActive || !captureRunning) return
     synchronized(wakeLock) {
       val cur = wakeEngine
@@ -342,15 +351,23 @@ class VoiceService : Service() {
       cur?.stop()
       val eng = WakeEngine(applicationContext,
         onWake = { main.post { onLocalWakeDetected() } },
-        onUnavailable = { msg -> main.post { if (running && !isSaraActive) Bus.add("system", "Wake engine: $msg Falling back to cloud transcription wake gating.", true) } },
+        onUnavailable = { msg -> main.post {
+          if (!localWakeUnavailable) {
+            localWakeUnavailable = true
+            if (running) Bus.add("system", "Wake engine unavailable: $msg Falling back to cloud transcription wake gating.", true)
+          }
+          stopIdleWakeEngine()
+          if (running && !isSaraActive && captureRunning) Bus.setStatus("Connected · listening for wake phrase")
+        } },
         onNotice = { msg -> main.post { if (running) Bus.add("system", msg, true) } }
       )
       if (eng.start()) {
+        localWakeUnavailable = false
         wakeEngine = eng
         Bus.setStatus("Connected · say a wake phrase")
       } else {
+        localWakeUnavailable = true
         wakeEngine = null
-        // fallback: allow Gemini streaming in idle for transcription-based wake (less private/noisier)
         Bus.setStatus("Connected · listening for wake phrase")
       }
     }
@@ -409,18 +426,33 @@ class VoiceService : Service() {
             if (!micEnabled || callActive || enrolling || !ready) continue
             val speaking = System.currentTimeMillis() < speakingUntil + 350L
             if (!isSaraActive) {
-              // IDLE: on-device wake only. No audio to Gemini => background noise/actions won't trigger Saara.
-              if (!speaking) {
-                var si = 0; var bi = 0
-                val scount = n / 2
-                while (bi + 1 < n && si < scount) {
-                  val lo = buf[bi].toInt() and 0xff
-                  val hi = buf[bi + 1].toInt()
-                  shorts[si++] = ((hi shl 8) or lo).toShort()
-                  bi += 2
+              val useLocalWake = !localWakeUnavailable && wakeEngine?.running == true
+              if (useLocalWake) {
+                // IDLE: on-device wake only. No audio to Gemini => background noise/actions won't trigger Saara.
+                if (!speaking) {
+                  var si = 0; var bi = 0
+                  val scount = n / 2
+                  while (bi + 1 < n && si < scount) {
+                    val lo = buf[bi].toInt() and 0xff
+                    val hi = buf[bi + 1].toInt()
+                    shorts[si++] = ((hi shl 8) or lo).toShort()
+                    bi += 2
+                  }
+                  try { wakeEngine?.feed(shorts, si) } catch (_: Exception) {}
                 }
-                try { wakeEngine?.feed(shorts, si) } catch (_: Exception) {}
+                continue
               }
+              // Fallback: stream audio to Gemini in idle; handleHeardText() accepts only wake phrases.
+              if (speaking) continue
+              val socket = ws ?: continue
+              val chunk = ByteArray(n)
+              System.arraycopy(buf, 0, chunk, 0, n)
+              try {
+                val data = Base64.encodeToString(chunk, Base64.NO_WRAP)
+                val payload = JSONObject().put("realtimeInput", JSONObject().put("audio",
+                  JSONObject().put("data", data).put("mimeType", "audio/pcm;rate=16000")))
+                socket.send(payload.toString())
+              } catch (_: Exception) {}
               continue
             }
             // ACTIVE: stream to Gemini so Saara hears commands/content.
