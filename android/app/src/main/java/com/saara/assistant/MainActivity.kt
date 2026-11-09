@@ -747,6 +747,54 @@ class MainActivity : AppCompatActivity() {
 
     addFeatures(root)
 
+    // wake phrases & session timeout
+    val cw = card(root)
+    cw.addView(tv("Wake phrases & session", 16f, bold = true))
+    cw.addView(tv("Saara listens continuously but ignores speech until a wake phrase is heard. After activation, follow-up commands work without repeating the wake phrase until the session times out.", 12f, SUB))
+    val pset = Prefs.plain(this)
+    val wakeList = LinearLayout(this); wakeList.orientation = LinearLayout.VERTICAL
+    fun renderWakePhrases() {
+      wakeList.removeAllViews()
+      val phrases = VoiceService.loadWakePhrases(Prefs.plain(this))
+      for ((idx, ph) in phrases.withIndex()) {
+        val row = LinearLayout(this); row.gravity = Gravity.CENTER_VERTICAL
+        row.addView(tv(ph, 14f), LinearLayout.LayoutParams(0, -2, 1f))
+        val del = tv("Remove", 12f, BAD); del.setPadding(dp(10), dp(6), dp(0), dp(6))
+        del.setOnClickListener {
+          val cur = VoiceService.loadWakePhrases(Prefs.plain(this))
+          if (idx in cur.indices) { cur.removeAt(idx); val e = Prefs.plain(this).edit(); VoiceService.saveWakePhrases(e, cur); e.apply(); renderWakePhrases(); VoiceService.instance?.refreshWakeConfig(); toast("Wake phrase removed") }
+        }
+        row.addView(del)
+        wakeList.addView(row)
+      }
+      if (phrases.isEmpty()) wakeList.addView(tv("No wake phrases set (defaults will be used).", 12f, SUB))
+    }
+    renderWakePhrases()
+    cw.addView(wakeList)
+    val addRow = LinearLayout(this); addRow.gravity = Gravity.CENTER_VERTICAL
+    val addIn = edit("Add wake phrase (e.g. okay saara)"); addIn.setSingleLine(true)
+    val addBtn = btn("Add", ACC2) {
+      val v = addIn.text.toString().trim()
+      if (v.isNotEmpty()) { val cur = VoiceService.loadWakePhrases(Prefs.plain(this)); if (cur.none { it.equals(v, true) }) cur.add(v); val e = Prefs.plain(this).edit(); VoiceService.saveWakePhrases(e, cur); e.apply(); addIn.text.clear(); renderWakePhrases(); VoiceService.instance?.refreshWakeConfig(); toast("Wake phrase added") }
+    }
+    addRow.addView(addIn, LinearLayout.LayoutParams(0, -2, 1f))
+    addRow.addView(addBtn, LinearLayout.LayoutParams(-2, -2))
+    cw.addView(addRow)
+    cw.addView(btn("Reset default wake phrases", SURF2) {
+      val e = Prefs.plain(this).edit(); VoiceService.saveWakePhrases(e, VoiceService.DEFAULT_WAKE_PHRASES); e.apply(); renderWakePhrases(); VoiceService.instance?.refreshWakeConfig(); toast("Defaults restored")
+    }, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8) })
+    val timeoutTitle = tv("", 14f, TXT)
+    val timeoutSeek = SeekBar(this); timeoutSeek.max = 57; timeoutSeek.progress = (pset.getInt(VoiceService.PREF_SESSION_TIMEOUT_SEC, VoiceService.DEFAULT_SESSION_TIMEOUT_SEC) - 3).coerceIn(0, 57)
+    fun paintTimeout() { val sec = timeoutSeek.progress + 3; timeoutTitle.text = "Session timeout: ${sec}s (3–60s). After this silence, wake phrase is required again." }
+    paintTimeout()
+    timeoutSeek.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+      override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) { if (fromUser) { paintTimeout(); Prefs.plain(this@MainActivity).edit().putInt(VoiceService.PREF_SESSION_TIMEOUT_SEC, progress + 3).apply(); VoiceService.instance?.refreshWakeConfig() } }
+      override fun onStartTrackingTouch(seekBar: SeekBar?) {}
+      override fun onStopTrackingTouch(seekBar: SeekBar?) { toast("Session timeout saved") }
+    })
+    val tlp = LinearLayout.LayoutParams(-1, -2); tlp.topMargin = dp(12)
+    cw.addView(timeoutTitle, tlp); cw.addView(timeoutSeek)
+
     // language priority
     val cl = card(root)
     cl.addView(tv("Language priority", 16f, bold = true))
