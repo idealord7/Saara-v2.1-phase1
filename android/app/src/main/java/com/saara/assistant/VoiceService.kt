@@ -139,9 +139,45 @@ class VoiceService : Service() {
     return out
   }
 
+  // Best-effort beep suppression around startListening (recognizer tones are system/OEM-dependent).
+  private var beepMuted = false
+  private var savedMusicVol = -1
+  private var savedNotifVol = -1
+  private var savedSystemVol = -1
+  private val unmuteBeeps = Runnable { restoreBeepStreams() }
+
+  private fun muteBeepStreams() {
+    try {
+      val am = getSystemService(AudioManager::class.java) ?: return
+      if (!beepMuted) {
+        try { savedMusicVol = am.getStreamVolume(AudioManager.STREAM_MUSIC) } catch (_: Exception) { savedMusicVol = -1 }
+        try { savedNotifVol = am.getStreamVolume(AudioManager.STREAM_NOTIFICATION) } catch (_: Exception) { savedNotifVol = -1 }
+        try { savedSystemVol = am.getStreamVolume(AudioManager.STREAM_SYSTEM) } catch (_: Exception) { savedSystemVol = -1 }
+        beepMuted = true
+      }
+      try { am.setStreamVolume(AudioManager.STREAM_MUSIC, 0, 0) } catch (_: Exception) {}
+      try { am.setStreamVolume(AudioManager.STREAM_NOTIFICATION, 0, 0) } catch (_: Exception) {}
+      // Do not touch RING/ALARM/VOICE_CALL.
+    } catch (_: Exception) {}
+  }
+
+  private fun restoreBeepStreams() {
+    if (!beepMuted) return
+    try {
+      val am = getSystemService(AudioManager::class.java) ?: return
+      if (savedMusicVol >= 0) try { am.setStreamVolume(AudioManager.STREAM_MUSIC, savedMusicVol, 0) } catch (_: Exception) {}
+      if (savedNotifVol >= 0) try { am.setStreamVolume(AudioManager.STREAM_NOTIFICATION, savedNotifVol, 0) } catch (_: Exception) {}
+    } catch (_: Exception) {}
+    beepMuted = false
+    savedMusicVol = -1; savedNotifVol = -1; savedSystemVol = -1
+  }
+
   private val recognitionListener = object : RecognitionListener {
     override fun onReadyForSpeech(params: Bundle?) {
       recognizerActive = true
+      // Restore after the recognizer's start cue window; keep this short to avoid silencing app audio long.
+      main.removeCallbacks(unmuteBeeps)
+      main.postDelayed(unmuteBeeps, 350L)
     }
 
     override fun onBeginningOfSpeech() {
@@ -165,12 +201,14 @@ class VoiceService : Service() {
 
     override fun onResults(results: Bundle?) {
       recognizerActive = false
-      handleRecognitionResults(results)
-      restartListening(RESTART_AFTER_RESULT_MS)
+      main.removeCallbacks(unmuteBeeps); restoreBeepStreams()
+      if (running && listeningEnabled) handleRecognitionResults(results)
+      if (running && listeningEnabled) restartListening(if (isSaraActive) 250L else 600L)
     }
 
     override fun onError(error: Int) {
       recognizerActive = false
+      main.removeCallbacks(unmuteBeeps); restoreBeepStreams()
       if (!running) return
       when (error) {
         SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> {
@@ -179,31 +217,32 @@ class VoiceService : Service() {
           return
         }
         SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> {
-          // Back off; avoid cancel() churn which can worsen beeps/indicator flicker.
           restartListening(RESTART_AFTER_BUSY_MS)
           return
         }
         SpeechRecognizer.ERROR_NO_MATCH,
         SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> {
-          // Normal during continuous listening; restart quickly without touching the recognizer instance.
-          restartListening(RESTART_AFTER_NO_MATCH_MS)
+          // Longer backoff reduces start/stop session churn (mic indicator/beep toggling).
+          restartListening(if (isSaraActive) 700L else 1400L)
           return
         }
         SpeechRecognizer.ERROR_CLIENT -> {
-          // Recover by restarting the listen session; keep the same recognizer instance.
-          restartListening(RESTART_AFTER_ERROR_MS)
+          restartListening(900L)
           return
         }
         SpeechRecognizer.ERROR_NETWORK,
         SpeechRecognizer.ERROR_NETWORK_TIMEOUT,
-        SpeechRecognizer.ERROR_SERVER,
+        SpeechRecognizer.ERROR_SERVER -> {
+          restartListening(1200L)
+          return
+        }
         SpeechRecognizer.ERROR_AUDIO -> {
-          restartListening(RESTART_AFTER_ERROR_MS)
+          restartListening(1000L)
           return
         }
         else -> {
           Log.w(TAG, "SpeechRecognizer error: $error")
-          restartListening(RESTART_AFTER_ERROR_MS)
+          restartListening(900L)
           return
         }
       }
@@ -427,9 +466,10 @@ class VoiceService : Service() {
     putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
     putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3)
     putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, packageName)
-    // Longer silence windows help continuous conversation without premature cutoffs.
-    putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 1800L)
-    putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 1800L)
+    // Longer silence windows reduce end-of-utterance cycles => fewer startListening() restarts (less mic toggling/beep churn).
+    putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 2500L)
+    putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 2500L)
+    putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, 1500L)
   }
 
   private fun startListeningInternal() {
@@ -461,6 +501,7 @@ class VoiceService : Service() {
     listeningEnabled = false
     recognizerActive = false
     main.removeCallbacks(restartRunnable)
+    main.removeCallbacks(unmuteBeeps); restoreBeepStreams()
     // Only stop when the user/service explicitly pauses listening (mute/call/enroll/destroy).
     try { speechRecognizer?.stopListening() } catch (_: Exception) {}
     try { speechRecognizer?.cancel() } catch (_: Exception) {}
@@ -469,6 +510,7 @@ class VoiceService : Service() {
 
   private fun destroyRecognizer() {
     main.removeCallbacks(restartRunnable)
+    main.removeCallbacks(unmuteBeeps); restoreBeepStreams()
     try { speechRecognizer?.cancel() } catch (_: Exception) {}
     try { speechRecognizer?.destroy() } catch (_: Exception) {}
     speechRecognizer = null
