@@ -48,6 +48,7 @@ class VoiceService : Service() {
     const val PREF_SESSION_TIMEOUT_SEC = "session_timeout_sec"
     const val PREF_SESSION_TIMEOUT_ENABLED = "session_timeout_enabled"
     const val DEFAULT_SESSION_TIMEOUT_SEC = 9
+    private const val ECHO_GUARD_MS = 1200L
     val DEFAULT_WAKE_PHRASES = listOf(
       "hey sara", "hey saara", "ok saara", "okay saara", "oye saara", "oye sara", "saara", "sara", "সারা", "سارا"
     )
@@ -72,6 +73,10 @@ class VoiceService : Service() {
   @Volatile private var running = false
   @Volatile private var ready = false
   @Volatile private var speakingUntil = 0L
+  @Volatile private var lastHeardNorm = ""
+  @Volatile private var lastHeardAt = 0L
+  @Volatile private var lastReplyNorm = ""
+  @Volatile private var lastReplyAt = 0L
   @Volatile var muted = false
   @Volatile var isSaraActive = false
   @Volatile private var micEnabled = true
@@ -108,8 +113,8 @@ class VoiceService : Service() {
 
   private fun sessionTimeoutMs(): Long {
     if (!sessionTimeoutEnabled()) return 0L
-    val sec = Prefs.plain(this).getInt(PREF_SESSION_TIMEOUT_SEC, DEFAULT_SESSION_TIMEOUT_SEC).coerceIn(3, 300)
-    return sec * 1000L
+    val sec = Prefs.plain(this).getInt(PREF_SESSION_TIMEOUT_SEC, DEFAULT_SESSION_TIMEOUT_SEC).coerceIn(0, 999)
+    return if (sec <= 0) 0L else sec * 1000L
   }
 
   fun refreshWakeConfig() {
@@ -137,6 +142,9 @@ class VoiceService : Service() {
     out.sortByDescending { it.pattern.length }
     return out
   }
+
+  private fun normForCompare(s: String): String =
+    s.lowercase(Locale.ROOT).replace(Regex("[^\\p{L}\\p{N}\\s]+"), " ").replace(Regex("\\s+"), " ").trim()
 
   private fun normalizePhrase(s: String): String =
     s.lowercase(Locale.ROOT).replace(Regex("[,!?।]+"), " ").replace(Regex("\\s+"), " ").trim()
@@ -261,6 +269,16 @@ class VoiceService : Service() {
   private fun handleHeardText(raw: String) {
     val heard = raw.trim()
     if (heard.isBlank()) return
+    val now = System.currentTimeMillis()
+    // Avoid feedback loop: ignore input while/just after Saara is speaking (can pick up TTS from speaker).
+    if (now < speakingUntil + ECHO_GUARD_MS) return
+    val norm = normForCompare(heard)
+    if (norm.isNotEmpty()) {
+      if (norm == lastHeardNorm && (now - lastHeardAt) < 2500L) return
+      if (lastReplyNorm.isNotEmpty() && norm == lastReplyNorm && (now - lastReplyAt) < 8000L) return
+      if (lastReplyNorm.isNotEmpty() && (now - lastReplyAt) < 5000L && (lastReplyNorm.contains(norm) || norm.contains(lastReplyNorm)) && norm.length > 3) return
+      lastHeardNorm = norm; lastHeardAt = now
+    }
 
     if (!isSaraActive) {
       val afterWake = extractWakeCommand(heard) ?: return // software: ignore all non-wake/background
@@ -338,6 +356,8 @@ class VoiceService : Service() {
           if (n > 0) {
             // Software gate: when muted, call, or enrolling, do not forward/process.
             if (!micEnabled || callActive || enrolling || !ready) continue
+            // Reduce echo/feedback loop from device speaker into mic/Gemini session.
+            if (System.currentTimeMillis() < speakingUntil + 350L) continue
             val socket = ws ?: continue
             val chunk = ByteArray(n)
             System.arraycopy(buf, 0, chunk, 0, n)
@@ -599,7 +619,12 @@ class VoiceService : Service() {
           handleHeardText(heard)
         }
       }
-      sc.optJSONObject("outputTranscription")?.let { Bus.add("saara", it.optString("text")) }
+      sc.optJSONObject("outputTranscription")?.let {
+        val txt = it.optString("text")
+        Bus.add("saara", txt)
+        val rn = normForCompare(txt)
+        if (rn.isNotEmpty()) { lastReplyNorm = rn; lastReplyAt = System.currentTimeMillis() }
+      }
       if (sc.optBoolean("interrupted")) { stopSpeaking() }
       if (sc.optBoolean("turnComplete")) {
         Bus.endTurn(); armScreenAuto(6000L)
@@ -624,7 +649,9 @@ class VoiceService : Service() {
 
   private fun play(pcm: ByteArray) {
     if (track == null) return
-    speakingUntil = maxOf(speakingUntil, System.currentTimeMillis()) + pcm.size / 48
+    // pcm 16-bit mono @ 24kHz => 2 bytes/sample, 48 bytes/ms
+    val dur = pcm.size / 48
+    speakingUntil = maxOf(speakingUntil, System.currentTimeMillis()) + dur + 250L
     audioQ.offer(pcm)
   }
 
@@ -632,6 +659,7 @@ class VoiceService : Service() {
     audioQ.clear()
     try { track?.pause(); track?.flush(); track?.play() } catch (_: Exception) {}
     speakingUntil = 0
+    lastReplyNorm = ""
   }
 
   override fun onDestroy() {

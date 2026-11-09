@@ -784,29 +784,38 @@ class MainActivity : AppCompatActivity() {
       val e = Prefs.plain(this).edit(); VoiceService.saveWakePhrases(e, VoiceService.DEFAULT_WAKE_PHRASES); e.apply(); renderWakePhrases(); VoiceService.instance?.refreshWakeConfig(); toast("Defaults restored")
     }, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8) })
     val timeoutTitle = tv("", 14f, TXT)
-    val timeoutSeek = SeekBar(this); timeoutSeek.max = 297 // 3-300 seconds
-    timeoutSeek.progress = (Prefs.plain(this).getInt(VoiceService.PREF_SESSION_TIMEOUT_SEC, VoiceService.DEFAULT_SESSION_TIMEOUT_SEC) - 3).coerceIn(0, 297)
+    val timeoutSeek = SeekBar(this); timeoutSeek.max = 999 // 0-999 seconds (0 = off)
+    timeoutSeek.progress = Prefs.plain(this).getInt(VoiceService.PREF_SESSION_TIMEOUT_SEC, VoiceService.DEFAULT_SESSION_TIMEOUT_SEC).coerceIn(0, 999)
     val timeoutBtn = tv("", 13f, Color.WHITE, true)
     fun paintTimeout() {
       val on = Prefs.plain(this).getBoolean(VoiceService.PREF_SESSION_TIMEOUT_ENABLED, true)
-      val sec = timeoutSeek.progress + 3
-      timeoutBtn.text = if (on) "Turn OFF session timeout" else "Turn ON session timeout"
-      timeoutBtn.background = bg(if (on) ACC2 else SURF2, 18)
+      val sec = timeoutSeek.progress
+      val effectiveOff = !on || sec <= 0
+      timeoutBtn.text = if (effectiveOff) "Turn ON session timeout" else "Turn OFF session timeout"
+      timeoutBtn.background = bg(if (!effectiveOff) ACC2 else SURF2, 18)
       timeoutBtn.setPadding(dp(14), dp(8), dp(14), dp(8))
-      timeoutSeek.alpha = if (on) 1f else 0.45f
-      timeoutTitle.text = if (on) "Session timeout: ${sec}s (3–300). After this silence, wake phrase is required again." else "Session timeout: OFF. Active session stays on until you stop/mute Saara."
+      timeoutSeek.alpha = if (!effectiveOff) 1f else 0.45f
+      timeoutTitle.text = if (effectiveOff) "Session timeout: OFF (0–999s). Active session stays on until you stop/mute Saara." else "Session timeout: ${sec}s (0–999). After this silence, wake phrase is required again."
     }
     paintTimeout()
     timeoutBtn.setOnClickListener {
-      val cur = Prefs.plain(this).getBoolean(VoiceService.PREF_SESSION_TIMEOUT_ENABLED, true)
-      Prefs.plain(this).edit().putBoolean(VoiceService.PREF_SESSION_TIMEOUT_ENABLED, !cur).apply()
-      paintTimeout(); VoiceService.instance?.refreshWakeConfig(); toast(if (!cur) "Session timeout ON" else "Session timeout OFF")
+      val curOn = Prefs.plain(this).getBoolean(VoiceService.PREF_SESSION_TIMEOUT_ENABLED, true) && timeoutSeek.progress > 0
+      if (curOn) {
+        Prefs.plain(this).edit().putBoolean(VoiceService.PREF_SESSION_TIMEOUT_ENABLED, false).apply()
+        toast("Session timeout OFF")
+      } else {
+        val sec = if (timeoutSeek.progress <= 0) VoiceService.DEFAULT_SESSION_TIMEOUT_SEC else timeoutSeek.progress
+        timeoutSeek.progress = sec
+        Prefs.plain(this).edit().putBoolean(VoiceService.PREF_SESSION_TIMEOUT_ENABLED, true).putInt(VoiceService.PREF_SESSION_TIMEOUT_SEC, sec).apply()
+        toast("Session timeout ON")
+      }
+      paintTimeout(); VoiceService.instance?.refreshWakeConfig()
     }
     timeoutSeek.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
       override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
         if (fromUser) {
-          val sec = progress + 3
-          Prefs.plain(this@MainActivity).edit().putInt(VoiceService.PREF_SESSION_TIMEOUT_SEC, sec).putBoolean(VoiceService.PREF_SESSION_TIMEOUT_ENABLED, true).apply()
+          val enabled = progress > 0
+          Prefs.plain(this@MainActivity).edit().putInt(VoiceService.PREF_SESSION_TIMEOUT_SEC, progress).putBoolean(VoiceService.PREF_SESSION_TIMEOUT_ENABLED, enabled).apply()
           paintTimeout(); VoiceService.instance?.refreshWakeConfig()
         }
       }
