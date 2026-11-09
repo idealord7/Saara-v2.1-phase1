@@ -46,6 +46,11 @@
     <service android:name=".VoiceService" android:foregroundServiceType="microphone|camera|mediaProjection" android:exported="false"/>
     <receiver android:name=".TaskReceiver" android:exported="false"/>
     <receiver android:name=".BootReceiver" android:exported="true"><intent-filter><action android:name="android.intent.action.BOOT_COMPLETED"/></intent-filter></receiver>
+    <receiver android:name=".MacroDroidReceiver" android:enabled="true" android:exported="true">
+      <intent-filter>
+        <action android:name="com.saara.ACTION_EXECUTE"/>
+      </intent-filter>
+    </receiver>
     <service android:name=".SaaraAccessibility" android:exported="true" android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
       <intent-filter><action android:name="android.accessibilityservice.AccessibilityService"/></intent-filter>
       <meta-data android:name="android.accessibilityservice" android:resource="@xml/accessibility_config"/>

@@ -551,7 +551,12 @@ class VoiceService : Service() {
       "CAM_START", "CAM_STOP", "SCREEN_START", "SCREEN_STOP" -> { if (!running) { stopSelf(); return START_NOT_STICKY }; share(i!!); return START_STICKY }
     }
     val cmd = i?.getStringExtra(ASSISTANT_COMMAND)?.trim()?.takeIf { it.isNotEmpty() }
-    if (cmd != null) pendingCommand = cmd
+      ?: i?.getStringExtra("action_text")?.trim()?.takeIf { it.isNotEmpty() }
+    if (cmd != null) {
+      if (ready) {
+        startSession(); processUtterance(cmd)
+      } else pendingCommand = cmd
+    }
     if (running) return START_STICKY
     if (!has(Manifest.permission.RECORD_AUDIO)) {
       Bus.add("system", "Microphone permission is missing. Allow Microphone in Android app permissions.", true)
