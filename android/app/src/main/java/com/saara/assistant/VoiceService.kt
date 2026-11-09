@@ -282,15 +282,15 @@ class VoiceService : Service() {
     val heard = raw.trim()
     if (heard.isBlank()) return
     val now = System.currentTimeMillis()
-    // Avoid feedback loop: ignore input while/just after Saara is speaking (can pick up TTS from speaker).
-    if (now < speakingUntil + ECHO_GUARD_MS) return
     val norm = normForCompare(heard)
+    // Echo/dup guards. In active mode allow barge-in (don't block all speech while TTS plays); in idle be stricter.
     if (norm.isNotEmpty()) {
       if (norm == lastHeardNorm && (now - lastHeardAt) < 2500L) return
       if (lastReplyNorm.isNotEmpty() && norm == lastReplyNorm && (now - lastReplyAt) < 8000L) return
       if (lastReplyNorm.isNotEmpty() && (now - lastReplyAt) < 5000L && (lastReplyNorm.contains(norm) || norm.contains(lastReplyNorm)) && norm.length > 3) return
+      if (!isSaraActive && now < speakingUntil + ECHO_GUARD_MS) return
       lastHeardNorm = norm; lastHeardAt = now
-    }
+    } else if (!isSaraActive && now < speakingUntil + ECHO_GUARD_MS) return
 
     if (!isSaraActive) {
       val afterWake = extractWakeCommand(heard) ?: return // software: ignore all non-wake/background
@@ -358,9 +358,9 @@ class VoiceService : Service() {
           stopIdleWakeEngine()
           if (!localWakeWarned) {
             localWakeWarned = true
-            if (running) Bus.add("system", "Wake engine failed: $msg Idle cloud audio streaming is disabled to prevent noise/background actions. Fix on-device wake models for this device.", true)
+            if (running) Bus.add("system", "Wake engine failed: $msg Using cloud wake fallback in idle (wake-phrase gated; Gemini responses suppressed in idle).", true)
           }
-          if (running && !isSaraActive && captureRunning) Bus.setStatus("Connected · wake engine unavailable")
+          if (running && !isSaraActive && captureRunning) Bus.setStatus("Connected · listening for wake phrase")
         } },
         onNotice = { msg -> main.post { if (running) Bus.add("system", msg, true) } }
       )
@@ -372,8 +372,8 @@ class VoiceService : Service() {
       } else {
         localWakeUnavailable = true
         wakeEngine = null
-        if (!localWakeWarned) { localWakeWarned = true; Bus.add("system", "On-device wake engine unavailable. No cloud audio is streamed in idle, so background noise cannot trigger actions. Check openwakeword TFLite assets/models for this device.", true) }
-        Bus.setStatus("Connected · wake engine unavailable")
+        if (!localWakeWarned) { localWakeWarned = true; Bus.add("system", "On-device wake unavailable on this device. Using cloud wake fallback in idle (wake-phrase gated; Gemini responses suppressed in idle to reduce noise actions).", true) }
+        Bus.setStatus("Connected · listening for wake phrase")
       }
     }
   }
@@ -407,10 +407,17 @@ class VoiceService : Service() {
     try {
       val rate = 16000
       val min = AudioRecord.getMinBufferSize(rate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
-      val rec = AudioRecord.Builder()
-        .setAudioSource(MediaRecorder.AudioSource.VOICE_RECOGNITION)
-        .setAudioFormat(AudioFormat.Builder().setSampleRate(rate).setChannelMask(AudioFormat.CHANNEL_IN_MONO).setEncoding(AudioFormat.ENCODING_PCM_16BIT).build())
-        .setBufferSizeInBytes(maxOf(min, 6400)).build()
+      val rec = try {
+        AudioRecord.Builder()
+          .setAudioSource(MediaRecorder.AudioSource.VOICE_COMMUNICATION)
+          .setAudioFormat(AudioFormat.Builder().setSampleRate(rate).setChannelMask(AudioFormat.CHANNEL_IN_MONO).setEncoding(AudioFormat.ENCODING_PCM_16BIT).build())
+          .setBufferSizeInBytes(maxOf(min, 6400)).build()
+      } catch (_: Exception) {
+        AudioRecord.Builder()
+          .setAudioSource(MediaRecorder.AudioSource.VOICE_RECOGNITION)
+          .setAudioFormat(AudioFormat.Builder().setSampleRate(rate).setChannelMask(AudioFormat.CHANNEL_IN_MONO).setEncoding(AudioFormat.ENCODING_PCM_16BIT).build())
+          .setBufferSizeInBytes(maxOf(min, 6400)).build()
+      }
       if (rec.state != AudioRecord.STATE_INITIALIZED) {
         rec.release()
         Bus.add("system", "Microphone could not start.", true)
@@ -431,10 +438,11 @@ class VoiceService : Service() {
             if (!micEnabled || callActive || enrolling || !ready) continue
             val speaking = System.currentTimeMillis() < speakingUntil + 350L
             if (!isSaraActive) {
-              // IDLE: on-device wake only. NEVER stream audio to Gemini in idle (prevents noise/background/TV from triggering actions).
-              if (!speaking) {
-                val eng = wakeEngine
-                if (eng != null && eng.running) {
+              val eng = wakeEngine
+              val local = eng != null && eng.running && !localWakeUnavailable
+              if (local) {
+                // IDLE: on-device wake only. No Gemini stream.
+                if (!speaking) {
                   var si = 0; var bi = 0
                   val scount = n / 2
                   while (bi + 1 < n && si < scount) {
@@ -445,11 +453,22 @@ class VoiceService : Service() {
                   }
                   try { eng.feed(shorts, si) } catch (_: Exception) {}
                 }
+                continue
               }
+              // Fallback: stream for inputTranscription wake detection only; handle() suppresses Gemini responses/actions in idle.
+              if (speaking) continue
+              val socket = ws ?: continue
+              val chunk = ByteArray(n)
+              System.arraycopy(buf, 0, chunk, 0, n)
+              try {
+                val data = Base64.encodeToString(chunk, Base64.NO_WRAP)
+                val payload = JSONObject().put("realtimeInput", JSONObject().put("audio",
+                  JSONObject().put("data", data).put("mimeType", "audio/pcm;rate=16000")))
+                socket.send(payload.toString())
+              } catch (_: Exception) {}
               continue
             }
-            // ACTIVE: stream to Gemini so Saara hears commands/content.
-            if (speaking) continue
+            // ACTIVE: stream to Gemini. During TTS we still forward so barge-in is possible (echo guards applied on transcripts).
             val socket = ws ?: continue
             val chunk = ByteArray(n)
             System.arraycopy(buf, 0, chunk, 0, n)
@@ -700,33 +719,39 @@ class VoiceService : Service() {
     if (m.has("error")) Bus.add("system", "Gemini error: " + m.optString("error"), true)
     val sc = m.optJSONObject("serverContent")
     if (sc != null) {
-      val parts = sc.optJSONObject("modelTurn")?.optJSONArray("parts")
-      if (parts != null) for (i in 0 until parts.length()) {
-        val inl = parts.getJSONObject(i).optJSONObject("inlineData")
-        if (inl != null) play(Base64.decode(inl.getString("data"), Base64.DEFAULT))
-      }
+      // Always accept input transcriptions (gated in handleHeardText) so idle cloud-wake fallback can detect wake phrases.
       sc.optJSONObject("inputTranscription")?.let {
         val heard = it.optString("text")
         if (heard.isNotBlank()) {
           armScreenAuto(300_000L)
-          // Software gate: only wake phrases in idle; all speech in active session.
           handleHeardText(heard)
         }
       }
-      sc.optJSONObject("outputTranscription")?.let {
-        val txt = it.optString("text")
-        Bus.add("saara", txt)
-        val rn = normForCompare(txt)
-        if (rn.isNotEmpty()) { lastReplyNorm = rn; lastReplyAt = System.currentTimeMillis() }
-      }
-      if (sc.optBoolean("interrupted")) { stopSpeaking() }
-      if (sc.optBoolean("turnComplete")) {
-        Bus.endTurn(); armScreenAuto(6000L)
-        try { Db.get(this).usage("command", "turn") } catch (_: Exception) {}
+      // In IDLE, suppress Gemini audio/output/tools to prevent background noise from causing speech/actions.
+      if (isSaraActive) {
+        val parts = sc.optJSONObject("modelTurn")?.optJSONArray("parts")
+        if (parts != null) for (i in 0 until parts.length()) {
+          val inl = parts.getJSONObject(i).optJSONObject("inlineData")
+          if (inl != null) play(Base64.decode(inl.getString("data"), Base64.DEFAULT))
+        }
+        sc.optJSONObject("outputTranscription")?.let {
+          val txt = it.optString("text")
+          Bus.add("saara", txt)
+          val rn = normForCompare(txt)
+          if (rn.isNotEmpty()) { lastReplyNorm = rn; lastReplyAt = System.currentTimeMillis() }
+        }
+        if (sc.optBoolean("interrupted")) { stopSpeaking() }
+        if (sc.optBoolean("turnComplete")) {
+          Bus.endTurn(); armScreenAuto(6000L)
+          try { Db.get(this).usage("command", "turn") } catch (_: Exception) {}
+        }
+      } else {
+        // If model started responding in idle fallback, ignore/interrupt.
+        if (sc.optBoolean("interrupted") || sc.has("modelTurn") || sc.optBoolean("turnComplete")) stopSpeaking()
       }
     }
     val calls = m.optJSONObject("toolCall")?.optJSONArray("functionCalls")
-    if (calls != null) Thread {
+    if (calls != null && isSaraActive) Thread {
       armScreenAuto(300_000L); resetSessionTimerIfActive()
       val out = JSONArray()
       for (i in 0 until calls.length()) {
@@ -738,7 +763,9 @@ class VoiceService : Service() {
         out.put(JSONObject().put("id", c.optString("id")).put("name", name).put("response", JSONObject().put("result", Tools.modelResult(name, r))))
       }
       ws?.send(JSONObject().put("toolResponse", JSONObject().put("functionResponses", out)).toString())
-    }.start()
+    }.start() else if (calls != null) {
+      // idle: do not execute tools
+    }
   }
 
   private fun play(pcm: ByteArray) {

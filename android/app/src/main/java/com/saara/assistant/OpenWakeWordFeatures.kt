@@ -47,7 +47,8 @@ class OpenWakeWordFeatures(private val c: Context) {
     fun runModel(interpreter: Interpreter, input: FloatArray): FloatArray {
       val outShape = interpreter.getOutputTensor(0).shape()
       var outSize = 1
-      for (d in outShape) outSize *= d
+      for (d in outShape) outSize *= if (d > 0) d else 1
+      if (outSize <= 0) outSize = 1
 
       val inBuf = ByteBuffer.allocateDirect(input.size * 4).order(ByteOrder.nativeOrder())
       inBuf.asFloatBuffer().put(input)
@@ -68,10 +69,19 @@ class OpenWakeWordFeatures(private val c: Context) {
   private val melWindow = FloatArray(MEL_WINDOW * MEL_BINS)
 
   init {
-    mel.resizeInput(0, intArrayOf(1, CHUNK + PRE_ROLL))
-    mel.allocateTensors()
-    emb.resizeInput(0, intArrayOf(1, MEL_WINDOW, MEL_BINS, 1))
-    emb.allocateTensors()
+    // Some model exports allocate fine without resize; try safest path first.
+    try {
+      mel.allocateTensors()
+    } catch (_: Exception) {
+      mel.resizeInput(0, intArrayOf(1, CHUNK + PRE_ROLL))
+      mel.allocateTensors()
+    }
+    try {
+      emb.allocateTensors()
+    } catch (_: Exception) {
+      emb.resizeInput(0, intArrayOf(1, MEL_WINDOW, MEL_BINS, 1))
+      emb.allocateTensors()
+    }
   }
 
   /** Feed exactly [CHUNK] samples. Returns a fresh 96-dim embedding once 76 mel frames exist. */
@@ -83,9 +93,14 @@ class OpenWakeWordFeatures(private val c: Context) {
 
     val spec = runModel(mel, melInput)
     val frames = spec.size / MEL_BINS
+    if (frames <= 0) return null
     for (f in 0 until frames) {
       val row = FloatArray(MEL_BINS)
-      for (b in 0 until MEL_BINS) row[b] = spec[f * MEL_BINS + b] / 10f + 2f
+      val base = f * MEL_BINS
+      for (b in 0 until MEL_BINS) {
+        val idx = base + b
+        row[b] = if (idx < spec.size) spec[idx] / 10f + 2f else 0f
+      }
       melBuf.addLast(row)
     }
     while (melBuf.size > MEL_MAX) melBuf.removeFirst()
@@ -101,7 +116,7 @@ class OpenWakeWordFeatures(private val c: Context) {
       idx += MEL_BINS
     }
     val e = runModel(emb, melWindow)
-    return if (e.size >= EMB_DIM) e.copyOf(EMB_DIM) else null
+    return if (e.size >= EMB_DIM) e.copyOf(EMB_DIM) else e
   }
 
   fun reset() {
