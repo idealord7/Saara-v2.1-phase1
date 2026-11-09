@@ -439,8 +439,7 @@ class VoiceService : Service() {
             val speaking = System.currentTimeMillis() < speakingUntil + 350L
             if (!isSaraActive) {
               val eng = wakeEngine
-              val local = eng != null && eng.running && !localWakeUnavailable
-              if (local) {
+              if (eng != null && eng.running && !localWakeUnavailable) {
                 // IDLE: on-device wake only. No Gemini stream.
                 if (!speaking) {
                   var si = 0; var bi = 0
