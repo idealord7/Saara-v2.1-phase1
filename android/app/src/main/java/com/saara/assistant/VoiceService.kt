@@ -44,7 +44,7 @@ import java.util.concurrent.atomic.AtomicBoolean
  * Conversation flow:
  * - Idle (![isSaraActive]): ignore all speech unless a configured wake phrase is heard.
  * - Active ([isSaraActive]=true): process follow-ups directly without repeating the wake phrase.
- * - Session timeout (configurable, default 9s) resets [isSaraActive]=false after inactivity; listening continues.
+ * - Session timeout (configurable seconds, can be turned OFF) resets [isSaraActive]=false after inactivity; listening continues.
  *
  * Note: Android’s speech recognition service/OEM ultimately controls mic cues; this architecture
  * minimizes app-side churn that commonly causes rapid toggling/flicker/beeps.
@@ -56,6 +56,7 @@ class VoiceService : Service() {
     const val ASSISTANT_COMMAND = "saara_command"
     const val PREF_WAKE_PHRASES = "wake_phrases"
     const val PREF_SESSION_TIMEOUT_SEC = "session_timeout_sec"
+    const val PREF_SESSION_TIMEOUT_ENABLED = "session_timeout_enabled"
     const val DEFAULT_SESSION_TIMEOUT_SEC = 9
     val DEFAULT_WAKE_PHRASES = listOf(
       "hey sara", "hey saara", "ok saara", "okay saara", "oye saara", "oye sara", "saara", "sara", "সারা", "سارا"
@@ -125,20 +126,21 @@ class VoiceService : Service() {
 
   // Best-effort: reduce OEM start cues on some devices (not universally controllable).
   private var beepMuted = false
-  private var savedMusicVol = -1
   private var savedNotifVol = -1
+  private var savedSystemVol = -1
   private val unmuteBeeps = Runnable { restoreBeepStreams() }
 
   private fun muteBeepStreams() {
     try {
       val am = getSystemService(AudioManager::class.java) ?: return
       if (!beepMuted) {
-        try { savedMusicVol = am.getStreamVolume(AudioManager.STREAM_MUSIC) } catch (_: Exception) { savedMusicVol = -1 }
         try { savedNotifVol = am.getStreamVolume(AudioManager.STREAM_NOTIFICATION) } catch (_: Exception) { savedNotifVol = -1 }
+        try { savedSystemVol = am.getStreamVolume(AudioManager.STREAM_SYSTEM) } catch (_: Exception) { savedSystemVol = -1 }
         beepMuted = true
       }
-      try { am.setStreamVolume(AudioManager.STREAM_MUSIC, 0, 0) } catch (_: Exception) {}
+      // Avoid STREAM_MUSIC: Saara TTS playback uses it.
       try { am.setStreamVolume(AudioManager.STREAM_NOTIFICATION, 0, 0) } catch (_: Exception) {}
+      try { am.setStreamVolume(AudioManager.STREAM_SYSTEM, 0, 0) } catch (_: Exception) {}
     } catch (_: Exception) {}
   }
 
@@ -146,17 +148,28 @@ class VoiceService : Service() {
     if (!beepMuted) return
     try {
       val am = getSystemService(AudioManager::class.java) ?: return
-      if (savedMusicVol >= 0) try { am.setStreamVolume(AudioManager.STREAM_MUSIC, savedMusicVol, 0) } catch (_: Exception) {}
       if (savedNotifVol >= 0) try { am.setStreamVolume(AudioManager.STREAM_NOTIFICATION, savedNotifVol, 0) } catch (_: Exception) {}
+      if (savedSystemVol >= 0) try { am.setStreamVolume(AudioManager.STREAM_SYSTEM, savedSystemVol, 0) } catch (_: Exception) {}
     } catch (_: Exception) {}
     beepMuted = false
-    savedMusicVol = -1; savedNotifVol = -1
+    savedNotifVol = -1; savedSystemVol = -1
   }
 
-  private fun sessionTimeoutMs(): Long =
-    Prefs.plain(this).getInt(PREF_SESSION_TIMEOUT_SEC, DEFAULT_SESSION_TIMEOUT_SEC).coerceIn(3, 60) * 1000L
+  private fun sessionTimeoutEnabled(): Boolean =
+    Prefs.plain(this).getBoolean(PREF_SESSION_TIMEOUT_ENABLED, true)
 
-  fun refreshWakeConfig() { main.post { wakePatterns = buildWakePatterns(loadWakePhrases(Prefs.plain(this))) } }
+  private fun sessionTimeoutMs(): Long {
+    if (!sessionTimeoutEnabled()) return 0L
+    val sec = Prefs.plain(this).getInt(PREF_SESSION_TIMEOUT_SEC, DEFAULT_SESSION_TIMEOUT_SEC).coerceIn(3, 300)
+    return sec * 1000L
+  }
+
+  fun refreshWakeConfig() {
+    main.post {
+      wakePatterns = buildWakePatterns(loadWakePhrases(Prefs.plain(this)))
+      if (isSaraActive) resetSessionTimer()
+    }
+  }
 
   private fun buildWakePatterns(phrases: List<String>): List<Regex> {
     val out = ArrayList<Regex>()
@@ -183,7 +196,7 @@ class VoiceService : Service() {
   private val recognitionListener = object : RecognitionListener {
     override fun onReadyForSpeech(params: Bundle?) {
       main.removeCallbacks(unmuteBeeps)
-      main.postDelayed(unmuteBeeps, 350L)
+      main.postDelayed(unmuteBeeps, 180L)
     }
 
     override fun onBeginningOfSpeech() {
@@ -269,7 +282,9 @@ class VoiceService : Service() {
 
   private fun resetSessionTimer() {
     main.removeCallbacks(sessionTimer)
-    if (isSaraActive && running) main.postDelayed(sessionTimer, sessionTimeoutMs())
+    if (!isSaraActive || !running) return
+    val ms = sessionTimeoutMs()
+    if (ms > 0L) main.postDelayed(sessionTimer, ms)
   }
 
   private fun resetSessionTimerIfActive() {
