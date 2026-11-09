@@ -104,9 +104,11 @@ class VoiceService : Service() {
   private var captureThread: Thread? = null
   private val captureStarting = AtomicBoolean(false)
 
-  // --- Session / wake ---
+  // --- Session / wake (on-device OpenWakeWord/TFLite when idle) ---
   private val sessionTimer = Runnable { onSessionTimeout() }
   @Volatile private var wakePatterns: List<Regex> = emptyList()
+  private var wakeEngine: WakeEngine? = null
+  private val wakeLock = Any()
 
   private fun sessionTimeoutEnabled(): Boolean =
     Prefs.plain(this).getBoolean(PREF_SESSION_TIMEOUT_ENABLED, true)
@@ -166,12 +168,14 @@ class VoiceService : Service() {
       if (micEnabled) {
         isSaraActive = false
         main.removeCallbacks(sessionTimer)
-        Bus.add("system", "Microphone ON (software). Say a wake phrase to start; background speech is ignored until wake.", true)
+        Bus.add("system", "Microphone ON (software). Say a wake phrase to start; background speech/noise is ignored until wake.", true)
         ensureCaptureStarted()
+        maybeStartIdleWakeEngine()
       } else {
         isSaraActive = false
         main.removeCallbacks(sessionTimer)
-        stopCapture() // software OFF: stop forwarding/processing and release capture
+        stopIdleWakeEngine()
+        stopCapture()
         Bus.add("system", "Microphone muted.", true)
       }
       refreshNotif(); Bus.ping()
@@ -181,6 +185,8 @@ class VoiceService : Service() {
   fun startSession() {
     isSaraActive = true
     resetSessionTimer()
+    stopIdleWakeEngine()
+    Bus.setStatus("Connected · listening")
   }
 
   private fun resetSessionTimer() {
@@ -199,22 +205,24 @@ class VoiceService : Service() {
     isSaraActive = false
     main.removeCallbacks(sessionTimer)
     Bus.add("system", "Session ended. Say a wake phrase to start again.", true)
+    maybeStartIdleWakeEngine()
   }
 
   private fun onSessionTimeout() {
     if (!running || !isSaraActive) return
     isSaraActive = false
     Bus.add("system", "Session ended. Say a wake phrase to start again.", true)
+    maybeStartIdleWakeEngine()
   }
 
   fun suspendWakeForEnrollment() {
-    main.post { enrolling = true; stopCapture(); if (running) Bus.add("system", "Voice capture paused for enrollment.", true) }
+    main.post { enrolling = true; stopIdleWakeEngine(); stopCapture(); if (running) Bus.add("system", "Voice capture paused for enrollment.", true) }
   }
 
   fun resumeWakeAfterEnrollment() {
     main.post {
       enrolling = false
-      if (running && ready && !callActive && micEnabled) ensureCaptureStarted()
+      if (running && ready && !callActive && micEnabled) { ensureCaptureStarted(); maybeStartIdleWakeEngine() }
     }
   }
 
@@ -226,6 +234,7 @@ class VoiceService : Service() {
 
   private fun onCallStarted(caller: String) {
     callActive = true
+    stopIdleWakeEngine()
     stopCapture()
     val who = if (caller.isBlank()) "an unknown number" else caller
     Bus.setStatus("Incoming call" + if (caller.isBlank()) "" else " · $caller")
@@ -242,7 +251,7 @@ class VoiceService : Service() {
     callActive = false
     Bus.setStatus(if (ready) "Connected · listening" else Bus.status)
     Bus.add("system", "Call ended.", true)
-    main.postDelayed({ if (running && ready && !callActive && micEnabled) ensureCaptureStarted() }, 900L)
+    main.postDelayed({ if (running && ready && !callActive && micEnabled) { ensureCaptureStarted(); if (!isSaraActive) maybeStartIdleWakeEngine() else Bus.setStatus("Connected · listening") } }, 900L)
     Bus.ping()
   }
 
@@ -324,6 +333,47 @@ class VoiceService : Service() {
     return null
   }
 
+  // ---------- On-device OpenWakeWord/TFLite (idle: local wake only, no Gemini stream) ----------
+  private fun maybeStartIdleWakeEngine() {
+    if (!running || !ready || !micEnabled || callActive || enrolling || isSaraActive || !captureRunning) return
+    synchronized(wakeLock) {
+      val cur = wakeEngine
+      if (cur != null && cur.running) return
+      cur?.stop()
+      val eng = WakeEngine(applicationContext,
+        onWake = { main.post { onLocalWakeDetected() } },
+        onUnavailable = { msg -> main.post { if (running && !isSaraActive) Bus.add("system", "Wake engine: $msg Falling back to cloud transcription wake gating.", true) } },
+        onNotice = { msg -> main.post { if (running) Bus.add("system", msg, true) } }
+      )
+      if (eng.start()) {
+        wakeEngine = eng
+        Bus.setStatus("Connected · say a wake phrase")
+      } else {
+        wakeEngine = null
+        // fallback: allow Gemini streaming in idle for transcription-based wake (less private/noisier)
+        Bus.setStatus("Connected · listening for wake phrase")
+      }
+    }
+  }
+
+  private fun stopIdleWakeEngine() {
+    synchronized(wakeLock) {
+      try { wakeEngine?.stop() } catch (_: Exception) {}
+      wakeEngine = null
+    }
+  }
+
+  private fun onLocalWakeDetected() {
+    if (!running || !micEnabled || callActive || enrolling) return
+    if (!isSaraActive) {
+      isSaraActive = true
+      resetSessionTimer()
+      stopIdleWakeEngine()
+      Bus.add("system", "Wake word heard.", true)
+      Bus.setStatus("Connected · listening")
+    }
+  }
+
   // ---------- Continuous AudioRecord capture (hardware on, software gated) ----------
   private fun ensureCaptureStarted() {
     if (!running || !ready || !micEnabled || callActive || enrolling || captureRunning) return
@@ -349,15 +399,32 @@ class VoiceService : Service() {
       captureRunning = true
       refreshNotif()
       Bus.setStatus(if (isSaraActive) "Connected · listening" else "Connected · say a wake phrase")
+      if (!isSaraActive) main.post { maybeStartIdleWakeEngine() }
       captureThread = Thread {
         val buf = ByteArray(3200)
+        val shorts = ShortArray(buf.size / 2)
         while (running && captureRunning) {
           val n = try { rec.read(buf, 0, buf.size) } catch (_: Exception) { -1 }
           if (n > 0) {
-            // Software gate: when muted, call, or enrolling, do not forward/process.
             if (!micEnabled || callActive || enrolling || !ready) continue
-            // Reduce echo/feedback loop from device speaker into mic/Gemini session.
-            if (System.currentTimeMillis() < speakingUntil + 350L) continue
+            val speaking = System.currentTimeMillis() < speakingUntil + 350L
+            if (!isSaraActive) {
+              // IDLE: on-device wake only. No audio to Gemini => background noise/actions won't trigger Saara.
+              if (!speaking) {
+                var si = 0; var bi = 0
+                val scount = n / 2
+                while (bi + 1 < n && si < scount) {
+                  val lo = buf[bi].toInt() and 0xff
+                  val hi = buf[bi + 1].toInt()
+                  shorts[si++] = ((hi shl 8) or lo).toShort()
+                  bi += 2
+                }
+                try { wakeEngine?.feed(shorts, si) } catch (_: Exception) {}
+              }
+              continue
+            }
+            // ACTIVE: stream to Gemini so Saara hears commands/content.
+            if (speaking) continue
             val socket = ws ?: continue
             val chunk = ByteArray(n)
             System.arraycopy(buf, 0, chunk, 0, n)
@@ -383,6 +450,7 @@ class VoiceService : Service() {
 
   private fun stopCapture() {
     captureRunning = false
+    stopIdleWakeEngine()
     try { audioRecord?.stop() } catch (_: Exception) {}
     try { audioRecord?.release() } catch (_: Exception) {}
     audioRecord = null
@@ -601,7 +669,7 @@ class VoiceService : Service() {
       ready = true; retries = 0; Bus.setStatus("Connected · say a wake phrase")
       val cmd = pendingCommand; pendingCommand = null
       if (cmd != null) processUtterance(cmd)
-      if (micEnabled) ensureCaptureStarted() else Bus.add("system", "Gemini connected. Microphone is muted.", true)
+      if (micEnabled) { ensureCaptureStarted(); if (!isSaraActive) maybeStartIdleWakeEngine() } else Bus.add("system", "Gemini connected. Microphone is muted.", true)
     }
     if (m.has("error")) Bus.add("system", "Gemini error: " + m.optString("error"), true)
     val sc = m.optJSONObject("serverContent")
@@ -666,6 +734,7 @@ class VoiceService : Service() {
     running = false; ready = false; isSaraActive = false
     main.removeCallbacks(sessionTimer); main.removeCallbacks(screenAutoStop)
     screenAuto = false; Bus.screenAuto = false
+    stopIdleWakeEngine()
     stopCapture()
     Bus.unlisten(busListener)
     calls?.stop(); calls = null; callActive = false
