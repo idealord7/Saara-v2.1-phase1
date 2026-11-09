@@ -11,7 +11,7 @@ data class TaskRow(val id: Long, val whenMs: Long, val text: String, val repeatM
 data class TaskStep(val id: Long, val goal: String, val tool: String, val args: String, val result: String, val ok: Boolean, val ts: Long)
 
 /** Local SQLite store: chat history, learned facts, shop ledger, usage stats, scheduled tasks, task steps. */
-class Db private constructor(c: Context) : SQLiteOpenHelper(c.applicationContext, "saara.db", null, 3) {
+class Db private constructor(c: Context) : SQLiteOpenHelper(c.applicationContext, "saara.db", null, 6) {
   companion object {
     @Volatile private var inst: Db? = null
     fun get(c: Context): Db = inst ?: synchronized(this) { inst ?: Db(c).also { inst = it } }
@@ -32,11 +32,11 @@ class Db private constructor(c: Context) : SQLiteOpenHelper(c.applicationContext
       d.execSQL("INSERT OR IGNORE INTO categories(name) VALUES ('general'), ('preference'), ('work'), ('personal')")
     }
     if (o < 3) createTaskSteps(d)
+    if (o < 6) d.execSQL("CREATE TABLE IF NOT EXISTS rules(id INTEGER PRIMARY KEY AUTOINCREMENT, text TEXT, enabled INTEGER, ts INTEGER)")
   }
   private fun createTaskSteps(d: SQLiteDatabase) {
     d.execSQL("CREATE TABLE IF NOT EXISTS task_steps(id INTEGER PRIMARY KEY AUTOINCREMENT, goal TEXT, tool TEXT, args TEXT, result TEXT, ok INTEGER, ts INTEGER)")
     d.execSQL("CREATE INDEX IF NOT EXISTS idx_task_steps_goal ON task_steps(goal)")
-    d.execSQL("CREATE TABLE IF NOT EXISTS rules(id INTEGER PRIMARY KEY AUTOINCREMENT, text TEXT, enabled INTEGER, ts INTEGER)")
     d.execSQL("CREATE TABLE IF NOT EXISTS rules(id INTEGER PRIMARY KEY AUTOINCREMENT, text TEXT, enabled INTEGER, ts INTEGER)")
   }
 
@@ -154,6 +154,26 @@ class Db private constructor(c: Context) : SQLiteOpenHelper(c.applicationContext
     return out
   }
   fun task(id: Long): TaskRow? = tasks().firstOrNull { it.id == id }
+
+
+  // ---------- rules (applied before actions) ----------
+  fun rules(): List<Rule> {
+    val out = mutableListOf<Rule>()
+    val c = readableDatabase.rawQuery("SELECT id,text,enabled,ts FROM rules ORDER BY id ASC", null)
+    c.use { while (it.moveToNext()) out.add(Rule(it.getLong(0), it.getString(1), it.getInt(2) == 1, it.getLong(3))) }
+    return out
+  }
+  fun ruleAdd(text: String) { val t = text.trim().take(500); if (t.isEmpty()) return; writableDatabase.insert("rules", null, ContentValues().apply { put("text", t); put("enabled", 1); put("ts", System.currentTimeMillis()) }) }
+  fun ruleUpdate(id: Long, text: String) { val t = text.trim().take(500); if (t.isEmpty()) return; writableDatabase.update("rules", ContentValues().apply { put("text", t) }, "id=?", arrayOf(id.toString())) }
+  fun ruleSetEnabled(id: Long, enabled: Boolean) { writableDatabase.update("rules", ContentValues().apply { put("enabled", if (enabled) 1 else 0) }, "id=?", arrayOf(id.toString())) }
+  fun ruleDelete(id: Long) { writableDatabase.delete("rules", "id=?", arrayOf(id.toString())) }
+  fun rulesPrompt(max: Int = 40): String {
+    val rs = rules().filter { it.enabled && it.text.isNotBlank() }.take(max)
+    if (rs.isEmpty()) return ""
+    val sb = StringBuilder("\nUser rules (must follow before taking any action/tool/response):\n")
+    rs.forEachIndexed { i, r -> sb.append(i + 1).append(". ").append(r.text.replace('\n', ' ').take(220)).append('\n') }
+    return sb.toString()
+  }
 
   // ---------- task-step memory ----------
   fun taskStepAdd(goal: String, tool: String, args: String, result: String, ok: Boolean): Long {
