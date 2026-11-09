@@ -735,27 +735,28 @@ class VoiceService : Service() {
         val parts = sc.optJSONObject("modelTurn")?.optJSONArray("parts")
         if (parts != null) for (i in 0 until parts.length()) {
           val inl = parts.getJSONObject(i).optJSONObject("inlineData")
-          if (inl != null) { speakingUntil = maxOf(speakingUntil, System.currentTimeMillis() + 400L); play(Base64.decode(inl.getString("data"), Base64.DEFAULT)) }
+          if (inl != null) { speakingUntil = maxOf(speakingUntil, System.currentTimeMillis() + 120L); play(Base64.decode(inl.getString("data"), Base64.DEFAULT)) }
         }
         sc.optJSONObject("outputTranscription")?.let {
           val txt = it.optString("text")
           if (txt.isNotBlank()) {
-            val last = synchronized(Bus) { Bus.msgs.lastOrNull()?.takeIf { m -> m.role == "saara" }?.text ?: "" }
+            val last = synchronized(Bus) { val m = Bus.msgs.lastOrNull(); if (m != null && m.role == "saara") m.text else "" }
             val add = when {
               last.isEmpty() -> txt
-              txt.startsWith(last) -> txt.substring(last.length)
-              last.endsWith(txt) -> ""
-              txt == last -> ""
+              txt.startsWith(last) && txt.length > last.length -> txt.substring(last.length)
+              last.endsWith(txt) || txt == last -> ""
+              txt.length < last.length && last.startsWith(txt) -> ""
               else -> txt
             }
-            if (add.isNotEmpty()) Bus.add("saara", add)
-            val shown = synchronized(Bus) { Bus.msgs.lastOrNull()?.takeIf { m -> m.role == "saara" }?.text ?: txt }
-            val rn = normForCompare(shown)
+            if (add.isNotEmpty()) Bus.add("saara", add, last.isEmpty())
+            val shown = synchronized(Bus) { val m = Bus.msgs.lastOrNull(); if (m != null && m.role == "saara") m.text else "" }
+            val rn = normForCompare(if (shown.isNotBlank()) shown else txt)
             if (rn.isNotEmpty()) { lastReplyNorm = rn; lastReplyAt = System.currentTimeMillis() }
           }
         }
         if (sc.optBoolean("interrupted")) { stopSpeaking(); resetSessionTimerIfActive() }
         if (sc.optBoolean("turnComplete")) {
+          speakingUntil = minOf(speakingUntil, System.currentTimeMillis() + 180L)
           Bus.endTurn(); armScreenAuto(6000L)
           resetSessionTimerIfActive()
           try { Db.get(this).usage("command", "turn") } catch (_: Exception) {}
@@ -790,7 +791,7 @@ class VoiceService : Service() {
     if (track == null) return
     // pcm 16-bit mono @ 24kHz => 2 bytes/sample, 48 bytes/ms
     val dur = pcm.size / 48
-    speakingUntil = maxOf(speakingUntil, System.currentTimeMillis()) + dur + 250L
+    speakingUntil = maxOf(speakingUntil, System.currentTimeMillis()) + dur + 120L
     audioQ.offer(pcm)
   }
 
