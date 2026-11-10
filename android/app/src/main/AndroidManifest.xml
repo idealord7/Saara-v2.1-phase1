@@ -51,6 +51,11 @@
         <action android:name="com.saara.ACTION_EXECUTE"/>
       </intent-filter>
     </receiver>
+    <receiver android:name=".MediaButtonReceiver" android:enabled="true" android:exported="true">
+      <intent-filter android:priority="999">
+        <action android:name="android.intent.action.MEDIA_BUTTON"/>
+      </intent-filter>
+    </receiver>
     <service android:name=".SaaraAccessibility" android:exported="true" android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
       <intent-filter><action android:name="android.accessibilityservice.AccessibilityService"/></intent-filter>
       <meta-data android:name="android.accessibilityservice" android:resource="@xml/accessibility_config"/>

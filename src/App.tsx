@@ -260,6 +260,7 @@ export const App: React.FC = () => {
   const [inputText, setInputText] = useState('');
   const [interimSpeech, setInterimSpeech] = useState('');
   const [isListening, setIsListening] = useState(false);
+  const [isDictating, setIsDictating] = useState(false);
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [isGenerating, setIsGenerating] = useState(false);
   const [statusText, setStatusText] = useState('Connected · Active');
@@ -576,15 +577,17 @@ export const App: React.FC = () => {
     }
   };
 
-  // Toggle Microphone
+  // Voice-to-text dictation for chat input (fills input, user can edit/send)
   const toggleMic = () => {
     if (isListening) {
       stopSpeechRecognition();
       setIsListening(false);
-      setStatusText('Microphone muted');
-      addMessage('system', 'Microphone muted.');
+      setIsDictating(false);
+      setInterimSpeech('');
+      setStatusText('Connected · Active');
     } else {
       stopSpeaking();
+      setIsDictating(true);
       const started = startSpeechRecognition({
         onResult: (transcript, isFinal) => {
           // Hotword detection check
@@ -594,18 +597,23 @@ export const App: React.FC = () => {
           }
 
           if (isFinal) {
-            processInput(transcript);
+            setInputText(prev => (prev ? `${prev.trim()} ${transcript}` : transcript).trim());
+            setInterimSpeech('');
           } else {
             setInterimSpeech(transcript);
           }
         },
         onError: (err) => {
           setIsListening(false);
+          setIsDictating(false);
+          setInterimSpeech('');
           setStatusText('Mic Error');
           addMessage('system', `Microphone: ${err}`);
         },
         onEnd: () => {
           setIsListening(false);
+          setIsDictating(false);
+          setInterimSpeech('');
           setStatusText('Connected · Active');
         },
         language: settings.language
@@ -613,8 +621,9 @@ export const App: React.FC = () => {
 
       if (started) {
         setIsListening(true);
-        setStatusText('Listening… speak naturally');
-        addMessage('system', 'Microphone active.');
+        setStatusText('Listening… converting voice to text');
+      } else {
+        setIsDictating(false);
       }
     }
   };
@@ -962,10 +971,17 @@ export const App: React.FC = () => {
               </div>
 
               {/* Input Bar */}
-              <div className="p-3 bg-slate-900/90 border-t border-slate-800 shrink-0">
+              <div className="p-3 bg-gradient-to-r from-slate-900/95 to-slate-900/80 border-t border-slate-800 shrink-0">
+                {isDictating && (
+                  <div className="mb-2 px-3 py-1.5 rounded-lg bg-emerald-500/10 border border-emerald-500/30 text-[11px] text-emerald-300 flex items-center gap-2">
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                    Voice to text active — speak to fill the message box
+                  </div>
+                )}
                 <form
                   onSubmit={(e) => {
                     e.preventDefault();
+                    if (isListening) toggleMic();
                     processInput(inputText);
                   }}
                   className="flex items-center gap-2"
@@ -973,28 +989,32 @@ export const App: React.FC = () => {
                   <button
                     type="button"
                     onClick={toggleMic}
-                    className={`p-2.5 rounded-xl transition ${
+                    className={`relative p-2.5 rounded-xl transition-all ${
                       isListening
-                        ? 'bg-emerald-500 text-slate-950 hover:bg-emerald-400 animate-pulse'
-                        : 'bg-slate-800 text-slate-300 hover:bg-slate-700'
+                        ? 'bg-emerald-500 text-slate-950 hover:bg-emerald-400 shadow-lg shadow-emerald-500/30'
+                        : 'bg-slate-800 text-slate-300 hover:bg-indigo-600 hover:text-white border border-slate-700'
                     }`}
-                    title={isListening ? 'Mute Microphone' : 'Start Voice Input'}
+                    title={isListening ? 'Stop voice to text' : 'Voice to text'}
                   >
-                    {isListening ? <Mic className="w-5 h-5" /> : <MicOff className="w-5 h-5" />}
+                    {isListening ? <Mic className="w-5 h-5 animate-pulse" /> : <Mic className="w-5 h-5" />}
+                    {isListening && <span className="absolute -top-0.5 -right-0.5 w-2.5 h-2.5 rounded-full bg-red-400 border-2 border-slate-900" />}
                   </button>
 
-                  <input
-                    type="text"
-                    placeholder={`Talk with ${settings.assistantName} (e.g. "go to chrome and search", "attach WhatsApp document", "check product price")...`}
-                    value={inputText}
-                    onChange={(e) => setInputText(e.target.value)}
-                    className="flex-1 bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-xs sm:text-sm text-slate-100 placeholder-slate-500 focus:outline-none focus:border-indigo-500 transition"
-                  />
+                  <div className="flex-1 relative">
+                    <input
+                      type="text"
+                      placeholder={isDictating ? 'Listening… your speech will appear here' : `Message ${settings.assistantName}… (tap mic for voice to text)`}
+                      value={interimSpeech && isDictating ? `${inputText}${inputText ? ' ' : ''}${interimSpeech}` : inputText}
+                      onChange={(e) => { if (!isDictating) setInputText(e.target.value); }}
+                      readOnly={isDictating}
+                      className="w-full bg-slate-950/90 border border-slate-700 rounded-xl px-4 py-2.5 text-xs sm:text-sm text-slate-100 placeholder-slate-500 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500/30 transition"
+                    />
+                  </div>
 
                   <button
                     type="submit"
                     disabled={!inputText.trim()}
-                    className="p-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white disabled:opacity-40 transition"
+                    className="p-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white disabled:opacity-40 transition shadow-md shadow-indigo-600/20"
                   >
                     <Send className="w-4 h-4" />
                   </button>

@@ -66,6 +66,7 @@ class MainActivity : AppCompatActivity() {
   private var pendingCam = false
   private var assistantLaunch = false
   private var pendingAssistantText: String? = null
+  private var pendingAssistantWake = false
   private var camFront = false
   private var lastToggle = 0L
   private val fetchedModels = ArrayList<String>()
@@ -141,9 +142,9 @@ class MainActivity : AppCompatActivity() {
   }
 
   private fun startAssistantFlow(i: Intent? = null) {
-    if (Bus.running) return
     val cmd = i?.let { it.getStringExtra(Intent.EXTRA_TEXT)?.trim()?.takeIf { s -> s.isNotEmpty() } ?: it.getStringExtra(VoiceService.ASSISTANT_COMMAND)?.trim()?.takeIf { s -> s.isNotEmpty() } }
     if (cmd != null) pendingAssistantText = cmd
+    pendingAssistantWake = true
     if (!has(Manifest.permission.RECORD_AUDIO)) {
       pendingStart = true
       requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO, Manifest.permission.POST_NOTIFICATIONS), 1)
@@ -962,7 +963,9 @@ class MainActivity : AppCompatActivity() {
     val i = Intent(this, VoiceService::class.java)
     val cmd = pendingAssistantText
     if (cmd != null) i.putExtra(VoiceService.ASSISTANT_COMMAND, cmd)
+    if (pendingAssistantWake) i.putExtra(VoiceService.ASSISTANT_WAKE, true)
     pendingAssistantText = null
+    pendingAssistantWake = false
     startForegroundService(i)
   }
 

@@ -44,6 +44,8 @@ class VoiceService : Service() {
     private const val TAG = "VoiceService"
     var instance: VoiceService? = null
     const val ASSISTANT_COMMAND = "saara_command"
+    const val ASSISTANT_WAKE = "assistant_wake"
+    const val ACTION_WAKE = "WAKE"
     const val PREF_WAKE_PHRASES = "wake_phrases"
     const val PREF_SESSION_TIMEOUT_SEC = "session_timeout_sec"
     const val PREF_SESSION_TIMEOUT_ENABLED = "session_timeout_enabled"
@@ -94,6 +96,7 @@ class VoiceService : Service() {
   private var calls: CallWatcher? = null
   @Volatile private var callActive = false
   @Volatile private var enrolling = false
+  @Volatile private var pendingWakeNoPhrase = false
   private val micLock = Any()
   private var lastMicToggle = 0L
   private val main = Handler(Looper.getMainLooper())
@@ -545,9 +548,10 @@ class VoiceService : Service() {
 
   override fun onStartCommand(i: Intent?, f: Int, id: Int): Int {
     Bus.init(this)
+    val wakeNoPhrase = i?.action == ACTION_WAKE || i?.getBooleanExtra(ASSISTANT_WAKE, false) == true
     when (i?.action) {
       "STOP" -> { stopSelf(); return START_NOT_STICKY }
-      "WAKE" -> { if (running && ready && micEnabled && !callActive) ensureCaptureStarted(); return START_STICKY }
+      ACTION_WAKE -> { if (running && ready && micEnabled && !callActive) { ensureCaptureStarted(); startSession(); Bus.add("system", "Woke up from device button.", true) }; if (!running) { /* fall through to start then wake */ } else return START_STICKY }
       "CAM_START", "CAM_STOP", "SCREEN_START", "SCREEN_STOP" -> { if (!running) { stopSelf(); return START_NOT_STICKY }; share(i!!); return START_STICKY }
     }
     val cmd = i?.getStringExtra(ASSISTANT_COMMAND)?.trim()?.takeIf { it.isNotEmpty() }
@@ -557,7 +561,10 @@ class VoiceService : Service() {
         startSession(); processUtterance(cmd)
       } else pendingCommand = cmd
     }
-    if (running) return START_STICKY
+    if (running) {
+      if (wakeNoPhrase && ready && micEnabled && !callActive) { ensureCaptureStarted(); startSession() }
+      return START_STICKY
+    }
     if (!has(Manifest.permission.RECORD_AUDIO)) {
       Bus.add("system", "Microphone permission is missing. Allow Microphone in Android app permissions.", true)
       stopSelf(); return START_NOT_STICKY
@@ -581,6 +588,9 @@ class VoiceService : Service() {
       }
     }.apply { name = "saara-playback"; isDaemon = true; start() }
     refreshBubble(); Bus.listen(busListener); Bus.add("system", "Connecting…", true); refreshCalls(); connect()
+    if (wakeNoPhrase) pendingCommand = pendingCommand ?: "" // marker handled in setupComplete via flag
+    // store wake intent for after connect
+    if (wakeNoPhrase) pendingWakeNoPhrase = true
     return START_STICKY
   }
 
@@ -719,9 +729,17 @@ class VoiceService : Service() {
   private fun handle(s: String) {
     val m = try { JSONObject(s) } catch (_: Exception) { return }
     if (m.has("setupComplete")) {
-      ready = true; retries = 0; Bus.setStatus("Connected · say a wake phrase")
-      val cmd = pendingCommand; pendingCommand = null
-      if (cmd != null) processUtterance(cmd)
+      ready = true; retries = 0
+      val wakeNow = pendingWakeNoPhrase; pendingWakeNoPhrase = false
+      val cmd = pendingCommand?.takeIf { it.isNotBlank() }; pendingCommand = null
+      if (cmd != null) {
+        processUtterance(cmd)
+      } else if (wakeNow && micEnabled) {
+        startSession()
+        Bus.add("system", "Woke up — listening (no wake phrase needed).", true)
+      } else {
+        Bus.setStatus("Connected · say a wake phrase")
+      }
       if (micEnabled) { ensureCaptureStarted(); if (!isSaraActive) maybeStartIdleWakeEngine() } else Bus.add("system", "Gemini connected. Microphone is muted.", true)
     }
     if (m.has("error")) Bus.add("system", "Gemini error: " + m.optString("error"), true)
