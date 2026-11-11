@@ -13,6 +13,7 @@ data class Rule(val id: Long, val text: String, val enabled: Boolean, val ts: Lo
 
 /** Local SQLite store: chat history, learned facts, shop ledger, usage stats, scheduled tasks, task steps. */
 class Db private constructor(c: Context) : SQLiteOpenHelper(c.applicationContext, "saara.db", null, 6) {
+  private val appCtx = c.applicationContext
   companion object {
     @Volatile private var inst: Db? = null
     fun get(c: Context): Db = inst ?: synchronized(this) { inst ?: Db(c).also { inst = it } }
@@ -164,16 +165,39 @@ class Db private constructor(c: Context) : SQLiteOpenHelper(c.applicationContext
     c.use { while (it.moveToNext()) out.add(Rule(it.getLong(0), it.getString(1), it.getInt(2) == 1, it.getLong(3))) }
     return out
   }
-  fun ruleAdd(text: String) { val t = text.trim().take(500); if (t.isEmpty()) return; writableDatabase.insert("rules", null, ContentValues().apply { put("text", t); put("enabled", 1); put("ts", System.currentTimeMillis()) }) }
-  fun ruleUpdate(id: Long, text: String) { val t = text.trim().take(500); if (t.isEmpty()) return; writableDatabase.update("rules", ContentValues().apply { put("text", t) }, "id=?", arrayOf(id.toString())) }
-  fun ruleSetEnabled(id: Long, enabled: Boolean) { writableDatabase.update("rules", ContentValues().apply { put("enabled", if (enabled) 1 else 0) }, "id=?", arrayOf(id.toString())) }
-  fun ruleDelete(id: Long) { writableDatabase.delete("rules", "id=?", arrayOf(id.toString())) }
+  fun ruleAdd(text: String): Long {
+    val t = text.trim().take(500); if (t.isEmpty()) return -1L
+    val ts = System.currentTimeMillis()
+    val id = writableDatabase.insert("rules", null, ContentValues().apply { put("text", t); put("enabled", 1); put("ts", ts) })
+    if (id > 0) syncRule(Rule(id, t, true, ts))
+    return id
+  }
+  fun ruleUpdate(id: Long, text: String) {
+    val t = text.trim().take(500); if (t.isEmpty()) return
+    val ts = System.currentTimeMillis()
+    writableDatabase.update("rules", ContentValues().apply { put("text", t); put("ts", ts) }, "id=?", arrayOf(id.toString()))
+    val r = rules().firstOrNull { it.id == id }
+    if (r != null) syncRule(r.copy(text = t, ts = ts)) else syncRule(Rule(id, t, true, ts))
+  }
+  fun ruleSetEnabled(id: Long, enabled: Boolean) {
+    val ts = System.currentTimeMillis()
+    writableDatabase.update("rules", ContentValues().apply { put("enabled", if (enabled) 1 else 0); put("ts", ts) }, "id=?", arrayOf(id.toString()))
+    rules().firstOrNull { it.id == id }?.let { syncRule(it) }
+  }
+  fun ruleDelete(id: Long) {
+    writableDatabase.delete("rules", "id=?", arrayOf(id.toString()))
+    try { CloudSyncRepository.get(appCtx).deleteRule(id) } catch (_: Exception) {}
+  }
   fun rulesPrompt(max: Int = 40): String {
     val rs = rules().filter { it.enabled && it.text.isNotBlank() }.take(max)
     if (rs.isEmpty()) return ""
     val sb = StringBuilder("\nUser rules (must follow before taking any action/tool/response):\n")
     rs.forEachIndexed { i: Int, r: Rule -> sb.append(i + 1).append(". ").append(r.text.replace('\n', ' ').take(220)).append('\n') }
     return sb.toString()
+  }
+
+  private fun syncRule(r: Rule) {
+    try { CloudSyncRepository.get(appCtx).uploadRule(r) } catch (_: Exception) {}
   }
 
   // ---------- task-step memory ----------
