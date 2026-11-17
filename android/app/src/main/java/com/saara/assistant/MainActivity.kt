@@ -410,12 +410,34 @@ class MainActivity : AppCompatActivity() {
     feature(root, "Live caption overlay", "Transparent text over other apps showing what Saara hears, says and does", "f_overlay", true,
       { Settings.canDrawOverlays(this) }, "Allow display over other apps",
       { startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName"))) })
-    feature(root, "Notification auto-reply", "Auto-reply to WhatsApp / WhatsApp Business / Telegram messages. Saara must be started.", "f_notif", false, { notifOn() },
+    feature(root, "Notification auto-reply", "Read incoming WhatsApp/Telegram notifications and auto-reply (AI smart replies when enabled). Works in background with Notification access; no root needed.", "f_notif", false, { notifOn() },
       "Enable Notification access", { startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)) }) { c ->
-      val e = edit("Only these names (comma separated). Leave empty = reply to everyone")
-      e.setText(Prefs.plain(this).getString("reply_names", ""))
-      e.doAfterTextChanged { Prefs.plain(this).edit().putString("reply_names", it.toString()).apply() }
-      c.addView(e)
+      val names = edit("Only these sender names (comma separated). Leave empty = all chats in supported apps")
+      names.setText(Prefs.plain(this).getString("reply_names", ""))
+      names.doAfterTextChanged { Prefs.plain(this).edit().putString("reply_names", it.toString()).apply() }
+      c.addView(names)
+      val aiRow = LinearLayout(this); aiRow.gravity = Gravity.CENTER_VERTICAL
+      val aiLbl = tv("AI smart auto-reply (Gemini)", 14f, TXT)
+      val aiSw = Switch(this); aiSw.isChecked = Prefs.on(this, "f_ai_reply", false)
+      aiSw.setOnCheckedChangeListener { _, v -> Prefs.plain(this).edit().putBoolean("f_ai_reply", v).apply() }
+      aiRow.addView(aiLbl, LinearLayout.LayoutParams(0, -2, 1f)); aiRow.addView(aiSw)
+      c.addView(aiRow)
+      val grpRow = LinearLayout(this); grpRow.gravity = Gravity.CENTER_VERTICAL
+      val grpLbl = tv("Reply in group chats too", 14f, TXT)
+      val grpSw = Switch(this); grpSw.isChecked = Prefs.on(this, "reply_groups", false)
+      grpSw.setOnCheckedChangeListener { _, v -> Prefs.plain(this).edit().putBoolean("reply_groups", v).apply() }
+      grpRow.addView(grpLbl, LinearLayout.LayoutParams(0, -2, 1f)); grpRow.addView(grpSw)
+      c.addView(grpRow)
+      c.addView(tv("AI system instructions (how Saara should reply)", 12f, SUB))
+      val prompt = edit("Custom instructions for auto-replies")
+      val cur = Prefs.plain(this).getString("ai_reply_prompt", null)
+      prompt.setText(cur ?: AiAutoReply.defaultPrompt())
+      prompt.minLines = 3
+      prompt.doAfterTextChanged { Prefs.plain(this).edit().putString("ai_reply_prompt", it.toString()).apply() }
+      c.addView(prompt)
+      c.addView(tv("Note: Enabled user Rules (Learning tab) are always applied to AI auto-replies. Uses saved Gemini API key; replies send in background without opening WhatsApp.", 11f, SUB))
+      val logBtn = btn("View auto-reply logs", SURF2) { showAutoReplyLogs() }
+      val lp = LinearLayout.LayoutParams(-1, -2); lp.topMargin = dp(6); c.addView(logBtn, lp)
     }
     feature(root, "Floating bubble", "Button over every app. Also lets Saara open apps from the background", "f_bubble", false,
       { Settings.canDrawOverlays(this) }, "Allow display over other apps",
@@ -427,6 +449,24 @@ class MainActivity : AppCompatActivity() {
     heading(root, "Tasks & Automation", "Time-based reminders are supported. Advanced event triggers are not yet implemented.")
     taskBox = card(root)
     return sv
+  }
+
+  private fun showAutoReplyLogs() {
+    AiAutoReply.loadPersisted(this)
+    val logs = AiAutoReply.logs()
+    val msg = if (logs.isEmpty()) "No auto-reply activity yet.\n\nTip: enable Notification access, Notification auto-reply, and AI smart auto-reply; set Gemini API key in Settings." else logs.joinToString("\n\n————————————\n\n")
+    val sv = ScrollView(this)
+    val t = tv(msg, 13f, TXT); t.setPadding(dp(16), dp(12), dp(16), dp(12)); t.setTextIsSelectable(true)
+    sv.addView(t)
+    AlertDialog.Builder(this).setTitle("Auto-reply logs (latest first)").setView(sv)
+      .setPositiveButton("Close", null)
+      .setNeutralButton("Copy") { _, _ ->
+        val cm = getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+        cm.setPrimaryClip(android.content.ClipData.newPlainText("Saara auto-reply logs", msg))
+        toast("Logs copied")
+      }
+      .setNegativeButton("Clear") { _, _ -> AiAutoReply.clearLogs(); toast("Logs cleared") }
+      .show()
   }
 
   private fun rebuildTasks() {

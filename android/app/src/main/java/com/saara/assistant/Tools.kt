@@ -164,7 +164,7 @@ object Tools {
         "schedule_task" -> Scheduler.add(c, a.optString("text"), a.optDouble("in_minutes", 0.0), a.optString("at"), a.optString("repeat"))
         "list_tasks" -> Scheduler.list(c)
         "cancel_task" -> { Scheduler.cancel(c, a.optLong("id")); "cancelled" }
-        "reply_notification" -> if (!Prefs.on(c, "f_notif", false)) off("Notification auto-reply") else SaaraNotifications.reply(a.optString("key"), a.optString("text"))
+        "reply_notification" -> if (!Prefs.on(c, "f_notif", false)) off("Notification auto-reply") else SaaraNotifications.reply(a.optString("key"), a.optString("text").trim().ifBlank { return "error: reply text is empty" })
         "fetch_url" -> fetchUrlText(a.optString("url"))
         else -> "unknown tool"
       }

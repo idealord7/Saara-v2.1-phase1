@@ -10,7 +10,7 @@ import android.service.notification.StatusBarNotification
 class SaaraNotifications : NotificationListenerService() {
   companion object {
     private val cache = LinkedHashMap<String, Notification.Action>()
-    private val lastReply = HashMap<String, Long>()
+    private val lastSeen = HashMap<String, Pair<String, Long>>()
     private val sentTexts = ArrayList<String>()
     @Volatile private var lastKey: String? = null
     @Volatile private var svc: SaaraNotifications? = null
@@ -29,13 +29,16 @@ class SaaraNotifications : NotificationListenerService() {
     }
 
     private fun scan(key: String): Notification.Action? = try {
-      svc?.activeNotifications?.filter { it.key == key || it.packageName in MSG_APPS }
-        ?.sortedByDescending { it.postTime }?.firstNotNullOfOrNull { replyAction(it.notification) }
-    } catch (e: Exception) { null }
+      svc?.activeNotifications
+        ?.asSequence()
+        ?.filter { it.key == key || it.packageName in MSG_APPS }
+        ?.sortedByDescending { it.postTime }
+        ?.firstNotNullOfOrNull { replyAction(it.notification) }
+    } catch (_: Exception) { null }
 
     fun reply(key: String, text: String): String {
-      val cached = synchronized(cache) { cache[key] ?: lastKey?.let { cache[it] } }
-      val a = cached ?: scan(key) ?: return "no reply button found for that notification (it may have been dismissed). Do not retry."
+      val a = synchronized(cache) { cache[key] ?: lastKey?.let { cache[it] } } ?: scan(key)
+        ?: return "no reply button found for that notification (it may have been dismissed). Do not retry."
       val ri = a.remoteInputs?.firstOrNull() ?: return "no remote input"
       val ctx = svc ?: return "Notification access is not active. Ask the user to enable Notification access in the Saara app."
       val i = Intent(); val b = Bundle().apply { putCharSequence(ri.resultKey, text) }
@@ -43,7 +46,7 @@ class SaaraNotifications : NotificationListenerService() {
       if (Build.VERSION.SDK_INT >= 28) RemoteInput.setResultsSource(i, RemoteInput.SOURCE_FREE_FORM_INPUT)
       return try {
         a.actionIntent.send(ctx, 0, i)
-        synchronized(sentTexts) { sentTexts.add(text); if (sentTexts.size > 10) sentTexts.removeAt(0) }
+        synchronized(sentTexts) { sentTexts.add(text); if (sentTexts.size > 12) sentTexts.removeAt(0) }
         "replied"
       } catch (e: Exception) { "failed: $e" }
     }
@@ -64,7 +67,7 @@ class SaaraNotifications : NotificationListenerService() {
     /** Clicks a button (Answer / Decline ...) on the ongoing call notification. */
     fun callAction(words: List<String>): Boolean {
       val s = svc ?: return false
-      val list: Array<StatusBarNotification> = try { s.activeNotifications ?: return false } catch (e: Exception) { return false }
+      val list: Array<StatusBarNotification> = try { s.activeNotifications ?: return false } catch (_: Exception) { return false }
       for (sbn in list) {
         val n = sbn.notification
         val acts = n.actions ?: continue
@@ -83,31 +86,57 @@ class SaaraNotifications : NotificationListenerService() {
   override fun onListenerConnected() { svc = this }
   override fun onListenerDisconnected() { if (svc === this) svc = null }
 
+  private fun isGroupConversation(n: Notification, sender: String): Boolean {
+    if (n.extras.getBoolean("android.isGroupConversation", false)) return true
+    val conv = n.extras.getCharSequence("android.conversationTitle")?.toString()?.trim().orEmpty()
+    if (conv.isNotEmpty() && !sender.equals(conv, true)) return true
+    if (conv.contains("•")) return true
+    val lines = n.extras.getCharSequenceArray(Notification.EXTRA_TEXT_LINES)
+    if (lines != null && lines.size > 1 && conv.isNotEmpty()) return true
+    return false
+  }
+
+  private fun extractText(n: Notification): String {
+    val big = n.extras.getCharSequence(Notification.EXTRA_BIG_TEXT)?.toString()?.trim().orEmpty()
+    if (big.isNotBlank()) return big
+    val lines = n.extras.getCharSequenceArray(Notification.EXTRA_TEXT_LINES)
+    if (lines != null && lines.isNotEmpty()) return lines.last().toString().trim()
+    return n.extras.getCharSequence(Notification.EXTRA_TEXT)?.toString()?.trim().orEmpty()
+  }
+
   override fun onNotificationPosted(sbn: StatusBarNotification) {
     val ctx = applicationContext
     if (!Prefs.on(ctx, "f_notif", false)) return
     val n = sbn.notification
     if (sbn.packageName == packageName || (n.flags and Notification.FLAG_GROUP_SUMMARY) != 0 || n.category == Notification.CATEGORY_CALL) return
     val act = replyAction(n) ?: return
-    val title = n.extras.getCharSequence(Notification.EXTRA_TITLE)?.toString() ?: ""
-    val text = n.extras.getCharSequence(Notification.EXTRA_TEXT)?.toString() ?: ""
+    val title = n.extras.getCharSequence(Notification.EXTRA_TITLE)?.toString()?.trim().orEmpty()
+    val text = extractText(n)
+    if (text.isBlank()) return
     val names = (Prefs.plain(ctx).getString("reply_names", "") ?: "").split(",").map { it.trim().lowercase() }.filter { it.isNotEmpty() }
     // Names list empty = reply to every chat of the known messaging apps (WhatsApp, WhatsApp Business, Telegram ...).
-    val wanted = if (names.isEmpty()) sbn.packageName in MSG_APPS else names.any { title.lowercase().contains(it) }
+    val wanted = if (names.isEmpty()) sbn.packageName in MSG_APPS else names.any { title.lowercase().contains(it) || it.contains(sbn.packageName.lowercase()) }
     if (!wanted) return
     // Ignore our own just-sent reply echoing back as a new notification (prevents reply loops).
-    if (text.isNotBlank() && synchronized(sentTexts) { sentTexts.any { text.contains(it) } }) return
+    if (synchronized(sentTexts) { sentTexts.any { it.isNotBlank() && (text == it || text.contains(it)) } }) return
     val now = System.currentTimeMillis()
-    synchronized(lastReply) {
-      if (now - (lastReply[title] ?: 0L) < 20000) return
-      lastReply[title] = now
+    synchronized(lastSeen) {
+      val prev = lastSeen[title]
+      if (prev != null && prev.first == text && (now - prev.second) < 8000) return
+      lastSeen[title] = text to now
+      while (lastSeen.size > 80) lastSeen.remove(lastSeen.keys.first())
     }
     synchronized(cache) {
       cache[sbn.key] = act; lastKey = sbn.key
-      while (cache.size > 40) cache.remove(cache.keys.first())
+      while (cache.size > 60) cache.remove(cache.keys.first())
     }
-    val vs = VoiceService.instance
-    if (vs == null) { Bus.add("system", "Message from $title ignored: Saara is not started. Tap Start Saara so it can reply.", true); return }
-    vs.onNotification(sbn.key, sbn.packageName, title, text)
+    val isGroup = isGroupConversation(n, title)
+    if (AiAutoReply.enabled(ctx)) {
+      AiAutoReply.handle(ctx, sbn.key, sbn.packageName, title, text, isGroup)
+    } else {
+      val vs = VoiceService.instance
+      if (vs == null) { Bus.add("system", "Message from $title received (notification reply is on). Start Saara for live handling, or enable AI smart auto-reply for background replies.", true); return }
+      vs.onNotification(sbn.key, sbn.packageName, title, text)
+    }
   }
 }
