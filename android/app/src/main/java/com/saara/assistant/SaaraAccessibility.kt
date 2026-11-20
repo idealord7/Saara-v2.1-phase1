@@ -32,13 +32,6 @@ class SaaraAccessibility : AccessibilityService() {
     return try { dispatch(m) } catch (e: Exception) { "error: ${e.message}" }
   }
 
-
-
-  /** Runs one UI operation (blocking, call from a worker thread). Always returns a text result for the model. */
-  fun handle(m: JSONObject): String {
-    return try { dispatch(m) } catch (e: Exception) { "error: ${e.message}" }
-  }
-
   private fun dispatch(m: JSONObject): String {
     val w = sw().toFloat(); val h = sh().toFloat()
     when (val op = m.optString("op")) {
