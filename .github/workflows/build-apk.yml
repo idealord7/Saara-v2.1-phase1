@@ -26,14 +26,52 @@ jobs:
           gradle-version: 8.9
 
       - name: Install Android SDK components
+        shell: bash
         run: |
-          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
-          if [ ! -x "$SDKMANAGER" ]; then
-            SDKMANAGER="$(find "$ANDROID_HOME" -name sdkmanager -type f -perm -111 2>/dev/null | head -n 1)"
+          set -euo pipefail
+          export ANDROID_HOME="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
+          if [ -z "$ANDROID_HOME" ]; then
+            for d in /usr/local/lib/android/sdk "$HOME/Android/Sdk" "$HOME/android-sdk"; do
+              if [ -d "$d" ]; then ANDROID_HOME="$d"; break; fi
+            done
           fi
-          if [ -z "$SDKMANAGER" ]; then
-            echo "sdkmanager not found under ANDROID_HOME=$ANDROID_HOME" >&2
+          if [ -z "$ANDROID_HOME" ] || [ ! -d "$ANDROID_HOME" ]; then
+            echo "Android SDK not found (ANDROID_HOME unset/missing)" >&2
             exit 1
           fi
-          yes | "$SDKMANAGER" --licenses >/dev/null || true
-          "$SDKMANAGER" --install "platforms;android-34" "build-tools;34.0.0" "platform-tools"
+          export ANDROID_SDK_ROOT="$ANDROID_HOME"
+          echo "ANDROID_HOME=$ANDROID_HOME" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT" >> "$GITHUB_ENV"
+
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          if [ ! -x "$SDKMANAGER" ]; then
+            SDKMANAGER="$(find "$ANDROID_HOME" -path '*cmdline-tools*/bin/sdkmanager' -type f 2>/dev/null | sort | head -n 1 || true)"
+          fi
+          if [ -z "$SDKMANAGER" ] || [ ! -f "$SDKMANAGER" ]; then
+            echo "sdkmanager not found under $ANDROID_HOME" >&2
+            find "$ANDROID_HOME" -maxdepth 4 -type f 2>/dev/null | head -n 40 || true
+            exit 1
+          fi
+          chmod +x "$SDKMANAGER" || true
+          echo "Using sdkmanager: $SDKMANAGER"
+          set +o pipefail
+          yes | "$SDKMANAGER" --sdk_root="$ANDROID_HOME" --licenses >/dev/null 2>&1 || true
+          set -o pipefail
+          "$SDKMANAGER" --sdk_root="$ANDROID_HOME" "platform-tools" "platforms;android-34" "build-tools;34.0.0"
+
+      - name: Build Debug APK
+        working-directory: android
+        run: gradle assembleDebug --no-daemon --stacktrace
+
+      - name: Verify APK output
+        run: |
+          ls -R android/app/build/outputs/apk || true
+          test -f android/app/build/outputs/apk/debug/app-debug.apk
+
+      - name: Upload APK as Artifact
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: saara-v2.2.2-debug-apk
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
