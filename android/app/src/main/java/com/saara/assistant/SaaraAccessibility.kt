@@ -32,22 +32,30 @@ class SaaraAccessibility : AccessibilityService() {
     return try { dispatch(m) } catch (e: Exception) { "error: ${e.message}" }
   }
 
+
+
+  /** Runs one UI operation (blocking, call from a worker thread). Always returns a text result for the model. */
+  fun handle(m: JSONObject): String {
+    return try { dispatch(m) } catch (e: Exception) { "error: ${e.message}" }
+  }
+
   private fun dispatch(m: JSONObject): String {
     val w = sw().toFloat(); val h = sh().toFloat()
     when (val op = m.optString("op")) {
       "dump_ui" -> return dump(12000)
       "dump_small" -> return dump(3000)
+      "list_fields" -> return listFieldsResult()
       "tap_text" -> {
         val t = m.optString("text")
         if (t.isBlank()) return "error: text is required"
         return if (tapTextSmart(t)) settled("tapped '$t'")
-        else "not found: '$t' after retries. Call dump_ui, try a shorter label, scroll_down, or use tap_xy with bounds."
+        else "not found: '$t' after retries. Call dump_ui or list_fields, try a shorter label, scroll_down, or use tap_xy with bounds."
       }
       "tap_id" -> {
         val id = m.optString("id").trim()
         if (id.isBlank()) return "error: id is required"
         return if (tapIdSmart(id)) settled("tapped id '$id'")
-        else "not found: id '$id' after retries. Call dump_ui and use the short id shown there."
+        else "not found: id '$id' after retries. Call dump_ui or list_fields and use the short id shown there."
       }
       "tap_xy" -> { if (!m.has("x") || !m.has("y")) return "error: x and y are required"; tapXY(m.optDouble("x").toFloat(), m.optDouble("y").toFloat()); return settled("tapped xy") }
       "double_tap" -> {
@@ -78,13 +86,13 @@ class SaaraAccessibility : AccessibilityService() {
         }
         return settled("swiped")
       }
-      "type" -> return typeText(m.optString("text"), m.optBoolean("replace", false))
-      "clear_text" -> return typeText("", true)
-      "select_all" -> return selectAll()
-      "copy_text" -> return copyText(m.optString("text"))
-      "paste" -> return pasteText()
+      "type" -> return typeAction(m, clear = false)
+      "clear_text" -> return typeAction(m, clear = true)
+      "select_all" -> return selectAllAction(m)
+      "copy_text" -> return copyAction(m)
+      "paste" -> return pasteAction(m)
       "wait_text" -> return waitText(m.optString("text"), m.optLong("timeout", 4000))
-      "enter" -> return imeEnter()
+      "enter" -> return enterAction(m)
       "back" -> { performGlobalAction(GLOBAL_ACTION_BACK); return settled("back") }
       "home" -> { performGlobalAction(GLOBAL_ACTION_HOME); return settled("home") }
       "recents" -> { performGlobalAction(GLOBAL_ACTION_RECENTS); return settled("recents opened") }
@@ -140,6 +148,287 @@ class SaaraAccessibility : AccessibilityService() {
     }
     walk(r)
     return "app=${r.packageName} screen=${sw()}x${sh()} " + a.toString().take(limit)
+  }
+
+  // ---------- structured editable fields (for accurate multi-field form filling) ----------
+  private data class FieldInfo(
+    val index: Int,
+    val node: AccessibilityNodeInfo,
+    val resId: String,
+    val shortId: String,
+    val desc: String,
+    val hint: String,
+    val value: String,
+    val label: String,
+    val bounds: Rect,
+    val focused: Boolean
+  )
+  private data class LabelSource(val text: String, val bounds: Rect)
+
+  private fun collectEditableFields(): List<FieldInfo> {
+    val roots = allRoots()
+    if (roots.isEmpty()) return emptyList()
+    val nodes = ArrayList<AccessibilityNodeInfo>()
+    fun walk(n: AccessibilityNodeInfo) {
+      if (!n.isVisibleToUser) return
+      if (n.isEditable) nodes.add(n)
+      for (i in 0 until n.childCount) n.getChild(i)?.let { walk(it) }
+    }
+    roots.forEach { walk(it) }
+    val sorted = nodes.distinctBy { System.identityHashCode(it) }
+      .sortedWith(compareBy({ bounds(it).top }, { bounds(it).left }))
+    val labelSources = collectLabelSources(roots)
+    return sorted.mapIndexed { idx, n ->
+      val b = bounds(n)
+      val res = n.viewIdResourceName ?: ""
+      val hint = n.hintText?.toString()?.trim().orEmpty()
+      val raw = n.text?.toString()?.trim().orEmpty()
+      val showingHint = try { if (Build.VERSION.SDK_INT >= 26) n.isShowingHintText else false } catch (_: Exception) { false }
+      val value = if (showingHint) "" else raw
+      val desc = n.contentDescription?.toString()?.trim().orEmpty()
+      FieldInfo(idx, n, res, res.substringAfterLast('/'), desc, hint, value, nearbyLabelFor(b, labelSources, hint, desc), b, n.isFocused || n.isAccessibilityFocused)
+    }
+  }
+
+  private fun collectLabelSources(roots: List<AccessibilityNodeInfo>): List<LabelSource> {
+    val out = ArrayList<LabelSource>()
+    fun walk(n: AccessibilityNodeInfo) {
+      if (!n.isVisibleToUser) return
+      if (!n.isEditable) {
+        val t = ((n.text ?: n.contentDescription)?.toString() ?: "").trim().replace("\n", " ")
+        if (t.isNotEmpty() && t.length <= 120) out.add(LabelSource(t, bounds(n)))
+      }
+      for (i in 0 until n.childCount) n.getChild(i)?.let { walk(it) }
+    }
+    roots.forEach { walk(it) }
+    return out
+  }
+
+  private fun nearbyLabelFor(fb: Rect, sources: List<LabelSource>, hint: String, desc: String): String {
+    var best = ""
+    var bestScore = Int.MAX_VALUE
+    for (s in sources) {
+      val sb = s.bounds
+      if (sb.isEmpty || fb.isEmpty) continue
+      val verticalGap = fb.top - sb.bottom
+      val horizontalGap = fb.left - sb.right
+      val horizOverlap = kotlin.math.min(fb.right, sb.right) - kotlin.math.max(fb.left, sb.left)
+      val vertOverlap = kotlin.math.min(fb.bottom, sb.bottom) - kotlin.math.max(fb.top, sb.top)
+      val score = when {
+        verticalGap in -24..160 && horizOverlap > -40 -> kotlin.math.max(0, verticalGap) + kotlin.math.abs(sb.left - fb.left) / 4
+        horizontalGap in -24..160 && vertOverlap > -24 -> kotlin.math.max(0, horizontalGap) + kotlin.math.abs(sb.top - fb.top) / 4 + 20
+        sb.top >= fb.top - 40 && sb.bottom <= fb.bottom + 40 && sb.left < fb.left + 20 -> (fb.left - sb.right).coerceAtLeast(0) + 40
+        else -> Int.MAX_VALUE
+      }
+      if (score < bestScore) { bestScore = score; best = s.text }
+    }
+    if (bestScore != Int.MAX_VALUE) return best
+    return hint.ifBlank { desc }
+  }
+
+  private fun listFieldsResult(): String {
+    val fields = collectEditableFields()
+    val app = root()?.packageName?.toString() ?: "unknown"
+    val arr = JSONArray()
+    for (f in fields) {
+      arr.put(JSONObject()
+        .put("index", f.index)
+        .put("id", f.shortId)
+        .put("resource_id", f.resId)
+        .put("label", f.label)
+        .put("hint", f.hint)
+        .put("desc", f.desc)
+        .put("value", f.value)
+        .put("focused", f.focused)
+        .put("bounds", "${f.bounds.left},${f.bounds.top},${f.bounds.right},${f.bounds.bottom}"))
+    }
+    return "app=$app screen=${sw()}x${sh()} editable_fields=${fields.size} fields=" + arr.toString()
+  }
+
+  private sealed class FieldResolution {
+    data class Ok(val field: FieldInfo) : FieldResolution()
+    data class Fail(val message: String) : FieldResolution()
+  }
+
+  private fun resolveFieldTarget(m: JSONObject, fields: List<FieldInfo>): FieldResolution {
+    val hasIndex = m.has("field_index")
+    val byIndex = if (hasIndex) m.optInt("field_index", -1) else -1
+    val byId = listOf(m.optString("field_id"), m.optString("target_id")).firstOrNull { it.isNotBlank() }?.trim().orEmpty()
+    val byLabel = listOf(m.optString("field_label"), m.optString("label"), m.optString("target"), m.optString("field")).firstOrNull { it.isNotBlank() }?.trim().orEmpty()
+
+    if (fields.isEmpty()) return FieldResolution.Fail("no editable field found on screen. " + dump(3000))
+
+    if (hasIndex) {
+      val f = fields.firstOrNull { it.index == byIndex }
+      return if (f != null) FieldResolution.Ok(f) else FieldResolution.Fail("field_index $byIndex not found. " + listFieldsResult())
+    }
+    if (byId.isNotEmpty()) {
+      val q = byId.trimStart('/')
+      val matches = fields.filter {
+        val sid = it.shortId
+        sid == q || sid.equals(q, true) || it.resId == q || it.resId.endsWith(q) || sid.contains(q, true)
+      }
+      val exact = matches.filter { it.shortId.equals(q, true) || it.resId.endsWith("/$q") || it.resId == q }
+      val pick = if (exact.size == 1) exact else matches
+      return when {
+        pick.size == 1 -> FieldResolution.Ok(pick[0])
+        pick.size > 1 -> FieldResolution.Fail("AMBIGUOUS_FIELD: field_id '$byId' matches multiple fields: " + summarizeFields(pick) + ". Ask user to clarify or specify field_index. " + listFieldsResult())
+        else -> FieldResolution.Fail("field_id '$byId' not found. " + listFieldsResult())
+      }
+    }
+    if (byLabel.isNotBlank()) {
+      val q = byLabel.trim()
+      val scored = fields.map { f ->
+        val haystack = listOf(f.label, f.hint, f.desc, f.shortId, f.value).joinToString(" ")
+        val rank = when {
+          f.label.equals(q, true) || f.hint.equals(q, true) || f.desc.equals(q, true) || f.shortId.equals(q, true) -> 0
+          f.label.startsWith(q, true) || f.hint.startsWith(q, true) || f.desc.startsWith(q, true) -> 1
+          haystack.contains(q, true) -> 2
+          q.length >= 3 && (f.label.contains(q, true) || f.hint.contains(q, true)) -> 2
+          else -> 9
+        }
+        f to rank
+      }.filter { it.second < 9 }.sortedBy { it.second }
+      val bestRank = scored.firstOrNull()?.second
+      val best = if (bestRank != null) scored.filter { it.second == bestRank }.map { it.first } else emptyList()
+      return when {
+        best.size == 1 -> FieldResolution.Ok(best[0])
+        best.size > 1 -> FieldResolution.Fail("AMBIGUOUS_FIELD: '$byLabel' could match multiple fields: " + summarizeFields(best) + ". STOP and ask the user to clarify which field to use (or specify field_index). Do not guess. " + listFieldsResult())
+        else -> FieldResolution.Fail("No field matching '$byLabel'. " + listFieldsResult())
+      }
+    }
+
+    if (fields.size == 1) return FieldResolution.Ok(fields[0])
+    return FieldResolution.Fail("MULTIPLE_FIELDS: ${fields.size} editable fields are visible. You MUST target the exact field using field_index, field_id, or field_label before typing. Do not guess or dump data into one field. " + listFieldsResult())
+  }
+
+  private fun summarizeFields(fs: List<FieldInfo>): String = fs.joinToString("; ") { f ->
+    val name = f.label.ifBlank { f.hint.ifBlank { f.desc.ifBlank { f.shortId.ifBlank { "-" } } } }
+    "#${f.index}[id=${f.shortId.ifBlank { "-" }} label='$name' value='${f.value.take(30)}' bounds=${f.bounds.left},${f.bounds.top},${f.bounds.right},${f.bounds.bottom}]"
+  }
+  private fun describeField(f: FieldInfo): String {
+    val name = f.label.ifBlank { f.hint.ifBlank { f.desc.ifBlank { "-" } } }
+    return "field#${f.index}(id=${f.shortId.ifBlank { "-" }}, label='$name', hint='${f.hint.ifBlank { "-" }}', desc='${f.desc.ifBlank { "-" }}', value='${f.value.take(60)}', focused=${f.focused}, bounds=${f.bounds.left},${f.bounds.top},${f.bounds.right},${f.bounds.bottom})"
+  }
+
+  private fun focusField(f: FieldInfo) {
+    try { f.node.performAction(AccessibilityNodeInfo.ACTION_FOCUS) } catch (_: Exception) {}
+    try { f.node.performAction(AccessibilityNodeInfo.ACTION_CLICK) } catch (_: Exception) {}
+    sleep(250)
+  }
+
+  private data class SetTextResult(val ok: Boolean, val finalValue: String)
+  private fun performSetText(n: AccessibilityNodeInfo, text: String, replace: Boolean): SetTextResult {
+    val cur = try {
+      if (Build.VERSION.SDK_INT >= 26 && n.isShowingHintText) "" else (n.text?.toString() ?: "")
+    } catch (_: Exception) { n.text?.toString() ?: "" }
+    val full = if (replace || cur.isEmpty() || text.startsWith(cur)) text else cur + text
+    var ok = try {
+      n.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, Bundle().apply {
+        putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, full)
+      })
+    } catch (_: Exception) { false }
+    if (ok) select(n, full.length, full.length)
+    else {
+      val replacing = full == text
+      try { select(n, if (replacing) 0 else cur.length, cur.length) } catch (_: Exception) {}
+      ok = try {
+        if (text.isEmpty()) n.performAction(AccessibilityNodeInfo.ACTION_CUT)
+        else {
+          (getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager).setPrimaryClip(ClipData.newPlainText("saara", text))
+          n.performAction(AccessibilityNodeInfo.ACTION_PASTE)
+        }
+      } catch (_: Exception) { false }
+      if (!ok && !replace && text.isNotEmpty()) {
+        try {
+          select(n, 0, (n.text?.length ?: cur.length))
+          (getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager).setPrimaryClip(ClipData.newPlainText("saara", full))
+          ok = n.performAction(AccessibilityNodeInfo.ACTION_PASTE)
+        } catch (_: Exception) {}
+      }
+    }
+    val finalVal = try { n.text?.toString() ?: full } catch (_: Exception) { full }
+    return SetTextResult(ok, finalVal)
+  }
+
+  private fun typeAction(m: JSONObject, clear: Boolean): String {
+    val fields = collectEditableFields()
+    val field = when (val r = resolveFieldTarget(m, fields)) {
+      is FieldResolution.Ok -> r.field
+      is FieldResolution.Fail -> return r.message
+    }
+    focusField(field)
+    val pre = "Target verified: ${describeField(field)}."
+    val text = if (clear) "" else m.optString("text")
+    val replace = m.optBoolean("replace", false) || clear
+    val allowBulk = m.optBoolean("allow_bulk", false)
+
+    if (!clear && !allowBulk && fields.size > 1) {
+      val lines = text.replace("\r\n", "\n").split('\n').map { it.trim() }.filter { it.isNotEmpty() }
+      if (lines.size > 1) {
+        return "BLOCKED_BULK: refusing to enter multi-line/multi-value text into a single field while ${fields.size} editable fields are visible. Enter values one field at a time: target each field (field_index/field_id/field_label), verify, and type only that field's value. If the user explicitly wants this exact multi-line text in this single targeted field, retry with allow_bulk=true. $pre " + listFieldsResult()
+      }
+    }
+
+    val result = performSetText(field.node, text, replace)
+    val name = field.label.ifBlank { field.hint.ifBlank { field.shortId.ifBlank { "#${field.index}" } } }
+    return if (result.ok) {
+      val entered = if (clear) "(cleared)" else "'${text.take(120)}'"
+      settled("$pre Entered $entered into field '$name' [index ${field.index}]. Field now contains: '${result.finalValue.take(150)}'.")
+    } else {
+      "$pre error: this field would not accept text. " + listFieldsResult()
+    }
+  }
+
+  private fun selectAllAction(m: JSONObject): String {
+    val fields = collectEditableFields()
+    val field = when (val r = resolveFieldTarget(m, fields)) { is FieldResolution.Ok -> r.field; is FieldResolution.Fail -> return r.message }
+    focusField(field)
+    val len = try { (field.node.text?.toString() ?: "").length } catch (_: Exception) { 0 }
+    if (len == 0) return "Target verified: ${describeField(field)}. The field is empty."
+    select(field.node, 0, len)
+    return settled("Target verified: ${describeField(field)}. Selected all text in this field.")
+  }
+
+  private fun copyAction(m: JSONObject): String {
+    val text = m.optString("text")
+    val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+    if (text.isNotBlank()) {
+      cm.setPrimaryClip(ClipData.newPlainText("Saara", text))
+      return "copied ${text.length} character(s) to the clipboard"
+    }
+    val fields = collectEditableFields()
+    val field = when {
+      m.has("field_index") || m.optString("field_id").isNotBlank() || m.optString("field_label").isNotBlank() || m.optString("label").isNotBlank() || m.optString("target").isNotBlank() || m.optString("field").isNotBlank() ->
+        when (val r = resolveFieldTarget(m, fields)) { is FieldResolution.Ok -> r.field; is FieldResolution.Fail -> return r.message }
+      else -> fields.firstOrNull { it.focused } ?: fields.singleOrNull() ?: return "no focused/unique field. Specify field_index/field_id/field_label, or provide text to copy. " + listFieldsResult()
+    }
+    focusField(field)
+    return try {
+      if (field.node.performAction(AccessibilityNodeInfo.ACTION_COPY)) "copied the selected text from ${describeField(field)}"
+      else "could not copy from ${describeField(field)}. Select text first, or provide text to copy."
+    } catch (_: Exception) { "could not copy from ${describeField(field)}" }
+  }
+
+  private fun pasteAction(m: JSONObject): String {
+    val fields = collectEditableFields()
+    val field = when (val r = resolveFieldTarget(m, fields)) { is FieldResolution.Ok -> r.field; is FieldResolution.Fail -> return r.message }
+    focusField(field)
+    return try {
+      if (field.node.performAction(AccessibilityNodeInfo.ACTION_PASTE)) settled("Target verified: ${describeField(field)}. Pasted from clipboard into this field.")
+      else "Target verified: ${describeField(field)}. This field does not accept paste."
+    } catch (_: Exception) { "Target verified: ${describeField(field)}. Paste failed." }
+  }
+
+  private fun enterAction(m: JSONObject): String {
+    val fields = collectEditableFields()
+    val field = when (val r = resolveFieldTarget(m, fields)) { is FieldResolution.Ok -> r.field; is FieldResolution.Fail -> return r.message }
+    focusField(field)
+    if (Build.VERSION.SDK_INT >= 30) {
+      try { if (field.node.performAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_IME_ENTER.id)) return settled("Target verified: ${describeField(field)}. Enter pressed.") } catch (_: Exception) {}
+    }
+    for (k in listOf("Send", "Search", "Go", "Done", "Next")) if (tapSmart(k)) return settled("Target verified: ${describeField(field)}. Pressed '$k'.")
+    return "Target verified: ${describeField(field)}. Enter is not supported here; tap the Send/Search button with tap_text instead."
   }
 
   // ---------- tapping ----------
@@ -266,72 +555,15 @@ class SaaraAccessibility : AccessibilityService() {
     val n = find(r) { it.isScrollable && it.isVisibleToUser }.maxByOrNull { val b = bounds(it); b.width() * b.height() } ?: return false
     return n.performAction(if (forward) AccessibilityNodeInfo.ACTION_SCROLL_FORWARD else AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD)
   }
-
-  // ---------- typing (ADDS to existing text unless replace=true) ----------
-  private fun inputNode(): AccessibilityNodeInfo? {
-    for (r in allRoots()) r.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)?.let { return it }
-    for (r in allRoots()) find(r) { it.isEditable && it.isVisibleToUser }.firstOrNull()?.let {
-      it.performAction(AccessibilityNodeInfo.ACTION_FOCUS); it.performAction(AccessibilityNodeInfo.ACTION_CLICK); sleep(300); return it
-    }
-    return null
-  }
   private fun select(n: AccessibilityNodeInfo, s: Int, e: Int) {
-    n.performAction(AccessibilityNodeInfo.ACTION_SET_SELECTION, Bundle().apply {
-      putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_START_INT, s)
-      putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_END_INT, e)
-    })
-  }
-  private fun typeText(text: String, replace: Boolean): String {
-    val n = inputNode() ?: return "no text field found. Tap the text field first (tap_text or tap_xy), then call type again."
-    val cur = if (n.isShowingHintText) "" else (n.text?.toString() ?: "")
-    // If the model re-sent the whole text (it starts with what is already there), treat it as the full new value; otherwise append.
-    val full = if (replace || cur.isEmpty() || text.startsWith(cur)) text else cur + text
-    var ok = n.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, Bundle().apply {
-      putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, full)
-    })
-    if (ok) select(n, full.length, full.length)
-    else {
-      // Fallback for fields that refuse SET_TEXT: use the clipboard.
-      val replacing = full == text
-      select(n, if (replacing) 0 else cur.length, cur.length)
-      ok = if (text.isEmpty()) n.performAction(AccessibilityNodeInfo.ACTION_CUT) else {
-        (getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager).setPrimaryClip(ClipData.newPlainText("saara", text))
-        n.performAction(AccessibilityNodeInfo.ACTION_PASTE)
-      }
-    }
-    return if (ok) settled("typed; field now contains: '${full.take(150)}'") else "error: this field would not accept text"
-  }
-  private fun selectAll(): String {
-    val n = inputNode() ?: return "no text field found. Tap the field first."
-    val len = (n.text?.toString() ?: "").length
-    if (len == 0) return "the field is empty"
-    select(n, 0, len)
-    return settled("selected all text in the field")
+    try {
+      n.performAction(AccessibilityNodeInfo.ACTION_SET_SELECTION, Bundle().apply {
+        putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_START_INT, s)
+        putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_END_INT, e)
+      })
+    } catch (_: Exception) {}
   }
 
-  private fun copyText(text: String): String {
-    val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-    if (text.isNotBlank()) {
-      cm.setPrimaryClip(ClipData.newPlainText("Saara", text))
-      return "copied ${text.length} character(s) to the clipboard"
-    }
-    val n = inputNode() ?: return "no focused field. Give text to copy, or select text first."
-    return if (n.performAction(AccessibilityNodeInfo.ACTION_COPY)) "copied the selected text"
-    else "could not copy. Select text first, or give the text to copy."
-  }
-
-  private fun pasteText(): String {
-    val n = inputNode() ?: return "no text field found. Tap the field first, then paste."
-    return if (n.performAction(AccessibilityNodeInfo.ACTION_PASTE)) settled("pasted from the clipboard")
-    else "this field does not accept paste"
-  }
-
-  private fun imeEnter(): String {
-    val n = inputNode() ?: return "no text field focused"
-    if (Build.VERSION.SDK_INT >= 30 && n.performAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_IME_ENTER.id)) return settled("enter pressed")
-    for (k in listOf("Send", "Search", "Go", "Done")) if (tapSmart(k)) return settled("pressed '$k'")
-    return "enter is not supported here; tap the Send/Search button with tap_text instead"
-  }
 
   // ---------- camera ----------
   private fun shutter(): String {
