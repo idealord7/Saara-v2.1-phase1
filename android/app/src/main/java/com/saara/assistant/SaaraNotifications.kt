@@ -82,7 +82,8 @@ class SaaraNotifications : NotificationListenerService() {
     fun requestRebindIfPossible(ctx: android.content.Context) {
       try {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-          NotificationListenerService.requestRebind(ComponentName(ctx, SaaraNotifications::class.java))
+          val cn = ComponentName(ctx, SaaraNotifications::class.java)
+          NotificationListenerService.requestRebind(cn)
           log(ctx, "Requested notification listener rebind")
         }
       } catch (e: Exception) {
