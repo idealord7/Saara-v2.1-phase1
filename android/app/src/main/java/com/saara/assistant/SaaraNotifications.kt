@@ -189,7 +189,7 @@ class SaaraNotifications : NotificationListenerService() {
     val big = ex.getCharSequence(Notification.EXTRA_BIG_TEXT)?.toString()?.trim().orEmpty()
     val text = ex.getCharSequence(Notification.EXTRA_TEXT)?.toString()?.trim().orEmpty()
     // MessagingStyle/summary notifications often have useful latest line in TEXT_LINES.
-    val messagingStyle = Build.VERSION.SDK_INT >= 24 && try { n.isStyle(Notification.MessagingStyle::class.java) } catch (_: Exception) { false }
+    val messagingStyle = Build.VERSION.SDK_INT >= 24 && n.extras.containsKey(Notification.EXTRA_MESSAGES)
     return when {
       lastLine.isNotBlank() && (messagingStyle || lastLine.length >= text.length) -> lastLine
       big.isNotBlank() -> big
@@ -213,7 +213,7 @@ class SaaraNotifications : NotificationListenerService() {
     if (n.category == Notification.CATEGORY_CALL) { log(ctx, "Filtered call notification · $pkg · $preview"); return }
 
     val isWhatsApp = pkg == "com.whatsapp" || pkg == "com.whatsapp.w4b"
-    val messagingStyle = Build.VERSION.SDK_INT >= 24 && try { n.isStyle(Notification.MessagingStyle::class.java) } catch (_: Exception) { false }
+    val messagingStyle = Build.VERSION.SDK_INT >= 24 && n.extras.containsKey(Notification.EXTRA_MESSAGES)
     val hasReply = replyAction(n) != null
     if (!isWhatsApp && !messagingStyle && !hasReply) return // avoid noisy non-message notifications
 
