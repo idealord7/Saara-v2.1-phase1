@@ -66,7 +66,7 @@ object AiAutoReply {
   }
   private fun prefRunClear() { /* persisted logs trimmed on next write */ }
   private fun stamp() = SimpleDateFormat("dd MMM HH:mm:ss", Locale.getDefault()).format(Date())
-  private fun addLog(c: Context, s: String) {
+  fun addLog(c: Context, s: String) {
     val line = "[${stamp()}] $s"
     synchronized(log) { log.addLast(line); while (log.size > 120) log.removeFirst() }
     try {
@@ -92,41 +92,50 @@ object AiAutoReply {
 
   fun handle(c: Context, key: String, pkg: String, sender: String, text: String, isGroup: Boolean) {
     val ctx = c.applicationContext
-    if (!enabled(ctx)) return
     val who = sender.ifBlank { "Unknown" }.trim()
     val msg = text.trim()
-    if (msg.isBlank()) return
+    if (msg.isBlank()) { addLog(ctx, "Skipped blank message · $who · ${appLabel(pkg)}"); return }
+    if (!Prefs.on(ctx, "f_notif", false)) { addLog(ctx, "Skipped (Notification auto-reply off) · $who · ${appLabel(pkg)}"); return }
+    if (!Prefs.on(ctx, "f_ai_reply", false)) { addLog(ctx, "Skipped (AI smart auto-reply off) · $who · ${appLabel(pkg)}"); return }
     if (isGroup && !Prefs.on(ctx, "reply_groups", false)) { addLog(ctx, "Skipped group · $who · ${appLabel(pkg)}"); return }
+
     val dedupe = "$pkg|$who|${msg.hashCode()}"
     val now = System.currentTimeMillis()
     val prev = lastHash[who]
-    if (prev == dedupe && (now - (inflight["$who:last"] ?: 0L)) < 12000) return
+    if (prev == dedupe && (now - (inflight["$who:last"] ?: 0L)) < 12000) {
+      addLog(ctx, "Skipped duplicate · $who · ${appLabel(pkg)}")
+      return
+    }
     lastHash[who] = dedupe
     inflight["$who:last"] = now
+
     val appKey = Prefs.secure(ctx).getString("apiKey", "") ?: ""
     if (appKey.isBlank()) {
-      addLog(ctx, "Skipped ($who): Gemini API key missing")
+      addLog(ctx, "Skipped ($who): Gemini API key missing/invalid")
       Bus.add("system", "AI auto-reply skipped ($who): set Gemini API key in Settings.", true)
       return
     }
+
     pushContext(who, "$who: $msg")
     val mySeq = seq.incrementAndGet()
+    addLog(ctx, "Queued #$mySeq · $who · ${appLabel(pkg)}\n← ${msg.take(500)}")
     exec.execute {
       try {
         val rules = try { Db.get(ctx).rulesPrompt(40) } catch (_: Exception) { "" }
         val ctxText = contextFor(who)
         val reply = generate(appKey, systemPrompt(ctx), rules, who, msg, ctxText)
-        if (reply.isNullOrBlank()) { addLog(ctx, "No reply generated · $who"); return@execute }
         val clean = sanitize(reply)
-        if (clean.isBlank()) { addLog(ctx, "Empty reply after sanitizing · $who"); return@execute }
+        if (clean.isBlank()) { addLog(ctx, "Empty reply after sanitizing · $who · ${appLabel(pkg)}"); return@execute }
         pushContext(who, "You: $clean")
-        val result = SaaraNotifications.reply(key, clean)
+        val result = SaaraNotifications.reply(key, who, clean)
         val ok = result == "replied"
         addLog(ctx, (if (ok) "Replied #$mySeq" else "Failed ($result)") + " · $who · ${appLabel(pkg)}\n← ${msg.take(600)}\n→ ${clean.take(800)}")
         if (ok) Bus.add("system", "Auto-replied to $who (${appLabel(pkg)}): ${clean.take(300)}", true)
         else Bus.add("system", "Auto-reply failed for $who: $result", true)
       } catch (e: Exception) {
-        addLog(ctx, "Error · $who: ${e.message}")
+        val detail = e.message?.take(300) ?: e.javaClass.simpleName
+        addLog(ctx, "API/error · $who · ${appLabel(pkg)}: $detail")
+        Bus.add("system", "AI auto-reply error for $who: $detail", true)
       }
     }
   }
@@ -149,8 +158,8 @@ object AiAutoReply {
     else -> pkg.substringAfterLast('.')
   }
 
-  private fun generate(apiKey: String, system: String, rules: String, sender: String, message: String, context: String): String? {
-    val model = "gemini-2.0-flash"
+  private fun generate(apiKey: String, system: String, rules: String, sender: String, message: String, context: String): String {
+    val model = "gemini-3.8-flash"
     val instruction = buildString {
       append(system.trim())
       append("\n\nSTRICT COMPLIANCE (must follow):\n")
@@ -178,13 +187,21 @@ object AiAutoReply {
       .build()
     http.newCall(req).execute().use { resp ->
       val s = resp.body?.string().orEmpty()
-      if (!resp.isSuccessful) throw RuntimeException("HTTP ${resp.code}: ${s.take(220)}")
+      if (!resp.isSuccessful) {
+        val detail = try { JSONObject(s).optJSONObject("error")?.optString("message")?.take(220) ?: s.take(220) } catch (_: Exception) { s.take(220) }
+        throw RuntimeException("HTTP ${resp.code}: $detail")
+      }
       val j = JSONObject(s)
+      val blocked = j.optJSONObject("promptFeedback")?.optString("blockReason")?.takeIf { it.isNotBlank() }
+      if (blocked != null) throw RuntimeException("Blocked by Gemini: $blocked")
       val cand = j.optJSONArray("candidates")?.optJSONObject(0)
-      val parts = cand?.optJSONObject("content")?.optJSONArray("parts") ?: return null
+      val finish = cand?.optString("finishReason").orEmpty()
+      val parts = cand?.optJSONObject("content")?.optJSONArray("parts")
       val sb = StringBuilder()
-      for (i in 0 until parts.length()) sb.append(parts.getJSONObject(i).optString("text"))
-      return sb.toString().trim().ifBlank { null }
+      if (parts != null) for (i in 0 until parts.length()) sb.append(parts.optJSONObject(i)?.optString("text").orEmpty())
+      val out = sb.toString().trim()
+      if (out.isBlank()) throw RuntimeException("Empty model output" + if (finish.isNotBlank()) " (finishReason=$finish)" else "")
+      return out
     }
   }
 }

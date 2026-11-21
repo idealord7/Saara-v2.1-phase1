@@ -453,8 +453,18 @@ class MainActivity : AppCompatActivity() {
 
   private fun showAutoReplyLogs() {
     AiAutoReply.loadPersisted(this)
+    SaaraNotifications.requestRebindIfPossible(this)
+    val status = buildString {
+      append("Notification access: ").append(if (notifOn()) "ON" else "OFF")
+      append("\nListener connected: ").append(if (SaaraNotifications.isConnected()) "YES" else "NO")
+      append("\nNotification auto-reply: ").append(if (Prefs.on(this@MainActivity, "f_notif", false)) "ON" else "OFF")
+      append("\nAI smart auto-reply: ").append(if (Prefs.on(this@MainActivity, "f_ai_reply", false)) "ON" else "OFF")
+      val key = Prefs.secure(this@MainActivity).getString("apiKey", "") ?: ""
+      append("\nGemini API key: ").append(if (key.isBlank()) "MISSING" else "SET")
+    }
     val logs = AiAutoReply.logs()
-    val msg = if (logs.isEmpty()) "No auto-reply activity yet.\n\nTip: enable Notification access, Notification auto-reply, and AI smart auto-reply; set Gemini API key in Settings." else logs.joinToString("\n\n————————————\n\n")
+    val body = if (logs.isEmpty()) "No auto-reply activity yet.\n\nTip: enable Notification access, Notification auto-reply, and AI smart auto-reply; set Gemini API key in Settings." else logs.joinToString("\n\n————————————\n\n")
+    val msg = "$status\n\n————————————\n\n$body"
     val sv = ScrollView(this)
     val t = tv(msg, 13f, TXT); t.setPadding(dp(16), dp(12), dp(16), dp(12)); t.setTextIsSelectable(true)
     sv.addView(t)
@@ -1064,7 +1074,12 @@ class MainActivity : AppCompatActivity() {
     if (changed && nearBottom) chatScroll.post { chatScroll.fullScroll(View.FOCUS_DOWN) }
   }
 
-  override fun onResume() { super.onResume(); visible = true; Bus.listen(busListener); refresh(); if (curTab == 3 && has(Manifest.permission.READ_CONTACTS)) scheduleContactsRefresh(); Bus.ping() }
+  override fun onResume() {
+    super.onResume(); visible = true; Bus.listen(busListener); refresh()
+    SaaraNotifications.requestRebindIfPossible(this)
+    if (curTab == 3 && has(Manifest.permission.READ_CONTACTS)) scheduleContactsRefresh()
+    Bus.ping()
+  }
   override fun onPause() { visible = false; Bus.unlisten(busListener); super.onPause() }
   override fun onDestroy() { contactsHandler.removeCallbacks(contactsDebounce); contactsExecutor.shutdownNow(); knowledgeExecutor.shutdownNow(); super.onDestroy() }
 }
