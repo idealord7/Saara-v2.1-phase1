@@ -246,14 +246,13 @@ class CallWatcher(
       override fun onResults(results: Bundle?) { inspect(results) }
       override fun onPartialResults(partialResults: Bundle?) { inspect(partialResults) }
     })
-    val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-      putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-      putExtra(RecognizerIntent.EXTRA_LANGUAGE, languageTag())
-      putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
-      putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 5)
-      putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, ctx.packageName)
-      putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
-    }
+    val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
+    intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+    intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE, languageTag())
+    intent.putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
+    intent.putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 5)
+    intent.putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, ctx.packageName)
+    if (Build.VERSION.SDK_INT >= 23) intent.putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
     try { r.startListening(intent) } catch (_: Exception) { finishListening(); return }
     timeout?.let { main.removeCallbacks(it) }
     timeout = Runnable {
