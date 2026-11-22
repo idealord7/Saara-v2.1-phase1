@@ -37,6 +37,10 @@ class Db private constructor(c: Context) : SQLiteOpenHelper(c.applicationContext
     if (o < 6) d.execSQL("CREATE TABLE IF NOT EXISTS rules(id INTEGER PRIMARY KEY AUTOINCREMENT, text TEXT, enabled INTEGER, ts INTEGER)")
     if (o < 7) createCloudTables(d)
   }
+  override fun onOpen(d: SQLiteDatabase) {
+    super.onOpen(d)
+    try { createCloudTables(d) } catch (_: Exception) {}
+  }
   private fun createTaskSteps(d: SQLiteDatabase) {
     d.execSQL("CREATE TABLE IF NOT EXISTS task_steps(id INTEGER PRIMARY KEY AUTOINCREMENT, goal TEXT, tool TEXT, args TEXT, result TEXT, ok INTEGER, ts INTEGER)")
     d.execSQL("CREATE INDEX IF NOT EXISTS idx_task_steps_goal ON task_steps(goal)")
