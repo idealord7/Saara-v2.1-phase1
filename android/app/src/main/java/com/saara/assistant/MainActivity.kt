@@ -439,7 +439,7 @@ class MainActivity : AppCompatActivity() {
       val logBtn = btn("View auto-reply logs", SURF2) { showAutoReplyLogs() }
       val lp = LinearLayout.LayoutParams(-1, -2); lp.topMargin = dp(6); c.addView(logBtn, lp)
     }
-    feature(root, "Floating bubble", "Button over every app. Also lets Saara open apps from the background", "f_bubble", false,
+    feature(root, "Floating bubble", "Messenger-style chat head over any app. Tap to open a floating Saara window, drag to X to dismiss.", "f_bubble", false,
       { Settings.canDrawOverlays(this) }, "Allow display over other apps",
       { startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName"))) })
   }

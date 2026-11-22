@@ -87,7 +87,7 @@ class VoiceService : Service() {
   private var pendingCommand: String? = null
   private var track: AudioTrack? = null
   private val audioQ = java.util.concurrent.LinkedBlockingQueue<ByteArray>()
-  private var bubble: Bubble? = null
+  private var chatHead: ChatHeadOverlay? = null
   private var overlay: Overlay? = null
   private var cam: CamShare? = null
   private var screen: ScreenShare? = null
@@ -100,7 +100,7 @@ class VoiceService : Service() {
   private val micLock = Any()
   private var lastMicToggle = 0L
   private val main = Handler(Looper.getMainLooper())
-  private val busListener: () -> Unit = { updateOverlay() }
+  private val busListener: () -> Unit = { updateOverlay(); chatHead?.onBusUpdate() }
 
   // --- Continuous hardware capture (single thread) ---
   private var audioRecord: AudioRecord? = null
@@ -262,11 +262,37 @@ class VoiceService : Service() {
   }
 
   fun refreshBubble() {
-    if (Prefs.on(this, "f_bubble", false)) {
-      if (bubble == null) bubble = Bubble(this) { startActivity(Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }
-      bubble?.show()
-    } else bubble?.hide()
+    if (Prefs.on(this, "f_bubble", false) && Settings.canDrawOverlays(this)) {
+      if (chatHead == null) chatHead = ChatHeadOverlay(this, object : ChatHeadOverlay.Callbacks {
+        override fun onOpenApp() { openMainApp() }
+        override fun onSendText(text: String) { sendText(text) }
+        override fun onMicToggle() { toggleMic() }
+        override fun onCloseRequested() { hideChatHeadByUser() }
+        override fun isMicOn(): Boolean = this@VoiceService.isMicOn()
+        override fun isActive(): Boolean = isSaraActive
+        override fun isSpeaking(): Boolean = System.currentTimeMillis() < speakingUntil
+        override fun statusText(): String = Bus.status
+        override fun recentMessages(limit: Int): List<Msg> = synchronized(Bus) { Bus.msgs.takeLast(limit).map { Msg(it.id, it.role, it.text, it.ts) } }
+      })
+      chatHead?.show()
+    } else {
+      chatHead?.hide(); chatHead = null
+    }
     if (!Prefs.on(this, "f_overlay", true)) overlay?.hide()
+  }
+
+  fun overlayHide() { overlay?.hide() }
+
+  private fun openMainApp() {
+    try { startActivity(Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP)) } catch (_: Exception) {}
+  }
+
+  private fun hideChatHeadByUser() {
+    // User dismissed bubble via X target: hide overlay but keep service/wake active.
+    chatHead?.hide(); chatHead = null
+    Prefs.plain(this).edit().putBoolean("f_bubble", false).apply()
+    Bus.add("system", "Floating bubble hidden. Turn it on in Settings > App features.", true)
+    Bus.ping()
   }
 
   fun sendText(t: String) { startSession(); processUtterance(t) }
@@ -597,6 +623,7 @@ class VoiceService : Service() {
   private fun updateOverlay() {
     if (!running) return
     if (!Prefs.on(this, "f_overlay", true) || !Settings.canDrawOverlays(this)) { overlay?.hide(); return }
+    if (chatHead?.isExpanded() == true) { overlay?.hide(); return }
     if (overlay == null) overlay = Overlay(this)
     if (Bus.camOn) { overlay?.show("📷 LIVE CAMERA SHARING ON\nLive camera frames are being sent to Gemini.", true); return }
     if (MainActivity.visible) { overlay?.hide(); return }
@@ -840,7 +867,7 @@ class VoiceService : Service() {
     screen?.stop(); screen = null; Bus.screenOn = false
     ws?.close(1000, null)
     try { track?.release() } catch (_: Exception) {}
-    bubble?.hide(); overlay?.hide()
+    chatHead?.hide(); chatHead = null; overlay?.hide()
     instance = null; Bus.running = false
     Bus.add("system", "Stopped.", true); Bus.setStatus("Stopped")
     super.onDestroy()
