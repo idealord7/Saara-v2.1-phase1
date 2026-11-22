@@ -141,6 +141,13 @@ class MainActivity : AppCompatActivity() {
     return false
   }
 
+  private fun handleIntentActions(i: Intent?) {
+    if (i?.getBooleanExtra("request_screen_share", false) == true) {
+      i.removeExtra("request_screen_share")
+      window.decorView.post { toggleScreen() }
+    }
+  }
+
   private fun startAssistantFlow(i: Intent? = null) {
     val cmd = i?.let { it.getStringExtra(Intent.EXTRA_TEXT)?.trim()?.takeIf { s -> s.isNotEmpty() } ?: it.getStringExtra(VoiceService.ASSISTANT_COMMAND)?.trim()?.takeIf { s -> s.isNotEmpty() } }
     if (cmd != null) pendingAssistantText = cmd
@@ -160,6 +167,7 @@ class MainActivity : AppCompatActivity() {
       assistantLaunch = isAssistantLaunch(intent)
       onCreateInner(b)
       if (assistantLaunch) { assistantLaunch = false; startAssistantFlow(intent) }
+      handleIntentActions(intent)
     } catch (t: Throwable) {
       Crash.save(this, t, "MainActivity.onCreate")
       throw t
@@ -171,6 +179,7 @@ class MainActivity : AppCompatActivity() {
     setIntent(intent)
     assistantLaunch = isAssistantLaunch(intent)
     if (assistantLaunch) startAssistantFlow(intent)
+    handleIntentActions(intent)
   }
 
   private fun onCreateInner(b: Bundle?) {

@@ -31,8 +31,10 @@ class ChatHeadOverlay(
     fun onOpenApp()
     fun onSendText(text: String)
     fun onMicToggle()
+    fun onScreenToggle()
     fun onCloseRequested() // user dropped on X - hide overlay, keep service/background wake
     fun isMicOn(): Boolean
+    fun isScreenOn(): Boolean
     fun isActive(): Boolean
     fun isSpeaking(): Boolean
     fun statusText(): String
@@ -71,6 +73,7 @@ class ChatHeadOverlay(
   private var statusDot: View? = null
   private var statusLabel: TextView? = null
   private var micBtn: TextView? = null
+  private var screenBtn: TextView? = null
   private var bubbleStatusRing: GradientDrawable? = null
   private var bubbleDot: View? = null
 
@@ -108,6 +111,7 @@ class ChatHeadOverlay(
     val speaking = callbacks.isSpeaking()
     val active = callbacks.isActive()
     val micOn = callbacks.isMicOn()
+    val screenOn = callbacks.isScreenOn()
     val color = when {
       speaking -> 0xFF4FA3F7.toInt()
       active || micOn -> 0xFF34A853.toInt()
@@ -115,11 +119,13 @@ class ChatHeadOverlay(
     }
     bubbleStatusRing?.setStroke(dp(3), color)
     bubbleDot?.background = oval(color)
-    val st = callbacks.statusText()
-    statusLabel?.text = st
+    statusLabel?.text = callbacks.statusText()
     statusDot?.background = oval(color)
     micBtn?.text = if (micOn) "🎤" else "🔇"
     micBtn?.alpha = if (micOn) 1f else 0.65f
+    screenBtn?.text = if (screenOn) "🖥" else "🖥"
+    screenBtn?.alpha = if (screenOn) 1f else 0.55f
+    screenBtn?.background = bg(if (screenOn) 0xFF1A73E8.toInt() else 0xFF2A2C2E.toInt(), 18)
   }
 
   private fun createBubble() {
@@ -299,6 +305,15 @@ class ChatHeadOverlay(
     }
     micBtn = mic
     inputRow.addView(mic, LinearLayout.LayoutParams(dp(40), dp(40)))
+
+    val screen = TextView(ctx).apply {
+      text = "🖥"; textSize = 16f; gravity = Gravity.CENTER
+      background = bg(0xFF2A2C2E.toInt(), 18)
+      setOnClickListener { callbacks.onScreenToggle(); refreshStatus() }
+    }
+    screenBtn = screen
+    val sLp = LinearLayout.LayoutParams(dp(40), dp(40)); sLp.leftMargin = dp(6)
+    inputRow.addView(screen, sLp)
 
     val input = EditText(ctx).apply {
       hint = "Message Saara…"; setHintTextColor(0xFF6F7580.toInt()); setTextColor(0xFFE3E3E3.toInt())
@@ -521,7 +536,7 @@ class ChatHeadOverlay(
   private fun updateBubbleLayout() { val v = bubbleView ?: return; val lp = bubbleLp ?: return; try { wm.updateViewLayout(v, lp) } catch (_: Exception) {} }
 
   private fun removeBubble() { bubbleView?.let { try { wm.removeView(it) } catch (_: Exception) {} }; bubbleView = null; bubbleLp = null; bubbleStatusRing = null; bubbleDot = null }
-  private fun removePanel() { hideKeyboard(); panelView?.let { try { wm.removeView(it) } catch (_: Exception) {} }; panelView = null; panelLp = null; chatList = null; chatScroll = null; inputField = null; statusDot = null; statusLabel = null; micBtn = null; msgViews.clear() }
+  private fun removePanel() { hideKeyboard(); panelView?.let { try { wm.removeView(it) } catch (_: Exception) {} }; panelView = null; panelLp = null; chatList = null; chatScroll = null; inputField = null; statusDot = null; statusLabel = null; micBtn = null; screenBtn = null; msgViews.clear() }
 
   private fun overlayLp(w: Int, h: Int): WindowManager.LayoutParams {
     val type = WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
