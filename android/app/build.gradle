@@ -7,6 +7,10 @@ plugins {
 
 kapt {
   correctErrorTypes = true
+  arguments {
+    arg("room.incremental", "true")
+    arg("room.expandProjection", "true")
+  }
 }
 
 android {
