@@ -13,5 +13,11 @@ class SaaraApp : Application() {
       try { Crash.save(this, error, "Uncaught exception in " + thread.name) } catch (_: Throwable) {}
       previous?.uncaughtException(thread, error)
     }
+    // Ensure auth + async cloud restore/sync for memory architecture.
+    try {
+      AuthManager.ensureSignedIn({ _ ->
+        MacroRepository.get(this).restoreOnLogin()
+      }, { })
+    } catch (_: Exception) {}
   }
 }

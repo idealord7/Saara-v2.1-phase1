@@ -23,6 +23,7 @@ object Scheduler {
   fun cancel(c: Context, id: Long) {
     (c.getSystemService(Context.ALARM_SERVICE) as AlarmManager).cancel(pi(c, id))
     Db.get(c).taskDelete(id)
+    try { CloudMemory.upsertScheduled(c, CloudScheduledTask(id=id.toString(), title="Task $id", instruction="", scheduleType="once", nextRunAt=0L, status="cancelled", updatedAt=System.currentTimeMillis())) } catch (_: Exception) {}
   }
   fun rescheduleAll(c: Context) {
     val now = System.currentTimeMillis()
@@ -53,6 +54,7 @@ object Scheduler {
     val rep = when (repeat.lowercase()) { "hourly" -> 3600000L; "daily" -> 86400000L; "weekly" -> 604800000L; else -> 0L }
     val id = Db.get(c).taskAdd(whenMs, text.trim(), rep)
     schedule(c, id, whenMs)
+    try { CloudMemory.upsertScheduled(c, CloudScheduledTask(id=id.toString(), title=text.trim().take(80), instruction=text.trim(), scheduleType=if(rep==3600000L)"hourly" else if(rep==86400000L)"daily" else if(rep==604800000L)"weekly" else "once", nextRunAt=whenMs, status="pending", updatedAt=System.currentTimeMillis())) } catch (_: Exception) {}
     return "scheduled #$id for ${fmt(whenMs)}" + (if (rep > 0) ", repeats $repeat" else "")
   }
 
