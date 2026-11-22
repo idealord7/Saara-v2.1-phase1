@@ -35,13 +35,23 @@ class Db private constructor(c: Context) : SQLiteOpenHelper(c.applicationContext
     }
     if (o < 3) createTaskSteps(d)
     if (o < 6) d.execSQL("CREATE TABLE IF NOT EXISTS rules(id INTEGER PRIMARY KEY AUTOINCREMENT, text TEXT, enabled INTEGER, ts INTEGER)")
-    if (o < 7) try { CloudMemory.ensureTables(d) } catch (_: Exception) {}
+    if (o < 7) createCloudTables(d)
   }
   private fun createTaskSteps(d: SQLiteDatabase) {
     d.execSQL("CREATE TABLE IF NOT EXISTS task_steps(id INTEGER PRIMARY KEY AUTOINCREMENT, goal TEXT, tool TEXT, args TEXT, result TEXT, ok INTEGER, ts INTEGER)")
     d.execSQL("CREATE INDEX IF NOT EXISTS idx_task_steps_goal ON task_steps(goal)")
     d.execSQL("CREATE TABLE IF NOT EXISTS rules(id INTEGER PRIMARY KEY AUTOINCREMENT, text TEXT, enabled INTEGER, ts INTEGER)")
-    try { CloudMemory.ensureTables(d) } catch (_: Exception) {}
+    createCloudTables(d)
+  }
+
+  private fun createCloudTables(d: SQLiteDatabase) {
+    try {
+      d.execSQL("CREATE TABLE IF NOT EXISTS cloud_knowledge(id TEXT PRIMARY KEY,title TEXT,category TEXT,content TEXT,tags TEXT,updatedAt INTEGER)")
+      d.execSQL("CREATE TABLE IF NOT EXISTS cloud_memories(id TEXT PRIMARY KEY,summary TEXT,contextApp TEXT,importance INTEGER,createdAt INTEGER)")
+      d.execSQL("CREATE TABLE IF NOT EXISTS cloud_playbooks(id TEXT PRIMARY KEY,taskName TEXT,triggerPattern TEXT,steps TEXT,successCount INTEGER,requiresConfirmation INTEGER,updatedAt INTEGER)")
+      d.execSQL("CREATE TABLE IF NOT EXISTS cloud_mistakes(id TEXT PRIMARY KEY,mistakeSummary TEXT,whatHappened TEXT,wrongBehavior TEXT,correctRule TEXT,occurrenceCount INTEGER,active INTEGER,updatedAt INTEGER)")
+      d.execSQL("CREATE TABLE IF NOT EXISTS cloud_scheduled(id TEXT PRIMARY KEY,title TEXT,instruction TEXT,scheduleType TEXT,nextRunAt INTEGER,status TEXT,updatedAt INTEGER)")
+    } catch (_: Exception) {}
   }
 
   // ---------- chat ----------

@@ -97,8 +97,8 @@ object CloudMemory {
     d.execSQL("CREATE TABLE IF NOT EXISTS cloud_scheduled(id TEXT PRIMARY KEY,title TEXT,instruction TEXT,scheduleType TEXT,nextRunAt INTEGER,status TEXT,updatedAt INTEGER)")
   }
 
-  private fun w(ctx: Context) = Db.get(ctx).writableDatabase
-  private fun r(ctx: Context) = Db.get(ctx).readableDatabase
+  private fun w(ctx: Context): android.database.sqlite.SQLiteDatabase = Db.get(ctx).writableDatabase.also { ensureTables(it) }
+  private fun r(ctx: Context): android.database.sqlite.SQLiteDatabase = Db.get(ctx).readableDatabase.also { ensureTables(it) }
   private fun tagsToJson(tags: List<String>): String = JSONArray(tags).toString()
   private fun jsonToTags(s: String?): List<String> = try { val a = JSONArray(s ?: "[]"); List(a.length()) { i -> a.optString(i) }.filter { it.isNotBlank() } } catch (_: Exception) { emptyList() }
   private fun stepsToJson(steps: List<String>): String = JSONArray(steps).toString()
