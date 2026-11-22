@@ -52,9 +52,9 @@ dependencies {
   implementation 'org.tensorflow:tensorflow-lite:2.16.1'
 
   // Room (local macro storage)
-  implementation 'androidx.room:room-runtime:2.6.1'
-  implementation 'androidx.room:room-ktx:2.6.1'
-  kapt 'androidx.room:room-compiler:2.6.1'
+  implementation 'androidx.room:room-runtime:2.7.0'
+  implementation 'androidx.room:room-ktx:2.7.0'
+  kapt 'androidx.room:room-compiler:2.7.0'
 
   // Import the Firebase BoM
   implementation platform('com.google.firebase:firebase-bom:35.2.0')
