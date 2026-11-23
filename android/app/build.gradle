@@ -1,16 +1,13 @@
 plugins {
   id 'com.android.application'
   id 'org.jetbrains.kotlin.android'
-  id 'org.jetbrains.kotlin.kapt'
+  id 'com.google.devtools.ksp'
   id 'com.google.gms.google-services'
 }
 
-kapt {
-  correctErrorTypes = true
-  arguments {
-    arg("room.incremental", "true")
-    arg("room.expandProjection", "true")
-  }
+ksp {
+  arg("room.incremental", "true")
+  arg("room.expandProjection", "true")
 }
 
 android {
@@ -54,7 +51,7 @@ dependencies {
   // Room (local macro storage)
   implementation 'androidx.room:room-runtime:2.7.0'
   implementation 'androidx.room:room-ktx:2.7.0'
-  kapt 'androidx.room:room-compiler:2.7.0'
+  ksp 'androidx.room:room-compiler:2.7.0'
 
   // Import the Firebase BoM
   implementation platform('com.google.firebase:firebase-bom:35.2.0')
