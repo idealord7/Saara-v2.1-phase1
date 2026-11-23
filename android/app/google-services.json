@@ -1,26 +1,21 @@
 {
   "project_info": {
-    "project_number": "000000000000",
-    "project_id": "saara-placeholder",
-    "storage_bucket": "saara-placeholder.appspot.com"
+    "project_number": "848205692706",
+    "project_id": "saara-907db",
+    "storage_bucket": "saara-907db.firebasestorage.app"
   },
   "client": [
     {
       "client_info": {
-        "mobilesdk_app_id": "1:000000000000:android:0000000000000000deadbe",
+        "mobilesdk_app_id": "1:848205692706:android:0fb3d40f1e307d9803af7b",
         "android_client_info": {
           "package_name": "com.saara.assistant"
         }
       },
-      "oauth_client": [
-        {
-          "client_id": "000000000000-placeholder.apps.googleusercontent.com",
-          "client_type": 3
-        }
-      ],
+      "oauth_client": [],
       "api_key": [
         {
-          "current_key": "AIzaSyD-PLACEHOLDER-FOR-CI-BUILD-ONLY"
+          "current_key": "AIzaSyB5-Cb0Z8Z4PM-EYc624U-jV3viMLEYsAc"
         }
       ],
       "services": {

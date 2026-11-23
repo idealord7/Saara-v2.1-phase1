@@ -12,7 +12,7 @@ data class TaskStep(val id: Long, val goal: String, val tool: String, val args: 
 data class Rule(val id: Long, val text: String, val enabled: Boolean, val ts: Long)
 
 /** Local SQLite store: chat history, learned facts, shop ledger, usage stats, scheduled tasks, task steps. */
-class Db private constructor(c: Context) : SQLiteOpenHelper(c.applicationContext, "saara.db", null, 6) {
+class Db private constructor(c: Context) : SQLiteOpenHelper(c.applicationContext, "saara.db", null, 7) {
   private val appCtx = c.applicationContext
   companion object {
     @Volatile private var inst: Db? = null
@@ -35,11 +35,13 @@ class Db private constructor(c: Context) : SQLiteOpenHelper(c.applicationContext
     }
     if (o < 3) createTaskSteps(d)
     if (o < 6) d.execSQL("CREATE TABLE IF NOT EXISTS rules(id INTEGER PRIMARY KEY AUTOINCREMENT, text TEXT, enabled INTEGER, ts INTEGER)")
+    if (o < 7) try { CloudMemory.ensureTables(d) } catch (_: Exception) {}
   }
   private fun createTaskSteps(d: SQLiteDatabase) {
     d.execSQL("CREATE TABLE IF NOT EXISTS task_steps(id INTEGER PRIMARY KEY AUTOINCREMENT, goal TEXT, tool TEXT, args TEXT, result TEXT, ok INTEGER, ts INTEGER)")
     d.execSQL("CREATE INDEX IF NOT EXISTS idx_task_steps_goal ON task_steps(goal)")
     d.execSQL("CREATE TABLE IF NOT EXISTS rules(id INTEGER PRIMARY KEY AUTOINCREMENT, text TEXT, enabled INTEGER, ts INTEGER)")
+    try { CloudMemory.ensureTables(d) } catch (_: Exception) {}
   }
 
   // ---------- chat ----------
@@ -64,6 +66,7 @@ class Db private constructor(c: Context) : SQLiteOpenHelper(c.applicationContext
     val d = writableDatabase
     d.query("learned", arrayOf("id"), "text=?", arrayOf(t), null, null, null).use { if (it.moveToFirst()) return }
     d.insert("learned", null, ContentValues().apply { put("cat", cat.ifBlank { "general" }.lowercase()); put("text", t); put("ts", System.currentTimeMillis()) })
+    try { CloudMemory.upsertMemory(appCtx, MemoryItem(summary=t, contextApp=cat.ifBlank { "general" }, importance=2, createdAt=System.currentTimeMillis())) } catch (_: Exception) {}
   }
   fun facts(): List<Fact> {
     val out = ArrayList<Fact>()
@@ -209,6 +212,15 @@ class Db private constructor(c: Context) : SQLiteOpenHelper(c.applicationContext
     })
     try {
       d.execSQL("DELETE FROM task_steps WHERE id NOT IN (SELECT id FROM task_steps ORDER BY id DESC LIMIT 300)")
+    } catch (_: Exception) {}
+    try {
+      val g = goal.trim(); val t = tool.trim(); val r = result.trim()
+      if (g.isNotEmpty()) {
+        CloudMemory.upsertPlaybook(appCtx, TaskPlaybook(taskName=g.take(120), triggerPattern=g.take(120), steps=listOf("$t ${args.trim()}".trim()), successCount=if(ok)1 else 0, requiresConfirmation=false, updatedAt=System.currentTimeMillis()))
+      }
+      if (!ok) {
+        CloudMemory.upsertMistake(appCtx, MistakeLesson(mistakeSummary="$t failed", whatHappened=r.take(300), wrongBehavior="$t ${args.trim()}".take(300), correctRule="Avoid repeating failed step; try alternative.", occurrenceCount=1, active=true, updatedAt=System.currentTimeMillis()))
+      }
     } catch (_: Exception) {}
     return id
   }

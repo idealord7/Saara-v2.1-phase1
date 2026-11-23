@@ -169,5 +169,6 @@ class CloudSyncRepository private constructor(context: Context) {
   suspend fun restoreAll(): Result<Unit> = runCatching {
     downloadAndMergeMacros().getOrThrow()
     downloadAndMergeRules().getOrThrow()
+    try { CloudMemory.syncAll(app).getOrThrow() } catch (_: Exception) {}
   }
 }

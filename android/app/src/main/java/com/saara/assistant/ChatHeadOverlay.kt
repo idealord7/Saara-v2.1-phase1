@@ -270,8 +270,11 @@ class ChatHeadOverlay(
     header.addView(avatar, LinearLayout.LayoutParams(dp(34), dp(34)))
     val titleCol = LinearLayout(ctx).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(10), 0, 0, 0) }
     titleCol.addView(TextView(ctx).apply { text = "Saara"; setTextColor(0xFFE3E3E3.toInt()); textSize = 15f; typeface = Typeface.DEFAULT_BOLD })
-    val stRow = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
-    val dot = View(ctx).apply { background = oval(0xFF9AA0A6.toInt()) }
+    val stRow = LinearLayout(ctx)
+    stRow.orientation = LinearLayout.HORIZONTAL
+    stRow.gravity = Gravity.CENTER_VERTICAL
+    val dot = View(ctx)
+    dot.background = oval(0xFF9AA0A6.toInt())
     statusDot = dot
     stRow.addView(dot, LinearLayout.LayoutParams(dp(8), dp(8)))
     val st = TextView(ctx).apply { text = "Ready"; setTextColor(0xFF9AA0A6.toInt()); textSize = 11f; setPadding(dp(5), 0, 0, 0); maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.END }
