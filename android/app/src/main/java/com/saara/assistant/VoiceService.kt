@@ -317,7 +317,22 @@ class VoiceService : Service() {
   }
 
   fun onNotification(key: String, pkg: String, title: String, text: String) {
-    Bus.add("system", "A notification arrived from $pkg. Its contents were kept on this device.", true)
+    val app = when (pkg) {
+      "com.whatsapp" -> "WhatsApp"
+      "com.whatsapp.w4b" -> "WhatsApp Business"
+      "org.telegram.messenger", "org.telegram.messenger.web" -> "Telegram"
+      "com.facebook.orca" -> "Messenger"
+      "com.instagram.android" -> "Instagram"
+      else -> pkg
+    }
+    val msg = "[Notification] app=$app sender=${title.ifBlank { "unknown" }} key=$key text=${text.take(800)}"
+    Bus.add("system", msg, true)
+    // If Saara is running live, let her handle/reply instantly (screen off supported by foreground service).
+    if (running && ready) {
+      startSession()
+      tellModel("Incoming notification for you to handle if appropriate. $msg
+If the user wants auto-replies or this needs a response, use reply_notification with key='$key' and sender='${title.replace("'","")}'. Keep reply natural and follow rules.")
+    }
   }
 
   // ---------- Wake/idle + continuous conversation (software gating) ----------
@@ -756,7 +771,7 @@ class VoiceService : Service() {
       "Do not store personal facts in Gemini. The app stores Learning/Rules locally on the phone. " +
       "SELF-LEARNING: before repeating a multi-step task, call recall_task to check which steps worked or failed. After solving a new task or discovering a better method, call remember_task with concise working steps. Never put contacts, messages, ledger data, URLs, or screen text into remember_task. " +
       "Do not ask for private shop ledger details. Local ledger data is not sent to Gemini. " +
-      "Live camera and screen frames are sent to Gemini only while the user turns camera or screen sharing ON; the user can turn them off at any time. While Screen automation is ON, on-device tool results may include screen text so you can complete the task; private local database contents (Learning, Knowledge, contacts, messages, tasks, fetched pages) are withheld. Links and spreadsheet data are fetched and stored locally by the app, not by Gemini. " +
+      "Live camera and screen frames are sent to Gemini only while the user turns camera or screen sharing ON; the user can turn them off at any time. While Screen automation is ON, on-device tool results may include screen text so you can complete the task. Contacts, SMS, call log, and notification contents may be accessed only when the user asks or when handling an incoming notification/reply; use them only for the requested task and keep responses concise. Links and spreadsheet data are fetched and stored locally by the app, not by Gemini. " +
       if (taskMemory.isBlank()) "" else "The short task-memory hints below contain goal names, tool names and outcomes with numbers/emails redacted; they do not contain contacts, messages, ledger data, or screen text.\n$taskMemory"
     val rules = try { Db.get(this).rulesPrompt() } catch (_: Exception) { "" }
     val s = JSONObject()

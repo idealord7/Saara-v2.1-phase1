@@ -9,8 +9,10 @@ import android.hardware.camera2.CameraManager
 import android.media.AudioManager
 import android.net.Uri
 import android.os.Build
+import android.provider.CallLog
 import android.provider.ContactsContract
 import android.provider.MediaStore
+import android.provider.Telephony
 import android.text.Html
 import okhttp3.OkHttpClient
 import okhttp3.Dns
@@ -22,6 +24,9 @@ import android.telephony.SmsManager
 import androidx.core.content.ContextCompat
 import org.json.JSONArray
 import org.json.JSONObject
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import java.util.concurrent.Callable
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
@@ -32,7 +37,7 @@ import java.util.concurrent.TimeoutException
 /** Everything Saara can do on the phone, natively (no Termux needed). */
 object Tools {
   fun declarations(): JSONArray = JSONArray("""[{"functionDeclarations":[
-{"name":"device_control","description":"Phone controls. action is one of: torch_on, torch_off, volume_up, volume_down, volume_set (level 0-100), open_app (target = app name, e.g. WhatsApp, WhatsApp Business, Instagram, Camera), open_camera, take_photo (opens the camera AND presses the shutter by itself; text = front for a selfie), call (target = contact name or number), answer_call (answers the ringing incoming call), end_call, reject_call, sms (target + text), wifi_panel, bluetooth_panel (opens the system panel; then use ui_action tap_text to flip the switch). open_app returns the new screen contents. Ask once only for destructive/irreversible steps or genuinely unclear targets; clear calls, messages, app opens, taps and typing can proceed.","parameters":{"type":"OBJECT","properties":{"action":{"type":"STRING"},"target":{"type":"STRING"},"text":{"type":"STRING"},"level":{"type":"NUMBER"},"confirmed":{"type":"BOOLEAN"}},"required":["action"]}},
+{"name":"device_control","description":"Phone controls. action is one of: torch_on, torch_off, volume_up, volume_down, volume_set (level 0-100), open_app (target = app name, e.g. WhatsApp, WhatsApp Business, Instagram, Camera), open_camera, take_photo (opens the camera AND presses the shutter by itself; text = front for a selfie), call (target = contact name or number), answer_call, end_call, reject_call, sms (target + text), read_sms (target optional contact/name/number, limit), read_call_log (target optional, limit), read_contacts (target query optional, limit), wifi_panel, bluetooth_panel. open_app returns the new screen contents. Use read_* actions when user asks what messages/calls/contacts are on the phone. Ask once only for destructive/irreversible steps or genuinely unclear targets; clear calls, messages, reads, app opens, taps and typing can proceed.","parameters":{"type":"OBJECT","properties":{"action":{"type":"STRING"},"target":{"type":"STRING"},"text":{"type":"STRING"},"level":{"type":"NUMBER"},"limit":{"type":"NUMBER"},"confirmed":{"type":"BOOLEAN"}},"required":["action"]}},
 {"name":"ui_action","description":"Control the screen via accessibility. EVERY op returns the new screen contents, so you can keep going without asking again. op: dump_ui, dump_small, list_fields (returns structured editable fields: index,id,resource_id,label,hint,desc,value,focused,bounds), tap_text, tap_id, tap_xy, double_tap, long_press, type, clear_text, select_all, copy_text, paste, enter, swipe, scroll_down, scroll_up, wait, wait_text, back, home, recents, notifications, shutter, flip_camera. FORM/MULTI-FIELD RULES (STRICT): before filling any form with 2+ inputs call list_fields and plan mapping. Enter values ONE FIELD AT A TIME: target the exact field with field_index or field_id or field_label, focus/verify target, then type only that field's value (replace=true to overwrite). If the UI shows multiple editable fields, do NOT guess and do NOT dump/paste combined multi-field data into one field; bulk multi-line text into one field is blocked unless allow_bulk=true is explicitly required. If you cannot confidently match a value to a specific field or mapping is ambiguous, STOP for that item and ask the user to clarify (report the available fields). Reporting: state clearly what was entered into which field. Ask once only for destructive/irreversible steps or genuinely unclear targets; clear taps/typing can proceed field-by-field.","parameters":{"type":"OBJECT","properties":{"op":{"type":"STRING"},"text":{"type":"STRING"},"id":{"type":"STRING"},"x":{"type":"NUMBER"},"y":{"type":"NUMBER"},"x2":{"type":"NUMBER"},"y2":{"type":"NUMBER"},"direction":{"type":"STRING"},"ms":{"type":"NUMBER"},"timeout":{"type":"NUMBER"},"replace":{"type":"BOOLEAN"},"field_index":{"type":"NUMBER"},"field_id":{"type":"STRING"},"field_label":{"type":"STRING"},"allow_bulk":{"type":"BOOLEAN"},"confirmed":{"type":"BOOLEAN"}},"required":["op"]}},
 {"name":"remember","description":"Save something you learned about the user so you keep improving: a preference, habit, routine, person/relationship, a correction, or HOW they like tasks done. Call it quietly whenever the user reveals such a thing; do not announce it. category = preference | habit | routine | person | correction | command_style | shop | general.","parameters":{"type":"OBJECT","properties":{"fact":{"type":"STRING"},"category":{"type":"STRING"}},"required":["fact"]}},
 {"name":"recall","description":"Search everything you have learned about the user (older than the list in your instructions). query = keywords.","parameters":{"type":"OBJECT","properties":{"query":{"type":"STRING"}},"required":["query"]}},
@@ -50,7 +55,8 @@ object Tools {
 {"name":"schedule_task","description":"Schedule a task or reminder for later. text = what to do/say when it fires. Give in_minutes OR at (HH:mm 24h, or yyyy-MM-dd HH:mm). repeat = none | hourly | daily | weekly.","parameters":{"type":"OBJECT","properties":{"text":{"type":"STRING"},"in_minutes":{"type":"NUMBER"},"at":{"type":"STRING"},"repeat":{"type":"STRING"},"confirmed":{"type":"BOOLEAN"}},"required":["text"]}},
 {"name":"list_tasks","description":"List scheduled tasks.","parameters":{"type":"OBJECT","properties":{}}},
 {"name":"cancel_task","description":"Cancel a scheduled task by id. Cancellation needs confirmation.","parameters":{"type":"OBJECT","properties":{"id":{"type":"NUMBER"},"confirmed":{"type":"BOOLEAN"}},"required":["id"]}},
-{"name":"reply_notification","description":"Reply to an incoming notification (WhatsApp, WhatsApp Business, Telegram ...) by its key. If the reply text or recipient is unclear, ask first; otherwise send.","parameters":{"type":"OBJECT","properties":{"key":{"type":"STRING"},"text":{"type":"STRING"},"confirmed":{"type":"BOOLEAN"}},"required":["key","text"]}},
+{"name":"reply_notification","description":"Reply to an incoming notification by key/sender (WhatsApp, WhatsApp Business, Telegram, SMS app notifications, etc.). Use when user asks to reply to a received message/notification. If key is unknown, provide sender/name; tool will target latest matching cached notification. Works via Notification access without opening app.","parameters":{"type":"OBJECT","properties":{"key":{"type":"STRING"},"sender":{"type":"STRING"},"text":{"type":"STRING"},"confirmed":{"type":"BOOLEAN"}},"required":["text"]}},
+{"name":"send_direct_message","description":"Send a message directly without opening apps when possible. channel: sms | whatsapp | whatsapp_business | telegram. target=contact name or number. For sms sends via SMS manager. For WhatsApp/Telegram uses latest notification reply action for that sender/chat (no app open) and reports if no replyable notification exists.","parameters":{"type":"OBJECT","properties":{"channel":{"type":"STRING"},"target":{"type":"STRING"},"text":{"type":"STRING"},"confirmed":{"type":"BOOLEAN"}},"required":["channel","target","text"]}},
 {"name":"fetch_url","description":"Fetch a public webpage or Google Sheet shared as 'Anyone with the link' and return its readable text.","parameters":{"type":"OBJECT","properties":{"url":{"type":"STRING"}},"required":["url"]}}
 ]}]""")
 
@@ -191,6 +197,7 @@ object Tools {
         "list_tasks" -> Scheduler.list(c)
         "cancel_task" -> { Scheduler.cancel(c, a.optLong("id")); "cancelled" }
         "reply_notification" -> if (!Prefs.on(c, "f_notif", false)) off("Notification auto-reply") else SaaraNotifications.reply(a.optString("key"), a.optString("sender"), a.optString("text").trim().ifBlank { return "error: reply text is empty" })
+        "send_direct_message" -> sendDirect(c, a)
         "fetch_url" -> fetchUrlText(a.optString("url"))
         else -> "unknown tool"
       }
@@ -210,6 +217,9 @@ object Tools {
     if (name in setOf("shop_report", "shop_record", "list_tasks", "fetch_url")) {
       return "Completed on this phone. Private local contents were kept on the device."
     }
+    if (name in setOf("device_control", "reply_notification", "send_direct_message")) return result.take(6000)
+    // User explicitly asked for on-device reads/actions (contacts/messages/call log/notifications).
+    // Keep output bounded but do not replace with a generic privacy placeholder.
     return redact(result).take(6000)
   }
 
@@ -245,6 +255,107 @@ object Tools {
       if (it.moveToFirst()) return it.getString(0)
     }
     return null
+  }
+
+  private fun fmtTs(ms: Long): String = if (ms <= 0L) "unknown time" else SimpleDateFormat("dd MMM HH:mm", Locale.getDefault()).format(Date(ms))
+
+  private fun readContacts(c: Context, q: String, limit: Int): String {
+    if (!has(c, Manifest.permission.READ_CONTACTS)) return need("Contacts")
+    val l = limit.coerceIn(1, 50)
+    val out = ArrayList<String>()
+    val uri = ContactsContract.CommonDataKinds.Phone.CONTENT_URI
+    val proj = arrayOf(ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME, ContactsContract.CommonDataKinds.Phone.NUMBER)
+    val sel = if (q.isBlank()) null else "${ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME} LIKE ? OR ${ContactsContract.CommonDataKinds.Phone.NUMBER} LIKE ?"
+    val args = if (q.isBlank()) null else arrayOf("%$q%", "%$q%")
+    c.contentResolver.query(uri, proj, sel, args, ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME + " ASC LIMIT $l")?.use { cur ->
+      while (cur.moveToNext()) {
+        val name = cur.getString(0).orEmpty()
+        val num = cur.getString(1).orEmpty()
+        if (name.isNotBlank() || num.isNotBlank()) out.add("${name.ifBlank { "Unknown" }}: $num")
+      }
+    }
+    return if (out.isEmpty()) "No contacts found" + if (q.isNotBlank()) " for '$q'" else "" else out.joinToString("
+")
+  }
+
+  private fun readCallLog(c: Context, target: String, limit: Int): String {
+    if (!has(c, Manifest.permission.READ_CALL_LOG)) return need("Call log")
+    val l = limit.coerceIn(1, 30)
+    val uri = CallLog.Calls.CONTENT_URI
+    val proj = arrayOf(CallLog.Calls.CACHED_NAME, CallLog.Calls.NUMBER, CallLog.Calls.TYPE, CallLog.Calls.DATE, CallLog.Calls.DURATION)
+    val sel = if (target.isBlank()) null else "${CallLog.Calls.CACHED_NAME} LIKE ? OR ${CallLog.Calls.NUMBER} LIKE ?"
+    val args = if (target.isBlank()) null else arrayOf("%$target%", "%$target%")
+    val out = ArrayList<String>()
+    c.contentResolver.query(uri, proj, sel, args, CallLog.Calls.DATE + " DESC LIMIT $l")?.use { cur ->
+      while (cur.moveToNext()) {
+        val name = cur.getString(0).orEmpty()
+        val num = cur.getString(1).orEmpty()
+        val type = when (cur.getInt(2)) {
+          CallLog.Calls.INCOMING_TYPE -> "incoming"
+          CallLog.Calls.OUTGOING_TYPE -> "outgoing"
+          CallLog.Calls.MISSED_TYPE -> "missed"
+          CallLog.Calls.REJECTED_TYPE -> "rejected"
+          else -> "call"
+        }
+        val ts = cur.getLong(3)
+        val dur = cur.getLong(4)
+        val who = if (name.isNotBlank()) "$name ($num)" else num.ifBlank { "unknown" }
+        out.add("$type · $who · ${fmtTs(ts)} · ${dur}s")
+      }
+    }
+    return if (out.isEmpty()) "No call log entries found" + if (target.isNotBlank()) " for '$target'" else "" else out.joinToString("
+")
+  }
+
+  private fun readSms(c: Context, target: String, limit: Int): String {
+    if (!has(c, Manifest.permission.READ_SMS)) return need("SMS read")
+    val l = limit.coerceIn(1, 30)
+    val uri = Telephony.Sms.CONTENT_URI
+    val proj = arrayOf(Telephony.Sms.ADDRESS, Telephony.Sms.BODY, Telephony.Sms.DATE, Telephony.Sms.TYPE)
+    val sel = if (target.isBlank()) null else "${Telephony.Sms.ADDRESS} LIKE ? OR ${Telephony.Sms.BODY} LIKE ?"
+    val args = if (target.isBlank()) null else arrayOf("%$target%", "%$target%")
+    val out = ArrayList<String>()
+    c.contentResolver.query(uri, proj, sel, args, Telephony.Sms.DATE + " DESC LIMIT $l")?.use { cur ->
+      while (cur.moveToNext()) {
+        val addr = cur.getString(0).orEmpty()
+        val body = cur.getString(1).orEmpty().replace("
+", " ").take(180)
+        val ts = cur.getLong(2)
+        val type = when (cur.getInt(3)) { Telephony.Sms.MESSAGE_TYPE_INBOX -> "in"; Telephony.Sms.MESSAGE_TYPE_SENT -> "out"; else -> "sms" }
+        out.add("$type · ${addr.ifBlank { "unknown" }} · ${fmtTs(ts)} · $body")
+      }
+    }
+    return if (out.isEmpty()) "No SMS messages found" + if (target.isNotBlank()) " for '$target'" else "" else out.joinToString("
+")
+  }
+
+  private fun sendDirect(c: Context, a: JSONObject): String {
+    val channel = a.optString("channel").trim().lowercase()
+    val target = a.optString("target").trim()
+    val text = a.optString("text").trim()
+    if (target.isBlank() || text.isBlank()) return "error: target and text are required"
+    return when (channel) {
+      "sms", "text", "message" -> {
+        if (!Prefs.on(c, "f_phone", true)) return off("Phone (calls & SMS)")
+        if (!has(c, Manifest.permission.SEND_SMS)) return need("SMS")
+        val n = number(c, target) ?: return if (has(c, Manifest.permission.READ_CONTACTS)) "contact not found: $target" else need("Contacts")
+        val sm = smsMgr(c)
+        sm.sendMultipartTextMessage(n, null, sm.divideMessage(text), null, null)
+        "sms sent to $n"
+      }
+      "whatsapp", "wa", "whatsapp_business", "wa_business", "wab", "telegram", "notification" -> {
+        if (!Prefs.on(c, "f_notif", false)) return off("Notification auto-reply")
+        val wantPkg = when (channel) {
+          "whatsapp", "wa" -> "com.whatsapp"
+          "whatsapp_business", "wa_business", "wab" -> "com.whatsapp.w4b"
+          "telegram" -> "org.telegram.messenger"
+          else -> ""
+        }
+        val r = SaaraNotifications.replyLatest(target, text, wantPkg)
+        if (r == "replied") r else "$r. If no recent replyable notification exists, ask user to send once or enable notification access."
+      }
+      else -> "unknown channel: $channel (use sms, whatsapp, whatsapp_business, telegram)"
+    }
   }
 
   // ---------- app lookup: handles "WhatsApp Business", Hindi names, typos ----------
@@ -316,6 +427,9 @@ object Tools {
     else if (!Prefs.on(c, "f_device")) return off("Device controls")
     val am = c.getSystemService(AudioManager::class.java)
     when (act) {
+      "read_contacts" -> return readContacts(c, a.optString("target"), a.optInt("limit", 20))
+      "read_sms", "read_messages" -> return readSms(c, a.optString("target"), a.optInt("limit", 20))
+      "read_call_log", "read_calls" -> return readCallLog(c, a.optString("target"), a.optInt("limit", 20))
       "torch_on", "torch_off" -> {
         val cm = c.getSystemService(CameraManager::class.java)
         val id = cm.cameraIdList.firstOrNull { cm.getCameraCharacteristics(it).get(CameraCharacteristics.FLASH_INFO_AVAILABLE) == true } ?: return "this phone has no flashlight"

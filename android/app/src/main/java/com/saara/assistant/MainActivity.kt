@@ -399,9 +399,9 @@ class MainActivity : AppCompatActivity() {
   private fun addFeatures(root: LinearLayout) {
     heading(root, "App features", "Manage Saara permissions and device capabilities here.")
     feature(root, "Device controls", "Torch, volume, open apps, camera photo, Wi-Fi / Bluetooth panels", "f_device", true, { true }, "", {})
-    feature(root, "Phone: calls & SMS", "Call, answer / end calls and send texts by voice", "f_phone", true,
-      { has(Manifest.permission.CALL_PHONE) && has(Manifest.permission.SEND_SMS) && has(Manifest.permission.READ_CONTACTS) && has(Manifest.permission.ANSWER_PHONE_CALLS) },
-      "Grant phone, SMS, contacts & answer calls", { requestPermissions(arrayOf(Manifest.permission.CALL_PHONE, Manifest.permission.SEND_SMS, Manifest.permission.READ_CONTACTS, Manifest.permission.ANSWER_PHONE_CALLS), 2) })
+    feature(root, "Phone: calls, SMS & logs", "Call, answer/end calls, send/read texts, read call log and contacts by voice", "f_phone", true,
+      { has(Manifest.permission.CALL_PHONE) && has(Manifest.permission.SEND_SMS) && has(Manifest.permission.READ_SMS) && has(Manifest.permission.READ_CONTACTS) && has(Manifest.permission.ANSWER_PHONE_CALLS) && has(Manifest.permission.READ_CALL_LOG) },
+      "Grant phone, SMS, contacts & call log", { requestPermissions(arrayOf(Manifest.permission.CALL_PHONE, Manifest.permission.SEND_SMS, Manifest.permission.READ_SMS, Manifest.permission.READ_CONTACTS, Manifest.permission.ANSWER_PHONE_CALLS, Manifest.permission.READ_CALL_LOG), 2) })
     feature(root, "Screen automation", "Read the screen, tap, type, scroll in any app", "f_ui", true, { a11yOn() },
       "Enable in Accessibility settings", {
         toast("Turn on Saara. If Android says 'Restricted setting': App info → ⋮ → Allow restricted settings.")

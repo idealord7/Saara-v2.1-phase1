@@ -92,14 +92,7 @@ class SaaraNotifications : NotificationListenerService() {
 
     fun isConnected() = svc != null
 
-    fun reply(key: String, sender: String, text: String): String {
-      val ctx = svc
-      val target = cachedTarget(key, sender) ?: scan(key, sender)
-      if (target == null) {
-        val msg = "no reply action cached/found for sender='${sender.ifBlank { "unknown" }}' key=$key (notification may be dismissed or expired). Do not retry."
-        log(ctx, "Reply failed: $msg")
-        return msg
-      }
+    private fun sendReply(ctx: android.content.Context?, target: ReplyTarget, sender: String, text: String): String {
       val a = target.action
       val ri = a.remoteInputs?.firstOrNull()
       if (ri == null) {
@@ -107,9 +100,7 @@ class SaaraNotifications : NotificationListenerService() {
         log(ctx, "Reply failed: $msg")
         return msg
       }
-      if (ctx == null) {
-        return "Notification access is not active. Ask the user to enable Notification access in the Saara app."
-      }
+      if (ctx == null) return "Notification access is not active. Ask the user to enable Notification access in the Saara app."
       val i = Intent(); val b = Bundle().apply { putCharSequence(ri.resultKey, text) }
       RemoteInput.addResultsToIntent(a.remoteInputs, i, b)
       if (Build.VERSION.SDK_INT >= 28) RemoteInput.setResultsSource(i, RemoteInput.SOURCE_FREE_FORM_INPUT)
@@ -123,6 +114,36 @@ class SaaraNotifications : NotificationListenerService() {
         log(ctx, "Reply failed: $msg")
         msg
       }
+    }
+
+    fun reply(key: String, sender: String, text: String): String {
+      val ctx = svc
+      val target = cachedTarget(key, sender) ?: scan(key, sender)
+      if (target == null) {
+        val msg = "no reply action cached/found for sender='${sender.ifBlank { "unknown" }}' key=$key (notification may be dismissed or expired). Do not retry."
+        log(ctx, "Reply failed: $msg")
+        return msg
+      }
+      return sendReply(ctx, target, sender, text)
+    }
+
+    fun replyLatest(sender: String, text: String, pkgFilter: String = ""): String {
+      val ctx = svc
+      val want = normSender(sender)
+      val now = System.currentTimeMillis()
+      val target = synchronized(cache) {
+        cache.values.asSequence()
+          .filter { now - it.ts <= 30 * 60_000L }
+          .filter { pkgFilter.isBlank() || it.pkg == pkgFilter }
+          .filter { want.isBlank() || normSender(it.sender).contains(want) || want.contains(normSender(it.sender)) }
+          .maxByOrNull { it.ts }
+      } ?: scan("", sender)?.takeIf { pkgFilter.isBlank() || it.pkg == pkgFilter }
+      if (target == null) {
+        val msg = "no recent replyable notification found for sender='$sender'" + if (pkgFilter.isNotBlank()) " in $pkgFilter" else ""
+        log(ctx, "Reply failed: $msg")
+        return msg
+      }
+      return sendReply(ctx, target, sender, text)
     }
 
     /** Caller name/number shown on the active incoming-call notification, if notification access is enabled. */
