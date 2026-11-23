@@ -5,6 +5,14 @@ plugins {
   id 'com.google.gms.google-services'
 }
 
+kapt {
+  correctErrorTypes = true
+  arguments {
+    arg("room.incremental", "true")
+    arg("room.expandProjection", "true")
+  }
+}
+
 android {
   namespace 'com.saara.assistant'
   compileSdk 34

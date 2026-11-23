@@ -1,5 +1,6 @@
 package com.saara.assistant
 
+import androidx.room.ColumnInfo
 import androidx.room.Entity
 import androidx.room.PrimaryKey
 
@@ -9,8 +10,13 @@ import androidx.room.PrimaryKey
  */
 @Entity(tableName = "macros")
 data class Macro(
-  @PrimaryKey val macroId: String,
+  @PrimaryKey
+  @ColumnInfo(name = "macroId")
+  val macroId: String,
+  @ColumnInfo(name = "actionText")
   val actionText: String,
-  val trigger: String = "",
-  val updatedAt: Long = System.currentTimeMillis()
+  @ColumnInfo(name = "trigger")
+  val trigger: String,
+  @ColumnInfo(name = "updatedAt")
+  val updatedAt: Long,
 )
