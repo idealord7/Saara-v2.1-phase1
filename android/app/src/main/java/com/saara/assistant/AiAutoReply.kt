@@ -93,10 +93,12 @@ object AiAutoReply {
     val cutoff = System.currentTimeMillis() - windowMin.coerceIn(1, 120) * 60_000L
     return synchronized(log) { log.count { it.contains("Replied", true) && it.contains("· $sender ·", true) && tsFromLog(it) >= cutoff } }
   }
-  private fun tsFromLog(line: String): Long = try {
-    val m = Regex("^\\[(.*?)\\]").find(line)?.groupValues?.getOrNull(1) ?: return 0L
-    SimpleDateFormat("dd MMM HH:mm:ss", Locale.getDefault()).parse(m)?.time ?: 0L
-  } catch (_: Exception) { 0L }
+  private fun tsFromLog(line: String): Long {
+    return try {
+      val m = Regex("^\\[(.*?)\\]").find(line)?.groupValues?.getOrNull(1) ?: return 0L
+      SimpleDateFormat("dd MMM HH:mm:ss", Locale.getDefault()).parse(m)?.time ?: 0L
+    } catch (_: Exception) { 0L }
+  }
   private fun looksLikeLoop(sender: String, incoming: String): Boolean {
     val n = normForCompare(incoming)
     if (n.isBlank()) return true
@@ -256,8 +258,8 @@ object AiAutoReply {
     val threshold = applicable.minOfOrNull { it.confidenceThreshold.coerceIn(0,100) } ?: 75
     val rateLimit = applicable.minOfOrNull { it.rateLimitPerHour.coerceIn(1,60) } ?: 6
     val loopWindow = applicable.maxOfOrNull { it.loopWindowMin.coerceIn(1,120) } ?: 10
-    if (recentReplyCount(c, who, 60) >= rateLimit) return GuardDecision(false, "rate limit reached (${rateLimit}/h)")
-    if (looksLikeLoop(who, text)) return GuardDecision(false, "loop protection: repeated/self-loop conversation detected")
+    if (recentReplyCount(c, sender, 60) >= rateLimit) return GuardDecision(false, "rate limit reached (${rateLimit}/h)")
+    if (looksLikeLoop(sender, text)) return GuardDecision(false, "loop protection: repeated/self-loop conversation detected")
 
     val instr = buildString {
       val ruleInstr = applicable.mapNotNull { it.instruction.takeIf { s -> s.isNotBlank() } }
