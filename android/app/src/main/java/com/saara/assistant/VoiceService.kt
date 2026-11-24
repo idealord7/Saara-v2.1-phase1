@@ -330,8 +330,7 @@ class VoiceService : Service() {
     // If Saara is running live, let her handle/reply instantly (screen off supported by foreground service).
     if (running && ready) {
       startSession()
-      tellModel("Incoming notification for you to handle if appropriate. $msg
-If the user wants auto-replies or this needs a response, use reply_notification with key='$key' and sender='${title.replace("'","")}'. Keep reply natural and follow rules.")
+      tellModel("Incoming notification for you to handle if appropriate. $msg\nIf the user wants auto-replies or this needs a response, use reply_notification with key='$key' and sender='${title.replace("'","")}'. Keep reply natural and follow rules.")
     }
   }
 
