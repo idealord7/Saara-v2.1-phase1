@@ -248,8 +248,7 @@ object Tools {
         if (name.isNotBlank() || num.isNotBlank()) out.add("${name.ifBlank { "Unknown" }}: $num")
       }
     }
-    return if (out.isEmpty()) "No contacts found" + if (q.isNotBlank()) " for '$q'" else "" else out.joinToString("
-")
+    return if (out.isEmpty()) "No contacts found" + if (q.isNotBlank()) " for '$q'" else "" else out.joinToString("\n")
   }
 
   private fun readCallLog(c: Context, target: String, limit: Int): String {
