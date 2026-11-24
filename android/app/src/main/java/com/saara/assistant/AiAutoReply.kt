@@ -166,7 +166,7 @@ object AiAutoReply {
     if (inLen in 4..240) score += 8
     if (outLen in 2..280) score += 8
     if (Regex("\\b(otp|password|pin|cvv|bank|upi|pay|payment|address|card|login)\\b", RegexOption.IGNORE_CASE).containsMatchIn(incoming)) score -= 25
-    if (Regex("\?").containsMatchIn(incoming) && outLen < 2) score -= 20
+    if (incoming.contains("?") && outLen < 2) score -= 20
     if (d.instruction.contains("vip", true)) score += 5
     if (looksLikeLoop("sender", incoming)) score -= 15
     return score.coerceIn(0, 100)
