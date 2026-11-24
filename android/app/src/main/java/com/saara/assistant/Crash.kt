@@ -15,6 +15,9 @@ import java.util.Locale
 /** Writes uncaught-exception reports to Downloads so they can be read without ADB. */
 object Crash {
   @Synchronized
+  fun save(c: Context, msg: String) { save(c, RuntimeException(msg), msg) }
+
+  @Synchronized
   fun save(c: Context, t: Throwable, tag: String) {
     val name = "SaaraCrash-" + SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(Date()) + ".txt"
     val body = buildString {
