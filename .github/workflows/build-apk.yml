@@ -2,7 +2,7 @@ name: Build Android APK
 
 on:
   push:
-    branches: [ main, master, fix/whatsapp-gemini-autoreply ]
+    branches: [ main, master, fix/whatsapp-gemini-autoreply, fix/firebase-data ]
   workflow_dispatch:
 
 jobs:
