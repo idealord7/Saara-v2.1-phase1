@@ -204,7 +204,7 @@ object Tools {
     if (name !in readOnly && Prefs.on(c, "learn_tasks", true)) {
       try { TaskLearning.note(c, Bus.lastUser, name, a, result) } catch (_: Exception) {}
     }
-    if (name in setOf("ui_action","device_control","send_direct_message","reply_notification","request_screen_share","stop_screen_share")) {
+    if (Prefs.on(c, "f_post_verify", true) && name in setOf("ui_action","device_control","send_direct_message","reply_notification","request_screen_share","stop_screen_share")) {
       try { PostTaskVerifier.verify(c, Bus.lastUser, name, a.toString(), result, ok) } catch (_: Exception) {}
     }
     return result

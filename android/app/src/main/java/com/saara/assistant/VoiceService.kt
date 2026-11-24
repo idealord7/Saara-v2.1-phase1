@@ -347,9 +347,13 @@ class VoiceService : Service() {
       if (speakingNow) {
         val likelyEcho = (lastReplyNorm.isNotEmpty() && (norm == lastReplyNorm || ((now - lastReplyAt) < 7000L && (lastReplyNorm.contains(norm) || norm.contains(lastReplyNorm)) && norm.length > 2)))
         if (likelyEcho) return
-        // Barge-in: user intentionally speaking over Saara.
-        stopSpeaking()
-        Bus.add("system", "Barge-in detected; listening to new command.", false)
+        if (Prefs.on(this, "f_barge_in", true)) {
+          // Barge-in: user intentionally speaking over Saara.
+          stopSpeaking()
+          Bus.add("system", "Barge-in detected; listening to new command.", false)
+        } else {
+          return
+        }
       } else {
         if (lastReplyNorm.isNotEmpty() && norm == lastReplyNorm && (now - lastReplyAt) < 10000L) return
         if (lastReplyNorm.isNotEmpty() && (now - lastReplyAt) < 7000L && (lastReplyNorm.contains(norm) || norm.contains(lastReplyNorm)) && norm.length > 2) return
@@ -787,8 +791,9 @@ class VoiceService : Service() {
     ready = false
     if (!running) return
     val transient = Regex("503|unavailable|high demand|timeout|temporar|network|reset|closed", RegexOption.IGNORE_CASE).containsMatchIn(msg)
-    Bus.add("system", if (transient) "$msg — using offline-safe fallback and retrying." else msg, true)
-    if (transient) {
+    val retryEnabled = Prefs.on(this, "f_offline_retry", true)
+    Bus.add("system", if (transient && retryEnabled) "$msg — using offline-safe fallback and retrying." else msg, true)
+    if (transient && retryEnabled) {
       Bus.setStatus("Retrying / 503 wait")
       val delay = (1500L * retries.coerceAtLeast(1)).coerceAtMost(12000L)
       retries++
@@ -796,7 +801,8 @@ class VoiceService : Service() {
       return
     }
     if (++retries > 3) { Bus.add("system", "Stopped after repeated failures. Check API key / model name in Settings.", true); main.post { stopSelf() }; return }
-    Bus.setStatus("Retrying / 503 wait"); main.postDelayed({ connect() }, 3000)
+    if (retryEnabled) { Bus.setStatus("Retrying / 503 wait"); main.postDelayed({ connect() }, 3000) }
+    else { Bus.setStatus("Disconnected"); Bus.add("system", "Auto-retry is off. Tap Start/reconnect manually.", true) }
   }
 
   private fun setup(): String {

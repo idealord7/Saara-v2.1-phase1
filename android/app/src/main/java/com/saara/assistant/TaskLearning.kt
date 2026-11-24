@@ -35,12 +35,13 @@ object TaskLearning {
   }
 
   fun note(c: Context, goal: String, tool: String, args: JSONObject, result: String) {
+    if (!Prefs.on(c, "learn_tasks", true)) return
     val g = clean(goal, 180)
     if (g.isBlank() || tool.isBlank()) return
     val ok = isSuccess(result)
     val db = Db.get(c)
     db.taskStepAdd(g, tool.take(40), safeArgs(args), clean(result, 700), ok)
-    if (!ok) {
+    if (!ok && Prefs.on(c, "f_mistake_lessons", true)) {
       val lesson = "When ${tool} failed for '$g', avoid repeating same args blindly; check screen/state, use alternate path, and verify before retry. Failure: ${clean(result, 140)}"
       db.factAdd("mistakes_and_lessons", lesson, "self_correction")
       try { db.ruleAdd("Guardrail: if ${tool} fails, verify screen/state and try an alternate path before repeating.") } catch (_: Exception) {}

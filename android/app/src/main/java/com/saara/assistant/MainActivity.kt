@@ -1,6 +1,7 @@
 package com.saara.assistant
 import android.Manifest
 import android.content.Intent
+import android.os.PowerManager
 import android.content.pm.PackageManager
 import android.graphics.Color
 import android.graphics.Typeface
@@ -397,63 +398,128 @@ class MainActivity : AppCompatActivity() {
   }
 
   private fun addFeatures(root: LinearLayout) {
-    heading(root, "App features", "Manage Saara permissions and device capabilities here.")
-    feature(root, "Device controls", "Torch, volume, open apps, camera photo, Wi-Fi / Bluetooth panels", "f_device", true, { true }, "", {})
-    feature(root, "Phone: calls, SMS & logs", "Call, answer/end calls, send/read texts, read call log and contacts by voice", "f_phone", true,
-      { has(Manifest.permission.CALL_PHONE) && has(Manifest.permission.SEND_SMS) && has(Manifest.permission.READ_SMS) && has(Manifest.permission.READ_CONTACTS) && has(Manifest.permission.ANSWER_PHONE_CALLS) && has(Manifest.permission.READ_CALL_LOG) },
-      "Grant phone, SMS, contacts & call log", { requestPermissions(arrayOf(Manifest.permission.CALL_PHONE, Manifest.permission.SEND_SMS, Manifest.permission.READ_SMS, Manifest.permission.READ_CONTACTS, Manifest.permission.ANSWER_PHONE_CALLS, Manifest.permission.READ_CALL_LOG), 2) })
-    feature(root, "Screen automation", "Read the screen, tap, type, scroll in any app", "f_ui", true, { a11yOn() },
-      "Enable in Accessibility settings", {
-        toast("Turn on Saara. If Android says 'Restricted setting': App info → ⋮ → Allow restricted settings.")
-        startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+    heading(root, "Permissions & System Readiness", "Live status and one-tap shortcuts for required system access.")
+    val ready = card(root)
+    fun statusRow(label: String, ok: Boolean, actionLabel: String, action: () -> Unit): View {
+      val row = LinearLayout(this); row.gravity = Gravity.CENTER_VERTICAL; row.setPadding(0, dp(6), 0, dp(6))
+      val col = LinearLayout(this); col.orientation = LinearLayout.VERTICAL
+      col.addView(tv(label, 14f, TXT, true))
+      col.addView(tv(if (ok) "Ready" else "Action needed", 12f, if (ok) GOOD else WARN))
+      row.addView(col, LinearLayout.LayoutParams(0, -2, 1f))
+      if (!ok) row.addView(btn(actionLabel, SURF2, action), LinearLayout.LayoutParams(-2, -2))
+      return row
+    }
+    updaters.add {
+      ready.removeAllViews()
+      ready.addView(tv("System status", 16f, bold = true))
+      ready.addView(statusRow("Notification Listener", notifOn(), "Open") { startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)) })
+      ready.addView(statusRow("Accessibility Service", a11yOn(), "Open") { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) })
+      ready.addView(statusRow("Overlay permission", Settings.canDrawOverlays(this), "Open") { startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName"))) })
+      val pm = getSystemService(android.os.PowerManager::class.java)
+      val battOk = pm?.isIgnoringBatteryOptimizations(packageName) == true
+      ready.addView(statusRow("Battery optimization exemption", battOk, "Open") {
+        try { startActivity(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:$packageName"))) } catch (_: Exception) { startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)) }
       })
-    feature(root, "Camera & screen sharing", "Send live camera or screen frames to Saara while sharing is ON, so she can complete tasks", "f_share", true,
-      { has(Manifest.permission.CAMERA) }, "Allow camera", { requestPermissions(arrayOf(Manifest.permission.CAMERA), 3) })
-    feature(root, "Incoming call announcements", "Announce the caller, ask answer or reject, and turn on the loudspeaker when no Bluetooth headset is connected.", "f_calls", true,
-      { has(Manifest.permission.READ_PHONE_STATE) && has(Manifest.permission.ANSWER_PHONE_CALLS) },
-      "Grant phone & call info", { requestPermissions(arrayOf(Manifest.permission.READ_PHONE_STATE, Manifest.permission.READ_CALL_LOG, Manifest.permission.ANSWER_PHONE_CALLS), 5) })
-    feature(root, "Clipboard copy & paste", "Copy text and paste it into fields during screen tasks", "f_clipboard", true,
-      { true }, "", {})
-    feature(root, "Task self-learning", "Remember which screen steps worked or failed for repeated tasks. Stored on this phone; only short tool-step hints are shared to plan similar tasks.", "learn_tasks", true,
-      { true }, "", {})
-    feature(root, "Live caption overlay", "Transparent text over other apps showing what Saara hears, says and does", "f_overlay", true,
-      { Settings.canDrawOverlays(this) }, "Allow display over other apps",
-      { startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName"))) })
-    feature(root, "Notification auto-reply", "Read incoming message notifications and auto-reply with AI/rules, even screen-off. Uses Notification access (no app open).", "f_notif", false, { notifOn() },
+      ready.addView(statusRow("Phone/SMS/Contacts/Call log", has(Manifest.permission.CALL_PHONE) && has(Manifest.permission.SEND_SMS) && has(Manifest.permission.READ_SMS) && has(Manifest.permission.READ_CONTACTS) && has(Manifest.permission.READ_CALL_LOG), "Grant") {
+        requestPermissions(arrayOf(Manifest.permission.CALL_PHONE, Manifest.permission.SEND_SMS, Manifest.permission.READ_SMS, Manifest.permission.READ_CONTACTS, Manifest.permission.ANSWER_PHONE_CALLS, Manifest.permission.READ_CALL_LOG, Manifest.permission.READ_PHONE_STATE), 2)
+      })
+    }
+    root.addView(ready)
+
+    heading(root, "Auto-Reply & Messaging Rules", "Control when and how Saara replies to messaging notifications.")
+    feature(root, "Notification auto-reply master", "Read incoming notifications and auto-reply with rules/AI. Works with Notification Access.", "f_notif", false, { notifOn() },
       "Enable Notification access", { startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)) }) { c ->
-      val names = edit("Fallback sender names (comma separated) when no Replying Rules match")
-      names.setText(Prefs.plain(this).getString("reply_names", ""))
-      names.doAfterTextChanged { Prefs.plain(this).edit().putString("reply_names", it.toString()).apply() }
-      c.addView(names)
       val aiRow = LinearLayout(this); aiRow.gravity = Gravity.CENTER_VERTICAL
       val aiLbl = tv("AI smart auto-reply (Gemini)", 14f, TXT)
       val aiSw = Switch(this); aiSw.isChecked = Prefs.on(this, "f_ai_reply", false)
       aiSw.setOnCheckedChangeListener { _, v -> Prefs.plain(this).edit().putBoolean("f_ai_reply", v).apply() }
-      aiRow.addView(aiLbl, LinearLayout.LayoutParams(0, -2, 1f)); aiRow.addView(aiSw)
-      c.addView(aiRow)
+      aiRow.addView(aiLbl, LinearLayout.LayoutParams(0, -2, 1f)); aiRow.addView(aiSw); c.addView(aiRow)
+
       val grpRow = LinearLayout(this); grpRow.gravity = Gravity.CENTER_VERTICAL
-      val grpLbl = tv("Reply in group chats too (fallback)", 14f, TXT)
+      val grpLbl = tv("Reply in group chats (fallback)", 14f, TXT)
       val grpSw = Switch(this); grpSw.isChecked = Prefs.on(this, "reply_groups", false)
       grpSw.setOnCheckedChangeListener { _, v -> Prefs.plain(this).edit().putBoolean("reply_groups", v).apply() }
-      grpRow.addView(grpLbl, LinearLayout.LayoutParams(0, -2, 1f)); grpRow.addView(grpSw)
-      c.addView(grpRow)
-      c.addView(tv("AI system instructions (how Saara should reply)", 12f, SUB))
-      val prompt = edit("Custom instructions for auto-replies")
-      val cur = Prefs.plain(this).getString("ai_reply_prompt", null)
-      prompt.setText(cur ?: AiAutoReply.defaultPrompt())
-      prompt.minLines = 3
-      prompt.doAfterTextChanged { Prefs.plain(this).edit().putString("ai_reply_prompt", it.toString()).apply() }
-      c.addView(prompt)
-      c.addView(tv("Replying Rules (new): configure allow/block apps/senders, group/direct, keywords, quiet hours, screen-off, per-rule instructions.", 11f, SUB))
-      val rrBtn = btn("Manage Replying Rules", SURF2) { showReplyRulesDialog() }
-      val lp = LinearLayout.LayoutParams(-1, -2); lp.topMargin = dp(6); c.addView(rrBtn, lp)
-      val logBtn = btn("View auto-reply logs", SURF2) { showAutoReplyLogs() }
-      c.addView(logBtn, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(6) })
+      grpRow.addView(grpLbl, LinearLayout.LayoutParams(0, -2, 1f)); grpRow.addView(grpSw); c.addView(grpRow)
+
+      c.addView(tv("Fallback sender names (CSV, when no rules match)", 12f, SUB))
+      val names = edit("e.g. Mom, +9198..., WhatsApp"); names.setText(Prefs.plain(this).getString("reply_names", ""))
+      names.doAfterTextChanged { Prefs.plain(this).edit().putString("reply_names", it.toString()).apply() }; c.addView(names)
+
+      c.addView(tv("AI system instructions", 12f, SUB))
+      val prompt = edit("Custom instructions for auto-replies"); prompt.minLines = 3
+      prompt.setText(Prefs.plain(this).getString("ai_reply_prompt", null) ?: AiAutoReply.defaultPrompt())
+      prompt.doAfterTextChanged { Prefs.plain(this).edit().putString("ai_reply_prompt", it.toString()).apply() }; c.addView(prompt)
+
+      fun numSetting(label:String, key:String, def:Int, min:Int, max:Int) {
+        c.addView(tv("$label: ${Prefs.plain(this).getInt(key,def)}", 12f, SUB))
+        val s = SeekBar(this); s.max = max-min; s.progress = (Prefs.plain(this).getInt(key,def)-min).coerceIn(0,max-min)
+        s.setOnSeekBarChangeListener(object: SeekBar.OnSeekBarChangeListener{
+          override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) { if(fromUser){ Prefs.plain(this@MainActivity).edit().putInt(key,min+progress).apply(); refresh() } }
+          override fun onStartTrackingTouch(seekBar: SeekBar?) {}
+          override fun onStopTrackingTouch(seekBar: SeekBar?) {}
+        }); c.addView(s)
+      }
+      numSetting("Default confidence threshold (uncertain->draft)", "ai_reply_confidence", 75, 0, 100)
+      numSetting("Default rate limit / hour / sender", "ai_reply_rate_limit", 6, 1, 30)
+      numSetting("Default anti-loop window (minutes)", "ai_reply_loop_min", 10, 1, 120)
+
+      val rrBtn = btn("Manage Replying Rules (per-app/sender/quiet/chat/keywords)", SURF2) { showReplyRulesDialog() }
+      c.addView(rrBtn, LinearLayout.LayoutParams(-1,-2).apply{topMargin=dp(8)})
+      c.addView(btn("View auto-reply logs & drafts", SURF2) { showAutoReplyLogs() }, LinearLayout.LayoutParams(-1,-2).apply{topMargin=dp(6)})
     }
-    feature(root, "Floating bubble", "Messenger-style chat head over any app. Tap to open a floating Saara window, drag to X to dismiss.", "f_bubble", false,
-      { Settings.canDrawOverlays(this) }, "Allow display over other apps",
-      { startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName"))) })
-  }
+
+    heading(root, "Automation & Triggers", "Condition + Trigger + Action rules and task verification.")
+    feature(root, "Post-task verification loop", "After UI/tool actions, verify screen/result and suggest retry path on failure.", "f_post_verify", true, { true }, "", {})
+    feature(root, "Task self-learning / lessons", "Remember what worked/failed and store guardrail lessons from repeated mistakes.", "learn_tasks", true, { true }, "", {})
+    feature(root, "Mistake-to-rule self-correction", "Convert repeated failures into actionable guardrail lessons/rules.", "f_mistake_lessons", true, { true }, "", {})
+    val autoBtnCard = card(root)
+    autoBtnCard.addView(tv("Automation rules", 16f, bold = true))
+    autoBtnCard.addView(tv("Triggers: time, screen_on, screen_off, battery, notification, missed_call, active_app. Conditions: battery<20, screen off, notification contains otp, etc.", 12f, SUB))
+    autoBtnCard.addView(btn("Open Automation Manager", ACC2) { select(2) }, LinearLayout.LayoutParams(-1,-2).apply{topMargin=dp(8)})
+
+    heading(root, "Screen, Vision & Overlay", "Control screen sharing, capture/OCR, and overlay behavior.")
+    feature(root, "Screen automation (Accessibility)", "Read screen, tap/type/scroll in other apps.", "f_ui", true, { a11yOn() }, "Enable Accessibility", { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) })
+    feature(root, "Camera & screen sharing", "Allow live camera/screen frames and one-shot screen capture/OCR.", "f_share", true, { has(Manifest.permission.CAMERA) }, "Allow camera", { requestPermissions(arrayOf(Manifest.permission.CAMERA), 3) })
+    feature(root, "Live caption overlay", "Compact status/caption pill over other apps.", "f_overlay", true, { Settings.canDrawOverlays(this) }, "Allow overlay", { startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName"))) })
+    feature(root, "Floating bubble", "Messenger-style chat head. Tap to open panel; drag to X to hide.", "f_bubble", false, { Settings.canDrawOverlays(this) }, "Allow overlay", { startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName"))) })
+    feature(root, "Clipboard copy & paste", "Allow UI automation copy/paste helpers.", "f_clipboard", true, { true }, "", {})
+    val scr = card(root)
+    scr.addView(tv("ScreenAsk / OCR quick actions", 16f, bold = true))
+    scr.addView(tv("Use when you want Saara to summarize or extract structured fields from the current screen.", 12f, SUB))
+    val rowScr = LinearLayout(this); rowScr.orientation = LinearLayout.HORIZONTAL
+    rowScr.addView(btn("Summarize screen", SURF2) { if (Bus.running) startActivity(Intent(this, ScreenAskActivity::class.java).putExtra("mode","capture").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) else toast("Start Saara first") }, LinearLayout.LayoutParams(0,-2,1f))
+    rowScr.addView(btn("OCR / Autofill extract", SURF2) { if (Bus.running) startActivity(Intent(this, ScreenAskActivity::class.java).putExtra("mode","ocr").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) else toast("Start Saara first") }, LinearLayout.LayoutParams(0,-2,1f))
+    scr.addView(rowScr)
+
+    heading(root, "Memory, Knowledge & Cloud Sync", "Inspect/edit memory, retention, and sync readiness.")
+    feature(root, "Memory pruning (3D+ low-use)", "Auto-prune old unused, unpinned facts.", "f_mem_prune", true, { true }, "", {})
+    val memCard = card(root)
+    memCard.addView(tv("Memory retention & ledger", 16f, bold = true))
+    fun seekSetting(title:String, key:String, def:Int, min:Int, max:Int, suffix:String) {
+      val label = tv("", 13f, TXT)
+      fun paint(){ label.text = "$title: ${Prefs.plain(this).getInt(key,def)}$suffix" }
+      paint(); memCard.addView(label)
+      val sk = SeekBar(this); sk.max=max-min; sk.progress=(Prefs.plain(this).getInt(key,def)-min).coerceIn(0,max-min)
+      sk.setOnSeekBarChangeListener(object: SeekBar.OnSeekBarChangeListener{
+        override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) { if(fromUser){ Prefs.plain(this@MainActivity).edit().putInt(key,min+progress).apply(); paint() } }
+        override fun onStartTrackingTouch(seekBar: SeekBar?) {}
+        override fun onStopTrackingTouch(seekBar: SeekBar?) {}
+      }); memCard.addView(sk)
+    }
+    seekSetting("Fact prune days", "mem_prune_days", 3, 1, 30, " days")
+    seekSetting("Ledger recent rows", "ledger_recent_n", 10, 5, 50, " rows")
+    memCard.addView(btn("Open Memory Inspector", SURF2) { select(1) }, LinearLayout.LayoutParams(-1,-2).apply{topMargin=dp(8)})
+    val cloud = card(root)
+    cloud.addView(tv("Cloud sync (Firebase/Firestore)", 16f, bold = true))
+    cloud.addView(tv("Current build: no Firebase/Firestore dependency detected in this repo. Memory remains local-first. Add Firebase config/dependencies to enable cloud sync controls.", 12f, SUB))
+    cloud.addView(tv("Status: Not configured", 13f, WARN))
+
+    heading(root, "Voice, Wake-Word & Safety", "Wake behavior, interruption, confirmations, and fallback.")
+    feature(root, "Barge-in interruption", "Stop Saara speech when user speaks a new command.", "f_barge_in", true, { true }, "", {})
+    feature(root, "Confirm before calls", "Ask before placing calls.", "confirm_calls", true, { true }, "", {})
+    feature(root, "Confirm before SMS/messages", "Ask before sending SMS/WhatsApp/Telegram/replies.", "confirm_messages", true, { true }, "", {})
+    feature(root, "Offline/503 fallback retry", "Auto-retry transient network/503 errors with backoff and queue pending tasks.", "f_offline_retry", true, { true }, "", {})
+
 
   private fun buildAutomation(): View {
     val (sv, root) = page()

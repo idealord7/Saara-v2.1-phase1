@@ -254,10 +254,13 @@ object AiAutoReply {
     val screenRule = applicable.firstOrNull { it.screenOffOnly }
     if (screenRule != null && !screenOff) return GuardDecision(false, "screen-off-only rule '${screenRule.name.ifBlank { "rule" }}'")
 
+    val defThreshold = Prefs.plain(c).getInt("ai_reply_confidence", 75).coerceIn(0,100)
+    val defRate = Prefs.plain(c).getInt("ai_reply_rate_limit", 6).coerceIn(1,60)
+    val defLoop = Prefs.plain(c).getInt("ai_reply_loop_min", 10).coerceIn(1,120)
     val vip = applicable.any { csvList(it.vipSenders).any { senderNorm.contains(it) } }
-    val threshold = applicable.minOfOrNull { it.confidenceThreshold.coerceIn(0,100) } ?: 75
-    val rateLimit = applicable.minOfOrNull { it.rateLimitPerHour.coerceIn(1,60) } ?: 6
-    val loopWindow = applicable.maxOfOrNull { it.loopWindowMin.coerceIn(1,120) } ?: 10
+    val threshold = applicable.minOfOrNull { it.confidenceThreshold.coerceIn(0,100) } ?: defThreshold
+    val rateLimit = applicable.minOfOrNull { it.rateLimitPerHour.coerceIn(1,60) } ?: defRate
+    val loopWindow = applicable.maxOfOrNull { it.loopWindowMin.coerceIn(1,120) } ?: defLoop
     if (recentReplyCount(c, sender, 60) >= rateLimit) return GuardDecision(false, "rate limit reached (${rateLimit}/h)")
     if (looksLikeLoop(sender, text)) return GuardDecision(false, "loop protection: repeated/self-loop conversation detected")
 

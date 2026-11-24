@@ -52,9 +52,13 @@ object TaskControl {
   fun confirmationFor(name: String, a: JSONObject): String? = when (name) {
     "device_control" -> {
       val act = a.optString("action")
+      val c = try { SaaraAccessibility.instance?.applicationContext } catch (_: Exception) { null }
+      val confirmCall = c?.let { Prefs.on(it, "confirm_calls", true) } ?: true
+      val confirmSms = c?.let { Prefs.on(it, "confirm_sms", true) } ?: true
       when {
         act in GATED_DEVICE -> "end or reject the call"
-        act in RISKY_DEVICE && !a.optBoolean("confirmed", false) -> "$act ${a.optString("target").take(40)}".trim() + " (high-risk action)"
+        act == "call" && confirmCall && !a.optBoolean("confirmed", false) -> "call ${a.optString("target").take(40)} (high-risk action)"
+        act == "sms" && confirmSms && !a.optBoolean("confirmed", false) -> "sms ${a.optString("target").take(40)} (high-risk action)"
         else -> null
       }
     }
@@ -71,8 +75,12 @@ object TaskControl {
     }
     "cancel_task" -> "cancel scheduled task #${a.optLong("id")}"
     "reply_notification", "send_direct_message" -> {
-      val target = a.optString("sender").ifBlank { a.optString("target") }
-      "send message to ${target.ifBlank { "recipient" }} (high-risk action)"
+      val c = try { SaaraAccessibility.instance?.applicationContext } catch (_: Exception) { null }
+      if (c != null && !Prefs.on(c, "confirm_messages", true)) null
+      else {
+        val target = a.optString("sender").ifBlank { a.optString("target") }
+        "send message to ${target.ifBlank { "recipient" }} (high-risk action)"
+      }
     }
     else -> null
   }

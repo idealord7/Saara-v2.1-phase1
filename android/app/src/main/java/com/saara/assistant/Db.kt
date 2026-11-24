@@ -184,8 +184,10 @@ class Db private constructor(c: Context) : SQLiteOpenHelper(c.applicationContext
   fun recall(q: String, limit: Int = 12): List<Fact> {
     val words = q.lowercase().split(Regex("[^\\p{L}\\p{N}]+")).filter { it.length >= 2 }
     val now = System.currentTimeMillis()
-    val cutoff = now - 3L * 24 * 60 * 60 * 1000
-    try { writableDatabase.delete("learned", "COALESCE(pinned,0)=0 AND ts < ? AND (last_used IS NULL OR last_used < ?)", arrayOf(cutoff.toString(), cutoff.toString())) } catch (_: Exception) {}
+    val pruneDays = try { Prefs.plain(appCtx).getInt("mem_prune_days", 3).coerceIn(1, 30) } catch (_: Exception) { 3 }
+    val pruneEnabled = try { Prefs.on(appCtx, "f_mem_prune", true) } catch (_: Exception) { true }
+    val cutoff = now - pruneDays.toLong() * 24L * 60 * 60 * 1000
+    if (pruneEnabled) try { writableDatabase.delete("learned", "COALESCE(pinned,0)=0 AND ts < ? AND (last_used IS NULL OR last_used < ?)", arrayOf(cutoff.toString(), cutoff.toString())) } catch (_: Exception) {}
     val all = facts().sortedWith(compareByDescending<Fact> { it.pinned }.thenByDescending { it.ts }.thenByDescending { it.lastUsed })
     val selected = if (words.isEmpty()) all.take(limit)
       else all.map { f -> f to words.count { f.text.lowercase().contains(it) || f.cat.contains(it) } }
@@ -246,7 +248,8 @@ class Db private constructor(c: Context) : SQLiteOpenHelper(c.applicationContext
   }
   fun shopSummary(item: String = "", recent: Int = 10): Pair<List<ShopRow>, String> {
     val rows = shopRows(item, 5000)
-    val recentRows = rows.take(recent)
+    val lim = try { Prefs.plain(appCtx).getInt("ledger_recent_n", recent).coerceIn(1, 100) } catch (_: Exception) { recent }
+    val recentRows = rows.take(lim)
     val older = (rows.size - recentRows.size).coerceAtLeast(0)
     val summary = if (older > 0) "User has ${rows.size} total shop records; showing $recent most recent, $older older records summarized." else "Showing ${rows.size} shop records."
     return recentRows to summary
