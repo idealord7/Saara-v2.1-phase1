@@ -35,20 +35,11 @@ class Db private constructor(c: Context) : SQLiteOpenHelper(c.applicationContext
     }
     if (o < 3) createTaskSteps(d)
     if (o < 6) d.execSQL("CREATE TABLE IF NOT EXISTS rules(id INTEGER PRIMARY KEY AUTOINCREMENT, text TEXT, enabled INTEGER, ts INTEGER)")
-    if (o < 7) ensureCloudTables(d)
-  }
-  override fun onOpen(d: SQLiteDatabase) {
-    super.onOpen(d)
-    ensureCloudTables(d)
-  }
-  private fun ensureCloudTables(d: SQLiteDatabase) {
-    try { CloudMemory.ensureTables(d) } catch (_: Exception) {}
   }
   private fun createTaskSteps(d: SQLiteDatabase) {
     d.execSQL("CREATE TABLE IF NOT EXISTS task_steps(id INTEGER PRIMARY KEY AUTOINCREMENT, goal TEXT, tool TEXT, args TEXT, result TEXT, ok INTEGER, ts INTEGER)")
     d.execSQL("CREATE INDEX IF NOT EXISTS idx_task_steps_goal ON task_steps(goal)")
     d.execSQL("CREATE TABLE IF NOT EXISTS rules(id INTEGER PRIMARY KEY AUTOINCREMENT, text TEXT, enabled INTEGER, ts INTEGER)")
-    ensureCloudTables(d)
   }
 
   // ---------- chat ----------
@@ -73,7 +64,6 @@ class Db private constructor(c: Context) : SQLiteOpenHelper(c.applicationContext
     val d = writableDatabase
     d.query("learned", arrayOf("id"), "text=?", arrayOf(t), null, null, null).use { if (it.moveToFirst()) return }
     d.insert("learned", null, ContentValues().apply { put("cat", cat.ifBlank { "general" }.lowercase()); put("text", t); put("ts", System.currentTimeMillis()) })
-    try { CloudMemory.upsertMemory(appCtx, MemoryItem(summary=t, contextApp=cat.ifBlank { "general" }, importance=2, createdAt=System.currentTimeMillis())) } catch (_: Exception) {}
   }
   fun facts(): List<Fact> {
     val out = ArrayList<Fact>()
@@ -196,7 +186,6 @@ class Db private constructor(c: Context) : SQLiteOpenHelper(c.applicationContext
   }
   fun ruleDelete(id: Long) {
     writableDatabase.delete("rules", "id=?", arrayOf(id.toString()))
-    try { CloudSyncRepository.get(appCtx).deleteRule(id) } catch (_: Exception) {}
   }
   fun rulesPrompt(max: Int = 40): String {
     val rs = rules().filter { it.enabled && it.text.isNotBlank() }.take(max)
@@ -204,10 +193,6 @@ class Db private constructor(c: Context) : SQLiteOpenHelper(c.applicationContext
     val sb = StringBuilder("\nUser rules (must follow before taking any action/tool/response):\n")
     rs.forEachIndexed { i: Int, r: Rule -> sb.append(i + 1).append(". ").append(r.text.replace('\n', ' ').take(220)).append('\n') }
     return sb.toString()
-  }
-
-  private fun syncRule(r: Rule) {
-    try { CloudSyncRepository.get(appCtx).uploadRule(r) } catch (_: Exception) {}
   }
 
   // ---------- task-step memory ----------
@@ -219,15 +204,6 @@ class Db private constructor(c: Context) : SQLiteOpenHelper(c.applicationContext
     })
     try {
       d.execSQL("DELETE FROM task_steps WHERE id NOT IN (SELECT id FROM task_steps ORDER BY id DESC LIMIT 300)")
-    } catch (_: Exception) {}
-    try {
-      val g = goal.trim(); val t = tool.trim(); val r = result.trim()
-      if (g.isNotEmpty()) {
-        CloudMemory.upsertPlaybook(appCtx, TaskPlaybook(taskName=g.take(120), triggerPattern=g.take(120), steps=listOf("$t ${args.trim()}".trim()), successCount=if(ok)1 else 0, requiresConfirmation=false, updatedAt=System.currentTimeMillis()))
-      }
-      if (!ok) {
-        CloudMemory.upsertMistake(appCtx, MistakeLesson(mistakeSummary="$t failed", whatHappened=r.take(300), wrongBehavior="$t ${args.trim()}".take(300), correctRule="Avoid repeating failed step; try alternative.", occurrenceCount=1, active=true, updatedAt=System.currentTimeMillis()))
-      }
     } catch (_: Exception) {}
     return id
   }

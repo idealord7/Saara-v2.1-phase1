@@ -43,11 +43,6 @@ object Tools {
 {"name":"recall","description":"Search everything you have learned about the user (older than the list in your instructions). query = keywords.","parameters":{"type":"OBJECT","properties":{"query":{"type":"STRING"}},"required":["query"]}},
 {"name":"remember_task","description":"Save which tool steps worked for a repeated mobile task so future attempts improve. goal = the task, method = concise working steps. Never include contacts, messages, ledger data, URLs, or screen text.","parameters":{"type":"OBJECT","properties":{"goal":{"type":"STRING"},"method":{"type":"STRING"}},"required":["goal","method"]}},
 {"name":"recall_task","description":"Recall which tool steps worked or failed for a similar mobile task. Stored locally on this phone.","parameters":{"type":"OBJECT","properties":{"query":{"type":"STRING"}},"required":["query"]}},
-{"name":"save_knowledge","description":"Save reusable knowledge to cloud-backed local cache. category/title/content/tags.","parameters":{"type":"OBJECT","properties":{"title":{"type":"STRING"},"category":{"type":"STRING"},"content":{"type":"STRING"},"tags":{"type":"STRING"}},"required":["title","content"]}},
-{"name":"save_memory","description":"Save a short memory summary with contextApp and importance (1-5).","parameters":{"type":"OBJECT","properties":{"summary":{"type":"STRING"},"contextApp":{"type":"STRING"},"importance":{"type":"NUMBER"}},"required":["summary"]}},
-{"name":"save_playbook","description":"Save a task playbook: taskName, triggerPattern, steps (newline/comma separated), requiresConfirmation.","parameters":{"type":"OBJECT","properties":{"taskName":{"type":"STRING"},"triggerPattern":{"type":"STRING"},"steps":{"type":"STRING"},"requiresConfirmation":{"type":"BOOLEAN"}},"required":["taskName","steps"]}},
-{"name":"log_mistake","description":"Log a mistake/lesson: mistakeSummary, whatHappened, wrongBehavior, correctRule, active.","parameters":{"type":"OBJECT","properties":{"mistakeSummary":{"type":"STRING"},"whatHappened":{"type":"STRING"},"wrongBehavior":{"type":"STRING"},"correctRule":{"type":"STRING"},"active":{"type":"BOOLEAN"}},"required":["mistakeSummary","correctRule"]}},
-{"name":"save_cloud_task","description":"Save a cloud-backed scheduled task record: title, instruction, scheduleType(once/hourly/daily/weekly), nextRunAtMs, status.","parameters":{"type":"OBJECT","properties":{"title":{"type":"STRING"},"instruction":{"type":"STRING"},"scheduleType":{"type":"STRING"},"nextRunAtMs":{"type":"NUMBER"},"status":{"type":"STRING"}},"required":["title","instruction"]}},
 {"name":"request_screen_share","description":"Ask Android for screen-capture permission and start live screen sharing when a task needs to see the current screen. The user sees a permission prompt and must tap Allow. Sharing requested this way stops automatically when the task ends.","parameters":{"type":"OBJECT","properties":{}}},
 {"name":"stop_screen_share","description":"Stop live screen sharing when the task no longer needs to see the screen.","parameters":{"type":"OBJECT","properties":{}}},
 {"name":"shop_record","description":"Shop-owner ledger. kind = purchase (price the user BOUGHT stock at), sale (price SOLD at), cancellation (cancelled / returned order, price = refunded unit price), price (list or MRP price note). item, price per unit, qty, party = supplier or customer name, note.","parameters":{"type":"OBJECT","properties":{"item":{"type":"STRING"},"kind":{"type":"STRING"},"price":{"type":"NUMBER"},"qty":{"type":"NUMBER"},"party":{"type":"STRING"},"note":{"type":"STRING"}},"required":["item","kind","price"]}},
@@ -135,7 +130,7 @@ object Tools {
   private fun has(c: Context, p: String) = ContextCompat.checkSelfPermission(c, p) == PackageManager.PERMISSION_GRANTED
 
   fun run(c: Context, name: String, a: JSONObject): String {
-    val readOnly = setOf("remember", "recall", "remember_task", "recall_task", "shop_report", "list_tasks", "save_knowledge", "save_memory", "save_playbook", "log_mistake", "save_cloud_task")
+    val readOnly = setOf("remember", "recall", "remember_task", "recall_task", "shop_report", "list_tasks")
     if (TaskControl.isStop(Bus.lastUser) && name !in readOnly && name != "stop_screen_share") {
       TaskControl.clear()
       return "STOPPED: the user interrupted the task. Do not continue. Acknowledge briefly and wait for a new instruction."
@@ -150,27 +145,6 @@ object Tools {
         "recall" -> Db.get(c).recall(a.optString("query")).joinToString("\n") { "[${it.cat}] ${it.text}" }.ifBlank { "nothing found" }
         "remember_task" -> TaskLearning.remember(c, a.optString("goal"), a.optString("method"))
         "recall_task" -> TaskLearning.recall(c, a.optString("query"))
-        "save_knowledge" -> {
-          val item = KnowledgeItem(title=a.optString("title"), category=a.optString("category","general"), content=a.optString("content"), tags=a.optString("tags").split(",").map{it.trim()}.filter{it.isNotEmpty()}, updatedAt=System.currentTimeMillis())
-          CloudMemory.upsertKnowledge(c,item); "saved knowledge ${item.id}"
-        }
-        "save_memory" -> {
-          val item = MemoryItem(summary=a.optString("summary"), contextApp=a.optString("contextApp"), importance=a.optInt("importance",1).coerceIn(1,5), createdAt=System.currentTimeMillis())
-          CloudMemory.upsertMemory(c,item); "saved memory ${item.id}"
-        }
-        "save_playbook" -> {
-          val steps = a.optString("steps").split("\n",",").map{it.trim()}.filter{it.isNotEmpty()}
-          val item = TaskPlaybook(taskName=a.optString("taskName"), triggerPattern=a.optString("triggerPattern"), steps=steps, requiresConfirmation=a.optBoolean("requiresConfirmation",false), updatedAt=System.currentTimeMillis())
-          CloudMemory.upsertPlaybook(c,item); "saved playbook ${item.id}"
-        }
-        "log_mistake" -> {
-          val item = MistakeLesson(mistakeSummary=a.optString("mistakeSummary"), whatHappened=a.optString("whatHappened"), wrongBehavior=a.optString("wrongBehavior"), correctRule=a.optString("correctRule"), active=a.optBoolean("active",true), updatedAt=System.currentTimeMillis())
-          CloudMemory.upsertMistake(c,item); "saved mistake ${item.id}"
-        }
-        "save_cloud_task" -> {
-          val item = CloudScheduledTask(title=a.optString("title"), instruction=a.optString("instruction"), scheduleType=a.optString("scheduleType","once"), nextRunAt=a.optLong("nextRunAtMs",0L), status=a.optString("status","pending"), updatedAt=System.currentTimeMillis())
-          CloudMemory.upsertScheduled(c,item); "saved cloud task ${item.id}"
-        }
         "request_screen_share" -> when {
           !Prefs.on(c, "f_share", true) -> off("Camera & screen sharing")
           !Bus.running -> "Saara is not started. Ask the user to tap Start, then try again."
