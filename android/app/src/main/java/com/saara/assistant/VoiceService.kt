@@ -301,12 +301,11 @@ class VoiceService : Service() {
     if (!Prefs.on(this, "f_share", true)) { Bus.add("system", "Camera & screen sharing is switched off in Settings > App features.", true); return }
     if (!running) { Bus.add("system", "Start Saara first, then share screen.", true); return }
     if (Bus.screenOn) { stopScreen(true); return }
-    // MediaProjection permission requires an Activity result; open MainActivity to request it.
     try {
-      startActivity(Intent(this, MainActivity::class.java)
-        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP)
-        .putExtra("request_screen_share", true))
-    } catch (_: Exception) { Bus.add("system", "Could not open Saara to request screen sharing.", true) }
+      startActivity(Intent(this, ScreenAskActivity::class.java)
+        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_NO_ANIMATION)
+        .putExtra("auto", false))
+    } catch (_: Exception) { Bus.add("system", "Could not open screen sharing prompt.", true) }
   }
 
   fun sendText(t: String) { startSession(); processUtterance(t) }

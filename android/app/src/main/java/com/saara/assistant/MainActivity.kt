@@ -202,12 +202,12 @@ class MainActivity : AppCompatActivity() {
 
     val frame = FrameLayout(this)
     root.addView(frame, LinearLayout.LayoutParams(-1, 0, 1f))
-    pages.add(buildChat()); pages.add(buildLearning()); pages.add(buildAutomation()); pages.add(buildContacts()); pages.add(buildSettings())
+    pages.add(buildChat()); pages.add(buildLearning()); pages.add(buildAutomation()); pages.add(buildSettings())
     pages.forEach { frame.addView(it, FrameLayout.LayoutParams(-1, -1)) }
 
     // bottom navigation
     val nav = LinearLayout(this); nav.setBackgroundColor(SURF); nav.setPadding(0, dp(6), 0, dp(6))
-    val items = listOf("💬" to "Chat", "🧠" to "Learning", "⏰" to "Tasks", "👥" to "Contacts", "⚙️" to "Settings")
+    val items = listOf("💬" to "Chat", "🧠" to "Learning", "⏰" to "Tasks", "⚙️" to "Settings")
     items.forEachIndexed { i, (e, l) ->
       val col = LinearLayout(this); col.orientation = LinearLayout.VERTICAL; col.gravity = Gravity.CENTER
       val ic = tv(e, 20f); ic.gravity = Gravity.CENTER; val lb = tv(l, 11f, SUB); lb.gravity = Gravity.CENTER
@@ -223,7 +223,7 @@ class MainActivity : AppCompatActivity() {
     curTab = i
     pages.forEachIndexed { k, p -> p.visibility = if (k == i) View.VISIBLE else View.GONE }
     navItems.forEachIndexed { k, (ic, lb) -> lb.setTextColor(if (k == i) ACC else SUB); ic.alpha = if (k == i) 1f else 0.6f }
-    when (i) { 1 -> { rebuildLearning(); rebuildShop() }; 2 -> rebuildTasks(); 3 -> rebuildContacts(); 4 -> refresh() }
+    when (i) { 1 -> { rebuildLearning(); rebuildShop() }; 2 -> rebuildTasks(); 3 -> refresh() }
   }
 
   // ---------- CHAT ----------
