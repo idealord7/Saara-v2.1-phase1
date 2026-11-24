@@ -177,13 +177,13 @@ object Tools {
             launch(c, Intent(c, ScreenAskActivity::class.java).putExtra("mode", if (mode == "ocr") "ocr" else "capture"))
             "screen capture prompt opened; after Allow Saara will analyze the screen"
           }
-        },
+        }
         "screen_ocr_extract" -> {
           if (!Prefs.on(c, "f_share", true)) off("Camera & screen sharing")
           else if (!Bus.running) "Saara is not started. Ask the user to tap Start, then try again."
           else if (!canLaunch(c)) LAUNCH_HINT
           else { launch(c, Intent(c, ScreenAskActivity::class.java).putExtra("mode", "ocr")); "screen OCR prompt opened; after Allow Saara will extract structured fields" }
-        },
+        }
         "shop_record" -> {
           val kind = a.optString("kind").lowercase().let { k -> when { k.startsWith("pur") || k.startsWith("buy") || k.startsWith("bought") -> "purchase"; k.startsWith("sal") || k.startsWith("sell") || k.startsWith("sold") -> "sale"; k.startsWith("can") || k.startsWith("ret") || k.startsWith("ref") -> "cancellation"; else -> "price" } }
           Db.get(c).shopAdd(a.optString("item"), kind, a.optDouble("price", 0.0), a.optDouble("qty", 1.0), a.optString("party"), a.optString("note"))
