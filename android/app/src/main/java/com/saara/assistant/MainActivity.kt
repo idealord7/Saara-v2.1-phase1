@@ -77,7 +77,7 @@ class MainActivity : AppCompatActivity() {
   private val contactsGeneration = AtomicInteger(0)
   private val contactsDebounce = Runnable { loadContactsInBackground() }
   private val knowledgeExecutor = Executors.newSingleThreadExecutor()
-  private val busListener: () -> Unit = { refresh() }
+  private val busListener: () -> Unit = { try { refresh() } catch (_: Exception) {} }
 
   // ---------- small UI helpers ----------
   private fun dp(x: Int) = (x * resources.displayMetrics.density).toInt()
@@ -409,22 +409,27 @@ class MainActivity : AppCompatActivity() {
       if (!ok) row.addView(btn(actionLabel, SURF2, action), LinearLayout.LayoutParams(-2, -2))
       return row
     }
+    var readyBuilt = false
     updaters.add {
-      ready.removeAllViews()
-      ready.addView(tv("System status", 16f, bold = true))
-      ready.addView(statusRow("Notification Listener", notifOn(), "Open") { startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)) })
-      ready.addView(statusRow("Accessibility Service", a11yOn(), "Open") { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) })
-      ready.addView(statusRow("Overlay permission", Settings.canDrawOverlays(this), "Open") { startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName"))) })
-      val pm = getSystemService(android.os.PowerManager::class.java)
-      val battOk = pm?.isIgnoringBatteryOptimizations(packageName) == true
-      ready.addView(statusRow("Battery optimization exemption", battOk, "Open") {
-        try { startActivity(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:$packageName"))) } catch (_: Exception) { startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)) }
-      })
-      ready.addView(statusRow("Phone/SMS/Contacts/Call log", has(Manifest.permission.CALL_PHONE) && has(Manifest.permission.SEND_SMS) && has(Manifest.permission.READ_SMS) && has(Manifest.permission.READ_CONTACTS) && has(Manifest.permission.READ_CALL_LOG), "Grant") {
-        requestPermissions(arrayOf(Manifest.permission.CALL_PHONE, Manifest.permission.SEND_SMS, Manifest.permission.READ_SMS, Manifest.permission.READ_CONTACTS, Manifest.permission.ANSWER_PHONE_CALLS, Manifest.permission.READ_CALL_LOG, Manifest.permission.READ_PHONE_STATE), 2)
-      })
+      try {
+        if (!readyBuilt || ready.childCount == 0) {
+          ready.removeAllViews()
+          ready.addView(tv("System status", 16f, bold = true))
+          ready.addView(statusRow("Notification Listener", notifOn(), "Open") { startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)) })
+          ready.addView(statusRow("Accessibility Service", a11yOn(), "Open") { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) })
+          ready.addView(statusRow("Overlay permission", Settings.canDrawOverlays(this), "Open") { startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName"))) })
+          val pm = getSystemService(PowerManager::class.java)
+          val battOk = try { pm?.isIgnoringBatteryOptimizations(packageName) == true } catch (_: Exception) { false }
+          ready.addView(statusRow("Battery optimization exemption", battOk, "Open") {
+            try { startActivity(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:$packageName"))) } catch (_: Exception) { try { startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)) } catch (_: Exception) {} }
+          })
+          ready.addView(statusRow("Phone/SMS/Contacts/Call log", has(Manifest.permission.CALL_PHONE) && has(Manifest.permission.SEND_SMS) && has(Manifest.permission.READ_SMS) && has(Manifest.permission.READ_CONTACTS) && has(Manifest.permission.READ_CALL_LOG), "Grant") {
+            requestPermissions(arrayOf(Manifest.permission.CALL_PHONE, Manifest.permission.SEND_SMS, Manifest.permission.READ_SMS, Manifest.permission.READ_CONTACTS, Manifest.permission.ANSWER_PHONE_CALLS, Manifest.permission.READ_CALL_LOG, Manifest.permission.READ_PHONE_STATE), 2)
+          })
+          readyBuilt = true
+        }
+      } catch (_: Exception) {}
     }
-    root.addView(ready)
 
     heading(root, "Auto-Reply & Messaging Rules", "Control when and how Saara replies to messaging notifications.")
     feature(root, "Notification auto-reply master", "Read incoming notifications and auto-reply with rules/AI. Works with Notification Access.", "f_notif", false, { notifOn() },
@@ -1245,7 +1250,7 @@ class MainActivity : AppCompatActivity() {
 
   // ---------- live refresh ----------
   private fun refresh() {
-    updaters.forEach { it() }
+    for (u in updaters) try { u() } catch (_: Exception) {}
     statusTv.text = Bus.status + (if (Bus.camOn) "  •  camera live" else "") + (if (Bus.screenOn) "  •  screen live" else "")
     startBtn.text = if (Bus.running) "Stop" else "Start"
     startBtn.background = bg(if (Bus.running) 0xFFB3261E.toInt() else ACC2, 20)
