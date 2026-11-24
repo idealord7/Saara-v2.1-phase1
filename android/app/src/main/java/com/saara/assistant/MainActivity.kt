@@ -184,10 +184,11 @@ class MainActivity : AppCompatActivity() {
   }
 
   private fun onCreateInner(b: Bundle?) {
-    Bus.init(this); migrateFacts(this)
-    window.statusBarColor = BG; window.navigationBarColor = SURF
-    val root = LinearLayout(this); root.orientation = LinearLayout.VERTICAL; root.setBackgroundColor(BG)
-    setContentView(root)
+    try {
+      Bus.init(this); migrateFacts(this)
+      window.statusBarColor = BG; window.navigationBarColor = SURF
+      val root = LinearLayout(this); root.orientation = LinearLayout.VERTICAL; root.setBackgroundColor(BG)
+      setContentView(root)
 
     // top bar: logo, name + status, start/stop
     val top = LinearLayout(this); top.gravity = Gravity.CENTER_VERTICAL; top.setPadding(dp(16), dp(34), dp(16), dp(8))
@@ -218,6 +219,10 @@ class MainActivity : AppCompatActivity() {
     }
     root.addView(nav)
     select(0)
+    } catch (t: Throwable) {
+      Crash.save(this, t, "MainActivity.onCreateInner")
+      try { android.app.AlertDialog.Builder(this).setTitle("Saara startup error").setMessage(t.stackTraceToString().take(2000)).setPositiveButton("OK", null).show() } catch (_: Exception) {}
+    }
   }
 
   private fun select(i: Int) {
