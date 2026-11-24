@@ -1221,7 +1221,7 @@ class MainActivity : AppCompatActivity() {
   }
 
   private fun startSaara() {
-    if ((Prefs.secure(this).getString("apiKey", "") ?: "").isBlank()) { toast("Paste your Gemini API key in Settings and tap Save"); select(4); return }
+    if ((Prefs.secure(this).getString("apiKey", "") ?: "").isBlank()) { toast("Paste your Gemini API key in Settings and tap Save"); select(3); return }
     val i = Intent(this, VoiceService::class.java)
     val cmd = pendingAssistantText
     if (cmd != null) i.putExtra(VoiceService.ASSISTANT_COMMAND, cmd)
