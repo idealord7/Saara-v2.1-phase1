@@ -86,13 +86,34 @@ object AiAutoReply {
     }
   }
 
+  data class GuardDecision(val allow: Boolean, val reason: String, val instruction: String = "", val confidenceThreshold: Int = 75, val draftOnly: Boolean = false)
+
+  private fun normSender(s: String) = s.lowercase().trim().replace(Regex("\\s+"), " ")
+  private fun recentReplyCount(ctx: Context, sender: String, windowMin: Int): Int {
+    val cutoff = System.currentTimeMillis() - windowMin.coerceIn(1, 120) * 60_000L
+    return synchronized(log) { log.count { it.contains("Replied", true) && it.contains("· $sender ·", true) && tsFromLog(it) >= cutoff } }
+  }
+  private fun tsFromLog(line: String): Long = try {
+    val m = Regex("^\\[(.*?)\\]").find(line)?.groupValues?.getOrNull(1) ?: return 0L
+    SimpleDateFormat("dd MMM HH:mm:ss", Locale.getDefault()).parse(m)?.time ?: 0L
+  } catch (_: Exception) { 0L }
+  private fun looksLikeLoop(sender: String, incoming: String): Boolean {
+    val n = normForCompare(incoming)
+    if (n.isBlank()) return true
+    val ctxLines = synchronized(recent) { recent[sender]?.toList() ?: emptyList() }
+    val recentFromSender = ctxLines.takeLast(4).count { it.startsWith("$sender:") }
+    val repeated = ctxLines.takeLast(6).any { normForCompare(it.removePrefix("$sender:").trim()) == n }
+    return repeated || recentFromSender >= 3
+  }
+  private fun normForCompare(s: String): String = s.lowercase(Locale.ROOT).replace(Regex("[^\\p{L}\\p{N}\\s]+"), " ").replace(Regex("\\s+"), " ").trim()
+
   fun handle(c: Context, key: String, pkg: String, sender: String, text: String, isGroup: Boolean, ruleInstruction: String = "") {
     val ctx = c.applicationContext
     val who = sender.ifBlank { "Unknown" }.trim()
     val msg = text.trim()
     if (msg.isBlank()) { addLog(ctx, "Skipped blank message · $who · ${appLabel(pkg)}"); return }
-    val allowed = shouldReply(ctx, pkg, who, msg, isGroup, screenOff(ctx))
-    if (!allowed.first) { addLog(ctx, "Skipped (${allowed.second}) · $who · ${appLabel(pkg)}"); return }
+    val decision = evaluate(ctx, pkg, who, msg, isGroup, screenOff(ctx), ruleInstruction)
+    if (!decision.allow) { addLog(ctx, "Skipped (${decision.reason}) · $who · ${appLabel(pkg)}"); return }
     if (!Prefs.on(ctx, "f_ai_reply", false)) { addLog(ctx, "Skipped (AI smart auto-reply off) · $who · ${appLabel(pkg)}"); return }
 
     val dedupe = "$pkg|$who|${msg.hashCode()}"
@@ -113,14 +134,20 @@ object AiAutoReply {
       try {
         val rules = try { Db.get(ctx).rulesPrompt(40) } catch (_: Exception) { "" }
         val facts = try { Db.get(ctx).factsPrompt(msg, 10) } catch (_: Exception) { "" }
-        val instr = listOf(ruleInstruction, allowed.third).filter { it.isNotBlank() }.joinToString("\n")
-        val reply = generateWithRetry(apiKey, systemPrompt(ctx), rules, facts, instr, who, msg, contextFor(who))
+        val reply = generateWithRetry(apiKey, systemPrompt(ctx), rules, facts, decision.instruction, who, msg, contextFor(who))
         val clean = sanitize(reply)
         if (clean.isBlank()) { addLog(ctx, "Empty reply after sanitizing · $who · ${appLabel(pkg)}"); return@execute }
+        val confidence = estimateConfidence(msg, clean, decision)
+        if (decision.draftOnly || confidence < decision.confidenceThreshold) {
+          try { Db.get(ctx).replyDraftAdd(key, who, pkg, msg, clean, "confidence=$confidence<threshold=${decision.confidenceThreshold}; ${decision.reason}") } catch (_: Exception) {}
+          addLog(ctx, "Draft held #$mySeq · $who · ${appLabel(pkg)} · confidence=$confidence\n← ${msg.take(400)}\n✎ ${clean.take(600)}")
+          Bus.add("system", "Auto-reply draft held for $who (${appLabel(pkg)}, confidence $confidence%). Review in Auto-reply logs/drafts.", true)
+          return@execute
+        }
         pushContext(who, "You: $clean")
         val result = SaaraNotifications.reply(key, who, clean)
         val ok = result == "replied"
-        addLog(ctx, (if (ok) "Replied #$mySeq" else "Failed ($result)") + " · $who · ${appLabel(pkg)}\n← ${msg.take(500)}\n→ ${clean.take(700)}")
+        addLog(ctx, (if (ok) "Replied #$mySeq" else "Failed ($result)") + " · $who · ${appLabel(pkg)} · confidence=$confidence\n← ${msg.take(500)}\n→ ${clean.take(700)}")
         if (ok) Bus.add("system", "Auto-replied to $who (${appLabel(pkg)}): ${clean.take(250)}", true) else Bus.add("system", "Auto-reply failed for $who: $result", true)
       } catch (e: Exception) {
         val detail = e.message?.take(300) ?: e.javaClass.simpleName
@@ -128,6 +155,19 @@ object AiAutoReply {
         Bus.add("system", "AI auto-reply error for $who: $detail", true)
       }
     }
+  }
+
+  private fun estimateConfidence(incoming: String, reply: String, d: GuardDecision): Int {
+    var score = 72
+    val inLen = incoming.trim().length
+    val outLen = reply.trim().length
+    if (inLen in 4..240) score += 8
+    if (outLen in 2..280) score += 8
+    if (Regex("\\b(otp|password|pin|cvv|bank|upi|pay|payment|address|card|login)\\b", RegexOption.IGNORE_CASE).containsMatchIn(incoming)) score -= 25
+    if (Regex("\?").containsMatchIn(incoming) && outLen < 2) score -= 20
+    if (d.instruction.contains("vip", true)) score += 5
+    if (looksLikeLoop("sender", incoming)) score -= 15
+    return score.coerceIn(0, 100)
   }
 
   private fun screenOff(c: Context): Boolean = try {
@@ -173,8 +213,8 @@ object AiAutoReply {
     return if (s <= e) nowMin in s..e else nowMin >= s || nowMin <= e
   }
 
-  fun shouldReply(c: Context, pkg: String, sender: String, text: String, isGroup: Boolean, screenOff: Boolean): Triple<Boolean, String, String> {
-    if (!Prefs.on(c, "f_notif", false)) return Triple(false, "Notification auto-reply off", "")
+  fun evaluate(c: Context, pkg: String, sender: String, text: String, isGroup: Boolean, screenOff: Boolean, extraInstruction: String = ""): GuardDecision {
+    if (!Prefs.on(c, "f_notif", false)) return GuardDecision(false, "Notification auto-reply off")
     val rules = try { Db.get(c).replyRules().filter { it.enabled } } catch (_: Exception) { emptyList() }
     val senderNorm = sender.lowercase().trim()
     val textNorm = text.lowercase()
@@ -182,35 +222,68 @@ object AiAutoReply {
     val cal = java.util.Calendar.getInstance()
     val nowMin = cal.get(java.util.Calendar.HOUR_OF_DAY) * 60 + cal.get(java.util.Calendar.MINUTE)
 
-    if (rules.isNotEmpty()) {
-      val matched = rules.filter { r ->
-        val apps = csvList(r.apps)
-        val appOk = apps.isEmpty() || apps.any { it == app || it == pkg.lowercase() || appLabel(pkg).lowercase().contains(it) }
-        val allowSenders = csvList(r.senders)
-        val senderOk = allowSenders.isEmpty() || matchesAny(senderNorm, allowSenders)
-        val blocked = csvList(r.blockedSenders)
-        val blockedOk = blocked.isEmpty() || !matchesAny(senderNorm, blocked)
-        val chatOk = when (r.chatType.lowercase()) { "group" -> isGroup; "direct" -> !isGroup; else -> true }
-        val kws = csvList(r.keywords)
-        val kwOk = kws.isEmpty() || matchesAny(textNorm, kws)
-        appOk && senderOk && blockedOk && chatOk && kwOk
-      }
-      if (matched.isEmpty()) return Triple(false, "no matching Replying Rule", "")
-      val block = matched.firstOrNull { it.mode.equals("block", true) || it.mode.equals("never", true) }
-      if (block != null) return Triple(false, "blocked by rule '${block.name.ifBlank { "rule" }}'", "")
-      val quiet = matched.firstOrNull { inQuietHours(nowMin, it.quietStart, it.quietEnd) }
-      if (quiet != null) return Triple(false, "quiet hours rule '${quiet.name.ifBlank { "rule" }}'", "")
-      val screenRule = matched.firstOrNull { it.screenOffOnly }
-      if (screenRule != null && !screenOff) return Triple(false, "screen-off-only rule '${screenRule.name.ifBlank { "rule" }}'", "")
-      val instr = matched.mapNotNull { it.instruction.takeIf { s -> s.isNotBlank() } }.joinToString("\n- ", prefix = if (matched.any { it.instruction.isNotBlank() }) "- " else "")
-      return Triple(true, "matched ${matched.size} rule(s)", instr)
+    fun appMatch(r: ReplyRule): Boolean {
+      val apps = csvList(r.apps)
+      return apps.isEmpty() || apps.any { it == app || it == pkg.lowercase() || appLabel(pkg).lowercase().contains(it) }
     }
+    fun senderMatch(r: ReplyRule): Boolean {
+      val allowSenders = csvList(r.senders)
+      val senderOk = allowSenders.isEmpty() || matchesAny(senderNorm, allowSenders)
+      val blocked = csvList(r.blockedSenders)
+      val blockedOk = blocked.isEmpty() || !matchesAny(senderNorm, blocked)
+      return senderOk && blockedOk
+    }
+    val matched = if (rules.isNotEmpty()) rules.filter { r ->
+      val chatOk = when (r.chatType.lowercase()) { "group" -> isGroup; "direct" -> !isGroup; else -> true }
+      val kws = csvList(r.keywords)
+      val kwOk = kws.isEmpty() || matchesAny(textNorm, kws)
+      appMatch(r) && senderMatch(r) && chatOk && kwOk
+    } else emptyList()
 
-    val names = (Prefs.plain(c).getString("reply_names", "") ?: "").split(",").map { it.trim().lowercase() }.filter { it.isNotEmpty() }
-    val wanted = if (names.isEmpty()) pkg in SaaraNotifications.supportedMsgApps() else names.any { senderNorm.contains(it) || it.contains(pkg.lowercase()) }
-    if (!wanted) return Triple(false, "name/app filter", "")
-    if (isGroup && !Prefs.on(c, "reply_groups", false)) return Triple(false, "group replies off", "")
-    return Triple(true, "default filter", "")
+    if (rules.isNotEmpty() && matched.isEmpty()) return GuardDecision(false, "no matching Replying Rule")
+    val applicable = if (matched.isNotEmpty()) matched else rules.filter { appMatch(it) && senderMatch(it) }.ifEmpty { emptyList() }
+
+    val mute = applicable.firstOrNull { csvList(it.muteSenders).any { senderNorm.contains(it) } || csvList(it.blockedSenders).any { senderNorm.contains(it) } }
+    if (mute != null) return GuardDecision(false, "muted/blocked sender by rule '${mute.name.ifBlank { "rule" }}'")
+    val block = applicable.firstOrNull { it.mode.equals("block", true) || it.mode.equals("never", true) }
+    if (block != null) return GuardDecision(false, "blocked by rule '${block.name.ifBlank { "rule" }}'")
+    val quiet = applicable.firstOrNull { inQuietHours(nowMin, it.quietStart, it.quietEnd) }
+    if (quiet != null) return GuardDecision(false, "quiet hours rule '${quiet.name.ifBlank { "rule" }}'")
+    val screenRule = applicable.firstOrNull { it.screenOffOnly }
+    if (screenRule != null && !screenOff) return GuardDecision(false, "screen-off-only rule '${screenRule.name.ifBlank { "rule" }}'")
+
+    val vip = applicable.any { csvList(it.vipSenders).any { senderNorm.contains(it) } }
+    val threshold = applicable.minOfOrNull { it.confidenceThreshold.coerceIn(0,100) } ?: 75
+    val rateLimit = applicable.minOfOrNull { it.rateLimitPerHour.coerceIn(1,60) } ?: 6
+    val loopWindow = applicable.maxOfOrNull { it.loopWindowMin.coerceIn(1,120) } ?: 10
+    if (recentReplyCount(c, who, 60) >= rateLimit) return GuardDecision(false, "rate limit reached (${rateLimit}/h)")
+    if (looksLikeLoop(who, text)) return GuardDecision(false, "loop protection: repeated/self-loop conversation detected")
+
+    val instr = buildString {
+      val ruleInstr = applicable.mapNotNull { it.instruction.takeIf { s -> s.isNotBlank() } }
+      if (ruleInstr.isNotEmpty()) append(ruleInstr.joinToString("\n- ", prefix = "- "))
+      if (vip) append("\n- VIP sender: be extra careful, polite, and accurate.")
+      if (extraInstruction.isNotBlank()) { if (isNotEmpty()) append('\n'); append(extraInstruction.trim()) }
+    }
+    val draftOnly = !vip && Regex("\\b(otp|password|pin|cvv|bank|upi|pay|payment|login|address|card)\\b", RegexOption.IGNORE_CASE).containsMatchIn(text)
+    val reason = when {
+      applicable.isNotEmpty() -> "matched ${applicable.size} rule(s)"
+      rules.isEmpty() -> "default filter"
+      else -> "app/sender rule"
+    }
+    if (rules.isEmpty()) {
+      val names = (Prefs.plain(c).getString("reply_names", "") ?: "").split(",").map { it.trim().lowercase() }.filter { it.isNotEmpty() }
+      val wanted = if (names.isEmpty()) pkg in SaaraNotifications.supportedMsgApps() else names.any { senderNorm.contains(it) || it.contains(pkg.lowercase()) }
+      if (!wanted) return GuardDecision(false, "name/app filter")
+      if (isGroup && !Prefs.on(c, "reply_groups", false)) return GuardDecision(false, "group replies off")
+    }
+    return GuardDecision(true, reason, instr, threshold, draftOnly)
+  }
+
+  // Backward-compatible helper for older callers
+  fun shouldReply(c: Context, pkg: String, sender: String, text: String, isGroup: Boolean, screenOff: Boolean): Triple<Boolean, String, String> {
+    val d = evaluate(c, pkg, sender, text, isGroup, screenOff)
+    return Triple(d.allow, d.reason, d.instruction)
   }
 
   private fun generateWithRetry(apiKey: String, system: String, rules: String, facts: String, ruleInstr: String, sender: String, message: String, context: String): String {

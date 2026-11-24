@@ -276,6 +276,7 @@ class SaaraNotifications : NotificationListenerService() {
     }
 
     log(ctx, "Received notification · $pkg · sender=$title · group=$isGroup · replyAction=${act != null}\n← ${text.take(400)}")
+    try { Automation.onEvent(ctx, "notification", org.json.JSONObject().put("pkg", pkg).put("sender", title).put("text", text).put("group", isGroup)) } catch (_: Exception) {}
 
     if (Prefs.on(ctx, "f_ai_reply", false)) {
       AiAutoReply.handle(ctx, sbn.key, pkg, title, text, isGroup, allowed.third)

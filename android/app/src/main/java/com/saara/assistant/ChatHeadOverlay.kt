@@ -112,9 +112,13 @@ class ChatHeadOverlay(
     val active = callbacks.isActive()
     val micOn = callbacks.isMicOn()
     val screenOn = callbacks.isScreenOn()
+    val st = callbacks.statusText().lowercase()
     val color = when {
+      st.contains("503") || st.contains("retry") -> 0xFFF9AB00.toInt()
+      st.contains("execut") -> 0xFF1A73E8.toInt()
+      st.contains("thinking") || st.contains("connect") -> 0xFF9334E6.toInt()
       speaking -> 0xFF4FA3F7.toInt()
-      active || micOn -> 0xFF34A853.toInt()
+      active || micOn || st.contains("listen") -> 0xFF34A853.toInt()
       else -> 0xFF9AA0A6.toInt()
     }
     bubbleStatusRing?.setStroke(dp(3), color)

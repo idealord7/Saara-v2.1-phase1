@@ -10,7 +10,7 @@ import android.view.Gravity
 import android.view.WindowManager
 import android.widget.TextView
 
-/** Click-through, semi-transparent caption shown over every app: what Saara hears, says and does. */
+/** Compact click-through status/caption pill over apps. */
 class Overlay(private val c: Context) {
   private val wm = c.getSystemService(Context.WINDOW_SERVICE) as WindowManager
   private val main = Handler(Looper.getMainLooper())
@@ -19,25 +19,33 @@ class Overlay(private val c: Context) {
 
   fun show(text: String, persistent: Boolean = false) {
     if (!Settings.canDrawOverlays(c)) return
+    val d = c.resources.displayMetrics.density
     var t = v
     if (t == null) {
       t = TextView(c)
-      t.setTextColor(Color.WHITE); t.textSize = 15f; t.maxLines = 6; t.gravity = Gravity.START
-      val d = c.resources.displayMetrics.density
-      t.setPadding((14 * d).toInt(), (10 * d).toInt(), (14 * d).toInt(), (10 * d).toInt())
-      t.background = GradientDrawable().apply { setColor(0x8C000000.toInt()); cornerRadius = 18 * d }
-      t.setShadowLayer(4f, 0f, 1f, Color.BLACK)
-      val lp = WindowManager.LayoutParams(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.WRAP_CONTENT,
+      t.setTextColor(Color.WHITE); t.textSize = 12f; t.maxLines = 2; t.gravity = Gravity.START
+      t.setPadding((12 * d).toInt(), (7 * d).toInt(), (12 * d).toInt(), (7 * d).toInt())
+      t.setShadowLayer(3f, 0f, 1f, Color.BLACK)
+      val lp = WindowManager.LayoutParams(WindowManager.LayoutParams.WRAP_CONTENT, WindowManager.LayoutParams.WRAP_CONTENT,
         WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
         WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
         PixelFormat.TRANSLUCENT)
-      lp.gravity = Gravity.BOTTOM; lp.y = (96 * d).toInt(); lp.horizontalMargin = 0.04f
+      lp.gravity = Gravity.TOP or Gravity.END; lp.y = (36 * d).toInt(); lp.x = (10 * d).toInt()
       try { wm.addView(t, lp) } catch (e: Exception) { return }
       v = t
     }
-    t.text = text
+    val status = Bus.status.lowercase()
+    val color = when {
+      status.contains("retry") || status.contains("503") || status.contains("reconnect") -> 0xB3B26A00.toInt()
+      status.contains("execut") || status.contains("working") -> 0xB31A73E8.toInt()
+      status.contains("thinking") || status.contains("connect") -> 0xB36A1B9A.toInt()
+      status.contains("listen") || status.contains("wake") -> 0xB31B5E20.toInt()
+      else -> 0x99000000.toInt()
+    }
+    t.background = GradientDrawable().apply { setColor(color); cornerRadius = 16 * d; setStroke((1*d).toInt(), 0x55FFFFFF) }
+    t.text = "Saara: ${Bus.status}\n${text.take(90)}"
     main.removeCallbacks(hideRun)
-    if (!persistent) main.postDelayed(hideRun, 7000)
+    if (!persistent) main.postDelayed(hideRun, 4500)
   }
 
   fun hide() {

@@ -93,6 +93,7 @@ class VoiceService : Service() {
   private var screen: ScreenShare? = null
   @Volatile private var screenAuto = false
   private val screenAutoStop = Runnable { if (Bus.screenOn && screenAuto) stopScreen(true) }
+  private var automationReceiver: android.content.BroadcastReceiver? = null
   private var calls: CallWatcher? = null
   @Volatile private var callActive = false
   @Volatile private var enrolling = false
@@ -192,7 +193,7 @@ class VoiceService : Service() {
     isSaraActive = true
     resetSessionTimer()
     stopIdleWakeEngine()
-    Bus.setStatus("Connected · listening")
+    Bus.setStatus("Listening")
   }
 
   private fun resetSessionTimer() {
@@ -257,7 +258,7 @@ class VoiceService : Service() {
     callActive = false
     Bus.setStatus(if (ready) "Connected · listening" else Bus.status)
     Bus.add("system", "Call ended.", true)
-    main.postDelayed({ if (running && ready && !callActive && micEnabled) { ensureCaptureStarted(); if (!isSaraActive) maybeStartIdleWakeEngine() else Bus.setStatus("Connected · listening") } }, 900L)
+    main.postDelayed({ if (running && ready && !callActive && micEnabled) { ensureCaptureStarted(); if (!isSaraActive) maybeStartIdleWakeEngine() else Bus.setStatus("Listening") } }, 900L)
     Bus.ping()
   }
 
@@ -339,13 +340,20 @@ class VoiceService : Service() {
     if (heard.isBlank()) return
     val now = System.currentTimeMillis()
     val norm = normForCompare(heard)
-    // Echo/self-voice guards. Saara can hear her own TTS via mic; ignore likely echoes of the last reply.
+    // Echo/self-voice guards and barge-in.
     val speakingNow = now < speakingUntil
     if (norm.isNotEmpty()) {
       if (norm == lastHeardNorm && (now - lastHeardAt) < 2000L) return
-      if (lastReplyNorm.isNotEmpty() && norm == lastReplyNorm && (now - lastReplyAt) < 10000L) return
-      if (lastReplyNorm.isNotEmpty() && (now - lastReplyAt) < 7000L && (lastReplyNorm.contains(norm) || norm.contains(lastReplyNorm)) && norm.length > 2) return
-      if (speakingNow) return // prevent self-voice loop while TTS is playing
+      if (speakingNow) {
+        val likelyEcho = (lastReplyNorm.isNotEmpty() && (norm == lastReplyNorm || ((now - lastReplyAt) < 7000L && (lastReplyNorm.contains(norm) || norm.contains(lastReplyNorm)) && norm.length > 2)))
+        if (likelyEcho) return
+        // Barge-in: user intentionally speaking over Saara.
+        stopSpeaking()
+        Bus.add("system", "Barge-in detected; listening to new command.", false)
+      } else {
+        if (lastReplyNorm.isNotEmpty() && norm == lastReplyNorm && (now - lastReplyAt) < 10000L) return
+        if (lastReplyNorm.isNotEmpty() && (now - lastReplyAt) < 7000L && (lastReplyNorm.contains(norm) || norm.contains(lastReplyNorm)) && norm.length > 2) return
+      }
       lastHeardNorm = norm; lastHeardAt = now
     } else if (speakingNow) return
 
@@ -425,7 +433,7 @@ class VoiceService : Service() {
         localWakeUnavailable = false
         localWakeWarned = false
         wakeEngine = eng
-        Bus.setStatus("Connected · say a wake phrase (on-device)")
+        Bus.setStatus("Listening for wake phrase")
       } else {
         localWakeUnavailable = true
         wakeEngine = null
@@ -449,7 +457,7 @@ class VoiceService : Service() {
       resetSessionTimer()
       stopIdleWakeEngine()
       Bus.add("system", "Wake word heard.", true)
-      Bus.setStatus("Connected · listening")
+      Bus.setStatus("Listening")
     }
   }
 
@@ -493,7 +501,7 @@ class VoiceService : Service() {
           val n = try { rec.read(buf, 0, buf.size) } catch (_: Exception) { -1 }
           if (n > 0) {
             if (!micEnabled || callActive || enrolling || !ready) continue
-            val speaking = System.currentTimeMillis() < speakingUntil + 350L
+            val speaking = System.currentTimeMillis() < speakingUntil + 120L
             if (!isSaraActive) {
               val eng = wakeEngine
               if (eng != null && eng.running && !localWakeUnavailable) {
@@ -605,7 +613,7 @@ class VoiceService : Service() {
     when (i?.action) {
       "STOP" -> { stopSelf(); return START_NOT_STICKY }
       ACTION_WAKE -> { if (running && ready && micEnabled && !callActive) { ensureCaptureStarted(); startSession(); Bus.add("system", "Woke up from device button.", true) }; if (!running) { /* fall through to start then wake */ } else return START_STICKY }
-      "CAM_START", "CAM_STOP", "SCREEN_START", "SCREEN_STOP" -> { if (!running) { stopSelf(); return START_NOT_STICKY }; share(i!!); return START_STICKY }
+      "CAM_START", "CAM_STOP", "SCREEN_START", "SCREEN_CAPTURE", "SCREEN_STOP" -> { if (!running) { stopSelf(); return START_NOT_STICKY }; share(i!!); return START_STICKY }
     }
     val cmd = i?.getStringExtra(ASSISTANT_COMMAND)?.trim()?.takeIf { it.isNotEmpty() }
       ?: i?.getStringExtra("action_text")?.trim()?.takeIf { it.isNotEmpty() }
@@ -640,11 +648,30 @@ class VoiceService : Service() {
         try { track?.write(b, 0, b.size) } catch (_: Exception) {}
       }
     }.apply { name = "saara-playback"; isDaemon = true; start() }
-    refreshBubble(); Bus.listen(busListener); Bus.add("system", "Connecting…", true); refreshCalls(); connect()
+    refreshBubble(); Bus.listen(busListener); Bus.add("system", "Connecting…", true); refreshCalls(); registerAutomationEvents(); connect()
     if (wakeNoPhrase) pendingCommand = pendingCommand ?: "" // marker handled in setupComplete via flag
     // store wake intent for after connect
     if (wakeNoPhrase) pendingWakeNoPhrase = true
     return START_STICKY
+  }
+
+  private fun registerAutomationEvents() {
+    if (automationReceiver != null) return
+    val r = object : android.content.BroadcastReceiver() {
+      override fun onReceive(c: android.content.Context, i: Intent?) {
+        when (i?.action) {
+          Intent.ACTION_SCREEN_ON -> Automation.onEvent(applicationContext, "screen_on")
+          Intent.ACTION_SCREEN_OFF -> Automation.onEvent(applicationContext, "screen_off")
+          Intent.ACTION_POWER_CONNECTED, Intent.ACTION_POWER_DISCONNECTED, Intent.ACTION_BATTERY_CHANGED -> Automation.onEvent(applicationContext, "battery")
+        }
+      }
+    }
+    val f = android.content.IntentFilter().apply {
+      addAction(Intent.ACTION_SCREEN_ON); addAction(Intent.ACTION_SCREEN_OFF)
+      addAction(Intent.ACTION_POWER_CONNECTED); addAction(Intent.ACTION_POWER_DISCONNECTED)
+      addAction(Intent.ACTION_BATTERY_CHANGED)
+    }
+    try { registerReceiver(r, f); automationReceiver = r } catch (_: Exception) {}
   }
 
   private fun updateOverlay() {
@@ -652,11 +679,15 @@ class VoiceService : Service() {
     if (!Prefs.on(this, "f_overlay", true) || !Settings.canDrawOverlays(this)) { overlay?.hide(); return }
     if (chatHead?.isExpanded() == true) { overlay?.hide(); return }
     if (overlay == null) overlay = Overlay(this)
-    if (Bus.camOn) { overlay?.show("📷 LIVE CAMERA SHARING ON\nLive camera frames are being sent to Gemini.", true); return }
+    val st = Bus.status
+    when {
+      st.contains("503", true) || st.contains("retry", true) || st.contains("reconnect", true) -> Bus.setStatusCompactIfNeeded("Retrying / 503 wait")
+    }
+    if (Bus.camOn) { overlay?.show("Camera live", true); return }
     if (MainActivity.visible) { overlay?.hide(); return }
     val m = synchronized(Bus) { Bus.msgs.lastOrNull() } ?: return
-    val icon = when (m.role) { "you" -> "🧑 "; "saara" -> "✨ "; "tool" -> "⚙️ "; else -> "ℹ️ " }
-    overlay?.show(icon + m.text.takeLast(220))
+    val icon = when (m.role) { "you" -> "You"; "saara" -> "Saara"; "tool" -> "Tool"; else -> "Sys" }
+    overlay?.show("$icon: ${m.text.takeLast(120)}")
   }
 
   private fun share(i: Intent) {
@@ -664,8 +695,28 @@ class VoiceService : Service() {
       "CAM_START" -> startCam(i.getBooleanExtra("front", false))
       "CAM_STOP" -> stopCam(true)
       "SCREEN_START" -> startScreen(i.getIntExtra("code", 0), projData(i), i.getBooleanExtra("auto", false))
+      "SCREEN_CAPTURE" -> captureScreenOnce(i.getIntExtra("code", 0), projData(i), i.getStringExtra("mode") ?: "capture")
       "SCREEN_STOP" -> stopScreen(true)
     }
+  }
+
+  private fun captureScreenOnce(code: Int, data: Intent?, mode: String) {
+    if (data == null || code == 0) { Bus.add("system", "Screen capture was not allowed.", true); return }
+    Bus.add("system", if (mode == "ocr") "Capturing screen for OCR/form extraction…" else "Capturing screen for context…", true)
+    Thread {
+      try {
+        val cap = ScreenCapture.captureOnce(this, code, data)
+        if (cap == null) { Bus.add("system", "Screen capture failed.", true); return@Thread }
+        val b64 = android.util.Base64.encodeToString(cap, android.util.Base64.NO_WRAP)
+        if (mode == "ocr") {
+          ScreenAnalyzer.extractForm(this, b64) { result -> Bus.add("saara", result, true) }
+        } else {
+          ScreenAnalyzer.summarize(this, b64) { result -> Bus.add("saara", result, true) }
+        }
+      } catch (e: Exception) {
+        Bus.add("system", "Screen capture error: ${e.message}", true)
+      }
+    }.start()
   }
   @Suppress("DEPRECATION")
   private fun projData(i: Intent): Intent? = if (Build.VERSION.SDK_INT >= 33) i.getParcelableExtra("data", Intent::class.java) else i.getParcelableExtra("data")
@@ -718,7 +769,7 @@ class VoiceService : Service() {
 
   private fun connect() {
     if (!running) return
-    ready = false; Bus.setStatus("Connecting…")
+    ready = false; Bus.setStatus("Connecting / Thinking")
     val key = Prefs.secure(this).getString("apiKey", "") ?: ""
     if (key.isBlank()) { Bus.add("system", "API key missing. Add it in Settings.", true); stopSelf(); return }
     val url = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=$key"
@@ -735,9 +786,17 @@ class VoiceService : Service() {
   private fun lost(msg: String) {
     ready = false
     if (!running) return
-    Bus.add("system", msg, true)
+    val transient = Regex("503|unavailable|high demand|timeout|temporar|network|reset|closed", RegexOption.IGNORE_CASE).containsMatchIn(msg)
+    Bus.add("system", if (transient) "$msg — using offline-safe fallback and retrying." else msg, true)
+    if (transient) {
+      Bus.setStatus("Retrying / 503 wait")
+      val delay = (1500L * retries.coerceAtLeast(1)).coerceAtMost(12000L)
+      retries++
+      main.postDelayed({ if (running) connect() }, delay)
+      return
+    }
     if (++retries > 3) { Bus.add("system", "Stopped after repeated failures. Check API key / model name in Settings.", true); main.post { stopSelf() }; return }
-    Bus.setStatus("Reconnecting…"); main.postDelayed({ connect() }, 3000)
+    Bus.setStatus("Retrying / 503 wait"); main.postDelayed({ connect() }, 3000)
   }
 
   private fun setup(): String {
@@ -796,7 +855,7 @@ class VoiceService : Service() {
         startSession()
         Bus.add("system", "Woke up — listening (no wake phrase needed).", true)
       } else {
-        Bus.setStatus("Connected · say a wake phrase")
+        Bus.setStatus("Listening for wake phrase")
       }
       if (micEnabled) { ensureCaptureStarted(); if (!isSaraActive) maybeStartIdleWakeEngine() } else Bus.add("system", "Gemini connected. Microphone is muted.", true)
     }
@@ -813,6 +872,7 @@ class VoiceService : Service() {
       }
       // In IDLE, suppress Gemini audio/output/tools to prevent background noise from causing speech/actions.
       if (isSaraActive) {
+        if (sc.has("modelTurn")) Bus.setStatus("Thinking")
         val parts = sc.optJSONObject("modelTurn")?.optJSONArray("parts")
         if (parts != null) for (i in 0 until parts.length()) {
           val inl = parts.getJSONObject(i).optJSONObject("inlineData")
@@ -835,7 +895,7 @@ class VoiceService : Service() {
             if (rn.isNotEmpty()) { lastReplyNorm = rn; lastReplyAt = System.currentTimeMillis() }
           }
         }
-        if (sc.optBoolean("interrupted")) { stopSpeaking(); resetSessionTimerIfActive() }
+        if (sc.optBoolean("interrupted")) { stopSpeaking(); Bus.add("system", "Interrupted.", false); resetSessionTimerIfActive() }
         if (sc.optBoolean("turnComplete")) {
           speakingUntil = minOf(speakingUntil, System.currentTimeMillis() + 180L)
           Bus.endTurn(); armScreenAuto(6000L)
@@ -852,6 +912,7 @@ class VoiceService : Service() {
       if (isSaraActive) {
         Thread {
           armScreenAuto(300_000L); resetSessionTimerIfActive()
+          Bus.setStatus("Executing")
           val out = JSONArray()
           for (i in 0 until calls.length()) {
             val c = calls.getJSONObject(i)
@@ -862,6 +923,7 @@ class VoiceService : Service() {
             out.put(JSONObject().put("id", c.optString("id")).put("name", name).put("response", JSONObject().put("result", Tools.modelResult(name, r))))
           }
           ws?.send(JSONObject().put("toolResponse", JSONObject().put("functionResponses", out)).toString())
+          Bus.setStatus(if (isSaraActive) "Listening" else "Listening for wake phrase")
         }.start()
       }
       // idle: do not execute tools
@@ -889,6 +951,8 @@ class VoiceService : Service() {
     stopIdleWakeEngine()
     stopCapture()
     Bus.unlisten(busListener)
+    try { automationReceiver?.let { unregisterReceiver(it) } } catch (_: Exception) {}
+    automationReceiver = null
     calls?.stop(); calls = null; callActive = false
     TaskControl.clear(); audioQ.clear()
     cam?.stop(); cam = null; Bus.camOn = false

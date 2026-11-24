@@ -11,7 +11,7 @@ import java.util.Calendar
 import java.util.Date
 import java.util.Locale
 
-/** Timed tasks ("every day at 8 remind me ...", "in 10 minutes call ..."). Stored in SQLite, fired by AlarmManager. */
+/** Timed tasks and condition+trigger+action automation rules. */
 object Scheduler {
   private fun pi(c: Context, id: Long): PendingIntent = PendingIntent.getBroadcast(c, id.toInt(),
     Intent(c, TaskReceiver::class.java).putExtra("id", id), PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
@@ -27,6 +27,7 @@ object Scheduler {
   fun rescheduleAll(c: Context) {
     val now = System.currentTimeMillis()
     Db.get(c).tasks().forEach { schedule(c, it.id, if (it.whenMs < now) now + 5000 else it.whenMs) }
+    Automation.scheduleAll(c)
   }
 
   private fun fmt(ms: Long) = SimpleDateFormat("EEE d MMM, HH:mm", Locale.getDefault()).format(Date(ms))
@@ -77,7 +78,11 @@ class TaskReceiver : BroadcastReceiver() {
     val db = Db.get(c)
     val t = db.task(id) ?: return
     val delivered = VoiceService.instance?.runScheduled(t.text) == true
-    if (!delivered) Scheduler.notify(c, t.text)
+    if (!delivered) {
+      // Offline-first: queue as pending system message for when service reconnects.
+      try { Bus.add("system", "Pending scheduled task (deliver on next active session): ${t.text}", true) } catch (_: Exception) {}
+      Scheduler.notify(c, t.text)
+    }
     if (t.repeatMs > 0) {
       var n = t.whenMs + t.repeatMs
       while (n <= System.currentTimeMillis()) n += t.repeatMs

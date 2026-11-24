@@ -56,6 +56,7 @@ object Bus {
   }
   fun endTurn() { synchronized(this) { ended = true } }
   fun setStatus(s: String) { st = s; fire() }
+  fun setStatusCompactIfNeeded(s: String) { if (st != s) { st = s; fire() } }
   fun ping() = fire()
   fun clear() { synchronized(this) { msgs.clear(); lastRole = ""; lastUser = ""; userSeq++; ended = true; TaskControl.clear(); try { db?.chatClear() } catch (_: Exception) {} }; fire() }
   fun older(beforeId: Long, n: Int): List<Msg> = try { db?.chatBefore(beforeId, n) ?: emptyList() } catch (_: Exception) { emptyList() }

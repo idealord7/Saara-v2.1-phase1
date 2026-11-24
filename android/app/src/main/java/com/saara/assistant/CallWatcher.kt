@@ -139,6 +139,7 @@ class CallWatcher(
       TelephonyManager.CALL_STATE_RINGING -> if (!ringing) {
         ringing = true
         answered = false
+        try { Automation.onEvent(ctx, "incoming_call", org.json.JSONObject().put("number", number)) } catch (_: Exception) {}
         main.postDelayed({ announce() }, 650L)
       }
       TelephonyManager.CALL_STATE_OFFHOOK -> if (ringing && !answered) {
@@ -149,12 +150,15 @@ class CallWatcher(
         main.postDelayed({ speakerIfNoBluetooth() }, 1200L)
       }
       TelephonyManager.CALL_STATE_IDLE -> if (ringing || answered) {
+        val wasMissed = ringing && !answered
         ringing = false
         answered = false
+        val n = number
         number = ""
         stopListening()
         stopTts()
         restoreSpeaker()
+        if (wasMissed) try { Automation.onEvent(ctx, "missed_call", org.json.JSONObject().put("number", n).put("event","missed_call")) } catch (_: Exception) {}
         onCallEnded()
       }
     }

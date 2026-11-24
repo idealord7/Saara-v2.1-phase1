@@ -457,9 +457,32 @@ class MainActivity : AppCompatActivity() {
 
   private fun buildAutomation(): View {
     val (sv, root) = page()
-    heading(root, "Tasks & Automation", "Time-based reminders are supported. Advanced event triggers are not yet implemented.")
+    heading(root, "Tasks & Automation", "Condition + Trigger + Action rules, plus scheduled reminders.")
+    val autoCard = card(root)
+    autoCard.addView(tv("Automation rules", 16f, bold = true))
+    autoCard.addView(tv("Triggers: time, screen_on, screen_off, battery, notification, missed_call, active_app. Condition examples: battery<20, screen off, notification contains otp. Action: text Saara should execute.", 12f, SUB))
+    autoCard.addView(btn("Add automation rule", ACC2) { showAutoRuleEditor(null) { rebuildTasks() } }, LinearLayout.LayoutParams(-1,-2).apply { topMargin = dp(8) })
     taskBox = card(root)
     return sv
+  }
+
+  private fun showAutoRuleEditor(existing: AutoRule?, onDone: () -> Unit) {
+    val db = Db.get(this)
+    val root = LinearLayout(this); root.orientation = LinearLayout.VERTICAL; root.setPadding(dp(12), dp(8), dp(12), dp(8))
+    fun e(h:String,v:String="") = edit(h).apply { setText(v) }
+    val name = e("Rule name", existing?.name ?: "")
+    val trigger = e("Trigger: time/screen_on/screen_off/battery/notification/missed_call/active_app", existing?.trigger ?: "time")
+    val condition = e("Condition (e.g. battery<20, screen off, notification contains bank)", existing?.condition ?: "")
+    val action = e("Action (Saara command/text)", existing?.action ?: "")
+    val cooldown = e("Cooldown minutes", ((existing?.cooldownMs ?: 0L)/60000L).toString())
+    val enabled = Switch(this); enabled.text="Enabled"; enabled.isChecked = existing?.enabled ?: true
+    listOf<View>(name,trigger,condition,action,cooldown,enabled).forEach { root.addView(it) }
+    AlertDialog.Builder(this).setTitle(if (existing==null) "Add automation rule" else "Edit automation rule").setView(ScrollView(this).apply{addView(root)})
+      .setPositiveButton("Save") { _, _ ->
+        val r = AutoRule(existing?.id ?: 0, name.text.toString(), enabled.isChecked, trigger.text.toString(), condition.text.toString(), action.text.toString(), (cooldown.text.toString().toLongOrNull() ?: 0L)*60000L, existing?.lastFiredMs ?: 0L, System.currentTimeMillis())
+        if (existing==null) db.autoRuleAdd(r) else db.autoRuleUpdate(r)
+        Automation.scheduleAll(this); onDone()
+      }.setNegativeButton("Cancel", null).show()
   }
 
   private fun showReplyRulesDialog() {
@@ -477,8 +500,8 @@ class MainActivity : AppCompatActivity() {
         top.addView(tv(r.name.ifBlank { "Rule ${r.id}" }, 14f, TXT, true), LinearLayout.LayoutParams(0, -2, 1f))
         val sw = Switch(this); sw.isChecked = r.enabled; sw.setOnCheckedChangeListener { _, v -> db.replyRuleSetEnabled(r.id, v) }
         top.addView(sw); card.addView(top)
-        card.addView(tv("apps=${r.apps.ifBlank { "any" }} · senders=${r.senders.ifBlank { "any" }} · block=${r.blockedSenders.ifBlank { "none" }} · chat=${r.chatType} · mode=${r.mode}", 11f, SUB))
-        card.addView(tv("keywords=${r.keywords.ifBlank { "any" }} · quiet=${r.quietStart.ifBlank { "--" }}-${r.quietEnd.ifBlank { "--" }} · screenOffOnly=${r.screenOffOnly}", 11f, SUB))
+        card.addView(tv("apps=${r.apps.ifBlank { "any" }} · senders=${r.senders.ifBlank { "any" }} · vip=${r.vipSenders.ifBlank { "none" }} · mute=${r.muteSenders.ifBlank { "none" }} · chat=${r.chatType} · mode=${r.mode}", 11f, SUB))
+        card.addView(tv("keywords=${r.keywords.ifBlank { "any" }} · quiet=${r.quietStart.ifBlank { "--" }}-${r.quietEnd.ifBlank { "--" }} · screenOffOnly=${r.screenOffOnly} · conf>=${r.confidenceThreshold}% · rate=${r.rateLimitPerHour}/h · loop=${r.loopWindowMin}m", 11f, SUB))
         if (r.instruction.isNotBlank()) card.addView(tv("instruction: ${r.instruction}", 11f, SUB))
         val actions = LinearLayout(this)
         actions.addView(btn("Edit", SURF) { showReplyRuleEditor(r) { showReplyRulesDialog() } }, LinearLayout.LayoutParams(0, -2, 1f))
@@ -500,18 +523,24 @@ class MainActivity : AppCompatActivity() {
     val apps = e("Apps CSV: whatsapp,whatsapp_business,instagram,telegram (empty=any)", existing?.apps ?: "")
     val senders = e("Allow senders/contacts CSV (empty=any)", existing?.senders ?: "")
     val blocked = e("Blocked senders/contacts CSV", existing?.blockedSenders ?: "")
+    val vip = e("VIP senders CSV (extra careful, can bypass draft-only)", existing?.vipSenders ?: "")
+    val mute = e("Mute senders CSV (never auto-reply)", existing?.muteSenders ?: "")
     val chatType = e("Chat type: any/direct/group", existing?.chatType ?: "any")
     val keywords = e("Keywords CSV (empty=any)", existing?.keywords ?: "")
     val quietStart = e("Quiet start HH:mm (optional)", existing?.quietStart ?: "")
     val quietEnd = e("Quiet end HH:mm (optional)", existing?.quietEnd ?: "")
     val instruction = e("Per-rule reply instruction (optional)", existing?.instruction ?: "")
     val mode = e("Mode: ai/block", existing?.mode ?: "ai")
+    val confidence = e("Confidence threshold 0-100 (uncertain -> draft)", (existing?.confidenceThreshold ?: 75).toString())
+    val rate = e("Rate limit replies/hour per sender", (existing?.rateLimitPerHour ?: 6).toString())
+    val loop = e("Loop protection window minutes", (existing?.loopWindowMin ?: 10).toString())
     val screenOff = Switch(this); screenOff.text = "Only when screen is off"; screenOff.isChecked = existing?.screenOffOnly == true
     val enabled = Switch(this); enabled.text = "Enabled"; enabled.isChecked = existing?.enabled ?: true
-    listOf<View>(name, apps, senders, blocked, chatType, keywords, quietStart, quietEnd, instruction, mode, screenOff, enabled).forEach { root.addView(it) }
+    listOf<View>(name, apps, senders, blocked, vip, mute, chatType, keywords, quietStart, quietEnd, instruction, mode, confidence, rate, loop, screenOff, enabled).forEach { root.addView(it) }
     AlertDialog.Builder(this).setTitle(if (existing == null) "Add Replying Rule" else "Edit Replying Rule").setView(ScrollView(this).apply { addView(root) })
       .setPositiveButton("Save") { _, _ ->
-        val r = ReplyRule(existing?.id ?: 0, name.text.toString(), enabled.isChecked, apps.text.toString(), senders.text.toString(), blocked.text.toString(), chatType.text.toString(), keywords.text.toString(), quietStart.text.toString(), quietEnd.text.toString(), screenOff.isChecked, mode.text.toString(), instruction.text.toString(), System.currentTimeMillis())
+        val r = ReplyRule(existing?.id ?: 0, name.text.toString(), enabled.isChecked, apps.text.toString(), senders.text.toString(), blocked.text.toString(), chatType.text.toString(), keywords.text.toString(), quietStart.text.toString(), quietEnd.text.toString(), screenOff.isChecked, mode.text.toString(), instruction.text.toString(), System.currentTimeMillis(),
+          confidence.text.toString().toIntOrNull() ?: 75, rate.text.toString().toIntOrNull() ?: 6, loop.text.toString().toIntOrNull() ?: 10, vip.text.toString(), mute.text.toString())
         if (existing == null) db.replyRuleAdd(r) else db.replyRuleUpdate(r)
         onDone()
       }
@@ -530,8 +559,10 @@ class MainActivity : AppCompatActivity() {
       append("\nGemini API key: ").append(if (key.isBlank()) "MISSING" else "SET")
     }
     val logs = AiAutoReply.logs()
+    val drafts = try { Db.get(this).replyDrafts(20) } catch (_: Exception) { emptyList() }
+    val draftBody = if (drafts.isEmpty()) "No held drafts." else drafts.joinToString("\n\n") { d -> "[${hhmm(d.ts)}] ${d.sender} (${d.pkg})\nReason: ${d.reason}\nIncoming: ${d.incoming.take(180)}\nDraft: ${d.draft.take(220)}" }
     val body = if (logs.isEmpty()) "No auto-reply activity yet.\n\nTip: enable Notification access, Notification auto-reply, and AI smart auto-reply; set Gemini API key in Settings." else logs.joinToString("\n\n————————————\n\n")
-    val msg = "$status\n\n————————————\n\n$body"
+    val msg = "$status\n\n—— HELD DRAFTS ——\n$draftBody\n\n—— LOGS ——\n$body"
     val sv = ScrollView(this)
     val t = tv(msg, 13f, TXT); t.setPadding(dp(16), dp(12), dp(16), dp(12)); t.setTextIsSelectable(true)
     sv.addView(t)
@@ -548,7 +579,27 @@ class MainActivity : AppCompatActivity() {
 
   private fun rebuildTasks() {
     taskBox.removeAllViews()
-    val ts = Db.get(this).tasks()
+    val db = Db.get(this)
+    taskBox.addView(tv("Automation rules", 15f, bold = true))
+    val ars = try { db.autoRules() } catch (_: Exception) { emptyList() }
+    if (ars.isEmpty()) taskBox.addView(tv("No automation rules yet.", 13f, SUB))
+    for (r in ars) {
+      val row = LinearLayout(this); row.orientation = LinearLayout.VERTICAL; row.background = bg(SURF2, 12); row.setPadding(dp(10),dp(8),dp(10),dp(8))
+      val top = LinearLayout(this); top.gravity = Gravity.CENTER_VERTICAL
+      top.addView(tv(r.name.ifBlank { "Rule ${r.id}" }, 14f, TXT, true), LinearLayout.LayoutParams(0,-2,1f))
+      val sw = Switch(this); sw.isChecked = r.enabled; sw.setOnCheckedChangeListener { _,v -> db.autoRuleSetEnabled(r.id,v); Automation.scheduleAll(this); rebuildTasks() }
+      top.addView(sw); row.addView(top)
+      row.addView(tv("trigger=${r.trigger} · condition=${r.condition.ifBlank{"any"}} · cooldown=${r.cooldownMs/60000}m", 11f, SUB))
+      row.addView(tv("action: ${r.action}", 12f, TXT))
+      val acts = LinearLayout(this)
+      acts.addView(btn("Edit", SURF) { showAutoRuleEditor(r) { rebuildTasks() } }, LinearLayout.LayoutParams(0,-2,1f))
+      acts.addView(btn("Delete", SURF) { db.autoRuleDelete(r.id); Automation.cancel(this,r.id); rebuildTasks() }, LinearLayout.LayoutParams(0,-2,1f))
+      row.addView(acts)
+      taskBox.addView(row, LinearLayout.LayoutParams(-1,-2).apply { topMargin = dp(8) })
+    }
+    gap(taskBox, 10)
+    taskBox.addView(tv("Scheduled tasks", 15f, bold = true))
+    val ts = db.tasks()
     if (ts.isEmpty()) { taskBox.addView(tv("No scheduled tasks yet.", 13f, SUB)); return }
     for (t in ts) {
       val r = LinearLayout(this); r.gravity = Gravity.CENTER_VERTICAL
@@ -666,6 +717,22 @@ class MainActivity : AppCompatActivity() {
       rulesCard.addView(row)
     }
 
+    val conflicts = try { db.factConflicts() } catch (_: Exception) { emptyList() }
+    if (conflicts.isNotEmpty()) {
+      val cc = card(learnBox)
+      cc.addView(tv("Conflicts detected (${conflicts.size})", 15f, WARN, true))
+      cc.addView(tv("Keep newest or pick the correct fact. Newer facts get priority.", 12f, SUB))
+      for (grp in conflicts.take(6)) {
+        grp.forEachIndexed { idx, f ->
+          val row = LinearLayout(this); row.orientation = LinearLayout.VERTICAL; row.setPadding(0, dp(6), 0, dp(6))
+          row.addView(tv((if (idx==0) "NEWEST: " else "STALE: ") + "[${f.cat}] ${f.text}", 13f, if (idx==0) GOOD else TXT))
+          val keep = btn(if (idx==0) "Keep newest" else "Keep this", SURF2) { db.factResolveKeep(f.id); rebuildLearning() }
+          row.addView(keep)
+          cc.addView(row)
+        }
+      }
+    }
+
     if (facts.isNotEmpty()) {
       for ((cat, list) in facts.groupBy { it.cat }) {
         val c = card(learnBox)
@@ -673,17 +740,19 @@ class MainActivity : AppCompatActivity() {
         for (f in list) {
           val r = LinearLayout(this); r.gravity = Gravity.CENTER_VERTICAL; r.setPadding(0, dp(6), 0, 0)
           val content = LinearLayout(this); content.orientation = LinearLayout.VERTICAL
-          content.addView(tv(f.text, 14f))
+          content.addView(tv((if (f.pinned) "📌 " else "") + f.text, 14f))
+          content.addView(tv("Updated ${hhmm(f.ts)}${if (f.source.isNotBlank()) " · ${f.source}" else ""}", 11f, SUB))
           val actions = LinearLayout(this); actions.gravity = Gravity.CENTER_VERTICAL
           val move = Spinner(this); move.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, db.categories())
           val selected = db.categories().indexOf(f.cat).coerceAtLeast(0); move.setSelection(selected)
           actions.addView(move, LinearLayout.LayoutParams(0, dp(42), 1f))
-          actions.addView(btn("Move / Edit") {
-            val input = edit("Edit preference", false); input.setText(f.text)
-            AlertDialog.Builder(this).setTitle("Edit preference").setView(input)
+          actions.addView(btn("Edit") {
+            val input = edit("Edit memory", false); input.setText(f.text)
+            AlertDialog.Builder(this).setTitle("Edit memory").setView(input)
               .setPositiveButton("Save") { _, _ -> db.factUpdate(f.id, move.selectedItem?.toString() ?: f.cat, input.text.toString()); rebuildLearning() }
               .setNegativeButton("Cancel", null).show()
           })
+          actions.addView(btn(if (f.pinned) "Unpin" else "Pin", SURF2) { db.factSetPinned(f.id, !f.pinned); rebuildLearning() })
           content.addView(actions); r.addView(content, LinearLayout.LayoutParams(0, -2, 1f))
           val x = tv("✕", 16f, SUB); x.setPadding(dp(12), dp(4), dp(2), dp(4))
           x.setOnClickListener {

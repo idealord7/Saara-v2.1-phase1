@@ -5,15 +5,19 @@ import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
 
 data class Msg(var id: Long, val role: String, var text: String, val ts: Long)
-data class Fact(val id: Long, val cat: String, val text: String, val ts: Long)
+data class Fact(val id: Long, val cat: String, val text: String, val ts: Long, val lastUsed: Long = 0L, val pinned: Boolean = false, val source: String = "")
 data class ShopRow(val id: Long, val item: String, val kind: String, val price: Double, val qty: Double, val party: String, val note: String, val ts: Long)
 data class TaskRow(val id: Long, val whenMs: Long, val text: String, val repeatMs: Long)
 data class TaskStep(val id: Long, val goal: String, val tool: String, val args: String, val result: String, val ok: Boolean, val ts: Long)
 data class Rule(val id: Long, val text: String, val enabled: Boolean, val ts: Long)
-data class ReplyRule(val id: Long, val name: String, val enabled: Boolean, val apps: String, val senders: String, val blockedSenders: String, val chatType: String, val keywords: String, val quietStart: String, val quietEnd: String, val screenOffOnly: Boolean, val mode: String, val instruction: String, val ts: Long)
+data class ReplyDraft(val id: Long, val notifKey: String, val sender: String, val pkg: String, val incoming: String, val draft: String, val reason: String, val ts: Long)
+data class ActionVerification(val id: Long, val goal: String, val tool: String, val args: String, val result: String, val ok: Boolean, val verified: Boolean, val retryCount: Int, val note: String, val ts: Long)
+data class ReplyRule(val id: Long, val name: String, val enabled: Boolean, val apps: String, val senders: String, val blockedSenders: String, val chatType: String, val keywords: String, val quietStart: String, val quietEnd: String, val screenOffOnly: Boolean, val mode: String, val instruction: String, val ts: Long, val confidenceThreshold: Int = 75, val rateLimitPerHour: Int = 6, val loopWindowMin: Int = 10, val vipSenders: String = "", val muteSenders: String = "")
+data class AutoRule(val id: Long, val name: String, val enabled: Boolean, val trigger: String, val condition: String, val action: String, val cooldownMs: Long, val lastFiredMs: Long, val ts: Long)
+data class MemoryFact(val id: Long, val cat: String, val text: String, val ts: Long, val lastUsed: Long = 0L, val pinned: Boolean = false, val source: String = "")
 
 /** Local SQLite store: chat history, learned facts, shop ledger, usage stats, scheduled tasks, task steps. */
-class Db private constructor(c: Context) : SQLiteOpenHelper(c.applicationContext, "saara.db", null, 8) {
+class Db private constructor(c: Context) : SQLiteOpenHelper(c.applicationContext, "saara.db", null, 9) {
   private val appCtx = c.applicationContext
   companion object {
     @Volatile private var inst: Db? = null
@@ -21,9 +25,9 @@ class Db private constructor(c: Context) : SQLiteOpenHelper(c.applicationContext
   }
   override fun onCreate(d: SQLiteDatabase) {
     d.execSQL("CREATE TABLE chat(id INTEGER PRIMARY KEY AUTOINCREMENT, role TEXT, text TEXT, ts INTEGER)")
-    d.execSQL("CREATE TABLE learned(id INTEGER PRIMARY KEY AUTOINCREMENT, cat TEXT, text TEXT, ts INTEGER)")
+    d.execSQL("CREATE TABLE learned(id INTEGER PRIMARY KEY AUTOINCREMENT, cat TEXT, text TEXT, ts INTEGER, last_used INTEGER, pinned INTEGER DEFAULT 0, source TEXT DEFAULT '')")
     d.execSQL("CREATE TABLE categories(name TEXT PRIMARY KEY)")
-    d.execSQL("INSERT OR IGNORE INTO categories(name) VALUES ('general'), ('preference'), ('work'), ('personal'), ('shop')")
+    d.execSQL("INSERT OR IGNORE INTO categories(name) VALUES ('general'), ('personal'), ('preferences'), ('work'), ('shop'), ('mistakes_and_lessons')")
     d.execSQL("CREATE TABLE shop(id INTEGER PRIMARY KEY AUTOINCREMENT, item TEXT, kind TEXT, price REAL, qty REAL, party TEXT, note TEXT, ts INTEGER)")
     d.execSQL("CREATE TABLE usage(id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT, name TEXT, ts INTEGER)")
     d.execSQL("CREATE TABLE tasks(id INTEGER PRIMARY KEY AUTOINCREMENT, whenms INTEGER, text TEXT, repeatms INTEGER)")
@@ -42,12 +46,28 @@ class Db private constructor(c: Context) : SQLiteOpenHelper(c.applicationContext
       try { d.execSQL("ALTER TABLE learned ADD COLUMN last_used INTEGER") } catch (_: Exception) {}
       try { d.execSQL("UPDATE learned SET last_used=ts WHERE last_used IS NULL OR last_used=0") } catch (_: Exception) {}
     }
+    if (o < 9) {
+      try { d.execSQL("ALTER TABLE reply_rules ADD COLUMN confidence_threshold INTEGER DEFAULT 75") } catch (_: Exception) {}
+      try { d.execSQL("ALTER TABLE reply_rules ADD COLUMN rate_limit_per_hour INTEGER DEFAULT 6") } catch (_: Exception) {}
+      try { d.execSQL("ALTER TABLE reply_rules ADD COLUMN loop_window_min INTEGER DEFAULT 10") } catch (_: Exception) {}
+      try { d.execSQL("ALTER TABLE reply_rules ADD COLUMN vip_senders TEXT DEFAULT ''") } catch (_: Exception) {}
+      try { d.execSQL("ALTER TABLE reply_rules ADD COLUMN mute_senders TEXT DEFAULT ''") } catch (_: Exception) {}
+      try { d.execSQL("ALTER TABLE learned ADD COLUMN pinned INTEGER DEFAULT 0") } catch (_: Exception) {}
+      try { d.execSQL("ALTER TABLE learned ADD COLUMN source TEXT DEFAULT ''") } catch (_: Exception) {}
+      try { d.execSQL("CREATE TABLE IF NOT EXISTS auto_rules(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, enabled INTEGER, trigger TEXT, condition TEXT, action TEXT, cooldown_ms INTEGER, last_fired_ms INTEGER, ts INTEGER)") } catch (_: Exception) {}
+      try { d.execSQL("CREATE TABLE IF NOT EXISTS reply_drafts(id INTEGER PRIMARY KEY AUTOINCREMENT, notif_key TEXT, sender TEXT, pkg TEXT, incoming TEXT, draft TEXT, reason TEXT, ts INTEGER)") } catch (_: Exception) {}
+      try { d.execSQL("CREATE TABLE IF NOT EXISTS action_verifications(id INTEGER PRIMARY KEY AUTOINCREMENT, goal TEXT, tool TEXT, args TEXT, result TEXT, ok INTEGER, verified INTEGER, retry_count INTEGER, note TEXT, ts INTEGER)") } catch (_: Exception) {}
+      d.execSQL("INSERT OR IGNORE INTO categories(name) VALUES ('mistakes_and_lessons')")
+    }
   }
   private fun createTaskSteps(d: SQLiteDatabase) {
     d.execSQL("CREATE TABLE IF NOT EXISTS task_steps(id INTEGER PRIMARY KEY AUTOINCREMENT, goal TEXT, tool TEXT, args TEXT, result TEXT, ok INTEGER, ts INTEGER)")
     d.execSQL("CREATE INDEX IF NOT EXISTS idx_task_steps_goal ON task_steps(goal)")
     d.execSQL("CREATE TABLE IF NOT EXISTS rules(id INTEGER PRIMARY KEY AUTOINCREMENT, text TEXT, enabled INTEGER, ts INTEGER)")
-    d.execSQL("CREATE TABLE IF NOT EXISTS reply_rules(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, enabled INTEGER, apps TEXT, senders TEXT, blocked_senders TEXT, chat_type TEXT, keywords TEXT, quiet_start TEXT, quiet_end TEXT, screen_off_only INTEGER, mode TEXT, instruction TEXT, ts INTEGER)")
+    d.execSQL("CREATE TABLE IF NOT EXISTS reply_rules(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, enabled INTEGER, apps TEXT, senders TEXT, blocked_senders TEXT, chat_type TEXT, keywords TEXT, quiet_start TEXT, quiet_end TEXT, screen_off_only INTEGER, mode TEXT, instruction TEXT, ts INTEGER, confidence_threshold INTEGER DEFAULT 75, rate_limit_per_hour INTEGER DEFAULT 6, loop_window_min INTEGER DEFAULT 10, vip_senders TEXT DEFAULT '', mute_senders TEXT DEFAULT '')")
+    d.execSQL("CREATE TABLE IF NOT EXISTS auto_rules(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, enabled INTEGER, trigger TEXT, condition TEXT, action TEXT, cooldown_ms INTEGER, last_fired_ms INTEGER, ts INTEGER)")
+    d.execSQL("CREATE TABLE IF NOT EXISTS reply_drafts(id INTEGER PRIMARY KEY AUTOINCREMENT, notif_key TEXT, sender TEXT, pkg TEXT, incoming TEXT, draft TEXT, reason TEXT, ts INTEGER)")
+    d.execSQL("CREATE TABLE IF NOT EXISTS action_verifications(id INTEGER PRIMARY KEY AUTOINCREMENT, goal TEXT, tool TEXT, args TEXT, result TEXT, ok INTEGER, verified INTEGER, retry_count INTEGER, note TEXT, ts INTEGER)")
   }
 
   // ---------- chat ----------
@@ -91,7 +111,7 @@ class Db private constructor(c: Context) : SQLiteOpenHelper(c.applicationContext
     val head = key.split(Regex("\\s+")).take(4).joinToString(" ")
     return head.ifBlank { t.split(Regex("\\s+")).take(3).joinToString(" ") }
   }
-  fun factAdd(cat: String, text: String) {
+  fun factAdd(cat: String, text: String, source: String = "user") {
     val t = compactFactText(text); if (t.isEmpty()) return
     val category = normalizeCat(cat)
     val now = System.currentTimeMillis()
@@ -99,15 +119,22 @@ class Db private constructor(c: Context) : SQLiteOpenHelper(c.applicationContext
     categoryAdd(category)
     val existing = facts().firstOrNull { it.cat == category && (it.text.equals(t, true) || factHead(it.text) == factHead(t)) }
     if (existing != null) {
-      d.update("learned", ContentValues().apply { put("cat", category); put("text", t); put("ts", now); put("last_used", now) }, "id=?", arrayOf(existing.id.toString()))
+      val newer = now >= existing.ts
+      val merged = if (newer || existing.text.length < 24) t else existing.text
+      d.update("learned", ContentValues().apply {
+        put("cat", category); put("text", merged); put("ts", maxOf(now, existing.ts)); put("last_used", now)
+        put("pinned", if (existing.pinned) 1 else 0); put("source", source.ifBlank { existing.source })
+      }, "id=?", arrayOf(existing.id.toString()))
       return
     }
-    d.insert("learned", null, ContentValues().apply { put("cat", category); put("text", t); put("ts", now); put("last_used", now) })
+    d.insert("learned", null, ContentValues().apply { put("cat", category); put("text", t); put("ts", now); put("last_used", now); put("pinned", 0); put("source", source) })
   }
+  private fun Fact.rowTs(): Long = if (ts > 0) ts else 0L
+  private fun Fact.rowLastUsed(): Long = if (lastUsed > 0) lastUsed else ts
   fun facts(): List<Fact> {
     val out = ArrayList<Fact>()
-    readableDatabase.query("learned", arrayOf("id", "cat", "text", "ts"), null, null, null, null, "ts DESC").use {
-      while (it.moveToNext()) out.add(Fact(it.getLong(0), it.getString(1) ?: "", it.getString(2) ?: "", it.getLong(3)))
+    readableDatabase.rawQuery("SELECT id,cat,text,ts,COALESCE(last_used,ts,0),COALESCE(pinned,0),COALESCE(source,'') FROM learned ORDER BY ts DESC", null).use {
+      while (it.moveToNext()) out.add(Fact(it.getLong(0), it.getString(1) ?: "", it.getString(2) ?: "", it.getLong(3), it.getLong(4), it.getInt(5) == 1, it.getString(6) ?: ""))
     }
     return out
   }
@@ -116,7 +143,24 @@ class Db private constructor(c: Context) : SQLiteOpenHelper(c.applicationContext
     val clean = compactFactText(text); if (clean.isEmpty()) return
     val category = normalizeCat(cat.ifBlank { "general" })
     categoryAdd(category)
-    writableDatabase.update("learned", ContentValues().apply { put("cat", category); put("text", clean); put("ts", System.currentTimeMillis()); put("last_used", System.currentTimeMillis()) }, "id=?", arrayOf(id.toString()))
+    val now = System.currentTimeMillis()
+    val existing = facts().firstOrNull { it.id == id }
+    // conflict resolver: if another fact has same head in same category, keep newest and drop older duplicate
+    facts().filter { it.id != id && normalizeCat(it.cat) == category && factHead(it.text) == factHead(clean) }.forEach { dup ->
+      if (dup.ts <= now) factDelete(dup.id)
+    }
+    writableDatabase.update("learned", ContentValues().apply {
+      put("cat", category); put("text", clean); put("ts", now); put("last_used", now)
+      put("pinned", if (existing?.pinned == true) 1 else 0); put("source", existing?.source ?: "user")
+    }, "id=?", arrayOf(id.toString()))
+  }
+  fun factSetPinned(id: Long, pinned: Boolean) { writableDatabase.update("learned", ContentValues().apply { put("pinned", if (pinned) 1 else 0) }, "id=?", arrayOf(id.toString())) }
+  fun factConflicts(): List<List<Fact>> {
+    return facts().groupBy { normalizeCat(it.cat) + "|" + factHead(it.text) }.values.filter { it.size > 1 }.map { g -> g.sortedByDescending { it.ts } }
+  }
+  fun factResolveKeep(keepId: Long) {
+    val keep = facts().firstOrNull { it.id == keepId } ?: return
+    facts().filter { it.id != keepId && normalizeCat(it.cat) == normalizeCat(keep.cat) && factHead(it.text) == factHead(keep.text) }.forEach { factDelete(it.id) }
   }
   fun categoryAdd(name: String) {
     val clean = normalizeCat(name); if (clean.isNotEmpty()) writableDatabase.insertWithOnConflict("categories", null, ContentValues().apply { put("name", clean) }, SQLiteDatabase.CONFLICT_IGNORE)
@@ -125,27 +169,29 @@ class Db private constructor(c: Context) : SQLiteOpenHelper(c.applicationContext
     val out = mutableListOf<String>()
     readableDatabase.rawQuery("SELECT name FROM categories ORDER BY name", null).use { while (it.moveToNext()) out.add(it.getString(0)) }
     facts().map { it.cat }.distinct().forEach { if (!out.contains(it)) out.add(it) }
-    for (d in listOf("general", "personal", "preferences", "work", "shop")) if (!out.contains(d)) out.add(d)
+    for (d in listOf("general", "personal", "preferences", "work", "shop", "mistakes_and_lessons")) if (!out.contains(d)) out.add(d)
     return out.distinct().sorted()
   }
   fun categoryRename(old: String, new: String) {
     val n = normalizeCat(new); if (n.isEmpty()) return
     categoryAdd(n); writableDatabase.update("learned", ContentValues().apply { put("cat", n) }, "cat=?", arrayOf(old))
-    if (old !in setOf("general", "preference", "preferences", "work", "personal", "shop")) writableDatabase.delete("categories", "name=?", arrayOf(old))
+    if (old !in setOf("general", "preference", "preferences", "work", "personal", "shop", "mistakes_and_lessons")) writableDatabase.delete("categories", "name=?", arrayOf(old))
   }
   fun categoryDelete(name: String) {
     writableDatabase.update("learned", ContentValues().apply { put("cat", "general") }, "cat=?", arrayOf(name))
-    if (name !in setOf("general", "preference", "preferences", "work", "personal", "shop")) writableDatabase.delete("categories", "name=?", arrayOf(name))
+    if (name !in setOf("general", "preference", "preferences", "work", "personal", "shop", "mistakes_and_lessons")) writableDatabase.delete("categories", "name=?", arrayOf(name))
   }
   fun recall(q: String, limit: Int = 12): List<Fact> {
     val words = q.lowercase().split(Regex("[^\\p{L}\\p{N}]+")).filter { it.length >= 2 }
     val now = System.currentTimeMillis()
     val cutoff = now - 3L * 24 * 60 * 60 * 1000
-    try { writableDatabase.delete("learned", "ts < ? AND (last_used IS NULL OR last_used < ?)", arrayOf(cutoff.toString(), cutoff.toString())) } catch (_: Exception) {}
-    val all = facts()
+    try { writableDatabase.delete("learned", "COALESCE(pinned,0)=0 AND ts < ? AND (last_used IS NULL OR last_used < ?)", arrayOf(cutoff.toString(), cutoff.toString())) } catch (_: Exception) {}
+    val all = facts().sortedWith(compareByDescending<Fact> { it.pinned }.thenByDescending { it.ts }.thenByDescending { it.lastUsed })
     val selected = if (words.isEmpty()) all.take(limit)
       else all.map { f -> f to words.count { f.text.lowercase().contains(it) || f.cat.contains(it) } }
-        .filter { it.second > 0 }.sortedByDescending { it.second * 10 + (if (it.first.ts > cutoff) 2 else 0) }.take(limit).map { it.first }
+        .filter { it.second > 0 }
+        .sortedWith(compareByDescending<Pair<Fact,Int>> { it.second * 10 + (if (it.first.pinned) 5 else 0) + (if (it.first.ts > cutoff) 2 else 0) }.thenByDescending { it.first.ts })
+        .take(limit).map { it.first }
     selected.forEach { f -> try { writableDatabase.update("learned", ContentValues().apply { put("last_used", now) }, "id=?", arrayOf(f.id.toString())) } catch (_: Exception) {} }
     return selected
   }
@@ -247,17 +293,22 @@ class Db private constructor(c: Context) : SQLiteOpenHelper(c.applicationContext
   }
   fun rulesPrompt(max: Int = 40): String {
     val rs = rules().filter { it.enabled && it.text.isNotBlank() }.take(max)
-    if (rs.isEmpty()) return ""
+    val lessons = recall("mistake lesson guardrail failure", 6).filter { it.cat == "mistakes_and_lessons" }
+    if (rs.isEmpty() && lessons.isEmpty()) return ""
     val sb = StringBuilder("\nUSER RULES (must follow before action/tool/response):\n")
     rs.forEachIndexed { i: Int, r: Rule -> sb.append(i + 1).append(". ").append(compactFactText(r.text, 220)).append('\n') }
-    return sb.toString()
+    if (lessons.isNotEmpty()) {
+      sb.append("LESSONS / GUARDRAILS (avoid repeating mistakes):\n")
+      lessons.forEachIndexed { i, f -> sb.append(i + 1).append(". ").append(compactFactText(f.text, 180)).append('\n') }
+    }
+    return sb.toString().take(2800)
   }
 
   // ---------- replying rules ----------
   fun replyRules(): List<ReplyRule> {
     val out = mutableListOf<ReplyRule>()
-    readableDatabase.rawQuery("SELECT id,name,enabled,apps,senders,blocked_senders,chat_type,keywords,quiet_start,quiet_end,screen_off_only,mode,instruction,ts FROM reply_rules ORDER BY id ASC", null).use {
-      while (it.moveToNext()) out.add(ReplyRule(it.getLong(0), it.getString(1) ?: "", it.getInt(2) == 1, it.getString(3) ?: "", it.getString(4) ?: "", it.getString(5) ?: "", it.getString(6) ?: "any", it.getString(7) ?: "", it.getString(8) ?: "", it.getString(9) ?: "", it.getInt(10) == 1, it.getString(11) ?: "ai", it.getString(12) ?: "", it.getLong(13)))
+    readableDatabase.rawQuery("SELECT id,name,enabled,apps,senders,blocked_senders,chat_type,keywords,quiet_start,quiet_end,screen_off_only,mode,instruction,ts,COALESCE(confidence_threshold,75),COALESCE(rate_limit_per_hour,6),COALESCE(loop_window_min,10),COALESCE(vip_senders,''),COALESCE(mute_senders,'') FROM reply_rules ORDER BY id ASC", null).use {
+      while (it.moveToNext()) out.add(ReplyRule(it.getLong(0), it.getString(1) ?: "", it.getInt(2) == 1, it.getString(3) ?: "", it.getString(4) ?: "", it.getString(5) ?: "", it.getString(6) ?: "any", it.getString(7) ?: "", it.getString(8) ?: "", it.getString(9) ?: "", it.getInt(10) == 1, it.getString(11) ?: "ai", it.getString(12) ?: "", it.getLong(13), it.getInt(14), it.getInt(15), it.getInt(16), it.getString(17) ?: "", it.getString(18) ?: ""))
     }
     return out
   }
@@ -270,6 +321,8 @@ class Db private constructor(c: Context) : SQLiteOpenHelper(c.applicationContext
     put("blocked_senders", r.blockedSenders.trim()); put("chat_type", r.chatType.trim().ifBlank { "any" }); put("keywords", r.keywords.trim())
     put("quiet_start", r.quietStart.trim()); put("quiet_end", r.quietEnd.trim()); put("screen_off_only", if (r.screenOffOnly) 1 else 0)
     put("mode", r.mode.trim().ifBlank { "ai" }); put("instruction", r.instruction.trim().take(500)); put("ts", System.currentTimeMillis())
+    put("confidence_threshold", r.confidenceThreshold.coerceIn(0, 100)); put("rate_limit_per_hour", r.rateLimitPerHour.coerceIn(1, 60))
+    put("loop_window_min", r.loopWindowMin.coerceIn(1, 120)); put("vip_senders", r.vipSenders.trim()); put("mute_senders", r.muteSenders.trim())
   }
 
   // ---------- task-step memory ----------
@@ -297,7 +350,63 @@ class Db private constructor(c: Context) : SQLiteOpenHelper(c.applicationContext
     val words = q.lowercase().split(Regex("[^\\p{L}\\p{N}]+")).filter { it.length >= 3 }
     val recent = taskSteps(300)
     if (words.isEmpty()) return recent.take(limit)
-    return recent.map { s -> s to words.count { s.goal.lowercase().contains(it) } }
+    return recent.map { s -> s to words.count { s.goal.lowercase().contains(it) || s.tool.lowercase().contains(it) || s.result.lowercase().contains(it) } }
       .filter { it.second > 0 }.sortedByDescending { it.second }.take(limit).map { it.first }
   }
+
+  // ---------- auto rules ----------
+  fun autoRules(): List<AutoRule> {
+    val out = mutableListOf<AutoRule>()
+    readableDatabase.rawQuery("SELECT id,name,enabled,trigger,condition,action,cooldown_ms,last_fired_ms,ts FROM auto_rules ORDER BY id ASC", null).use {
+      while (it.moveToNext()) out.add(AutoRule(it.getLong(0), it.getString(1) ?: "", it.getInt(2) == 1, it.getString(3) ?: "time", it.getString(4) ?: "", it.getString(5) ?: "", it.getLong(6), it.getLong(7), it.getLong(8)))
+    }
+    return out
+  }
+  fun autoRuleAdd(r: AutoRule): Long = writableDatabase.insert("auto_rules", null, autoRuleCv(r))
+  fun autoRuleUpdate(r: AutoRule) { writableDatabase.update("auto_rules", autoRuleCv(r), "id=?", arrayOf(r.id.toString())) }
+  fun autoRuleDelete(id: Long) { writableDatabase.delete("auto_rules", "id=?", arrayOf(id.toString())) }
+  fun autoRuleSetEnabled(id: Long, enabled: Boolean) { writableDatabase.update("auto_rules", ContentValues().apply { put("enabled", if (enabled) 1 else 0); put("ts", System.currentTimeMillis()) }, "id=?", arrayOf(id.toString())) }
+  fun autoRuleMarkFired(id: Long, ts: Long = System.currentTimeMillis()) { writableDatabase.update("auto_rules", ContentValues().apply { put("last_fired_ms", ts) }, "id=?", arrayOf(id.toString())) }
+  private fun autoRuleCv(r: AutoRule) = ContentValues().apply {
+    put("name", r.name.trim().take(80)); put("enabled", if (r.enabled) 1 else 0); put("trigger", r.trigger.trim().ifBlank { "time" })
+    put("condition", r.condition.trim().take(500)); put("action", r.action.trim().take(800))
+    put("cooldown_ms", r.cooldownMs.coerceAtLeast(0L)); put("last_fired_ms", r.lastFiredMs); put("ts", System.currentTimeMillis())
+  }
+
+  // ---------- reply drafts / guardrails ----------
+  fun replyDraftAdd(notifKey: String, sender: String, pkg: String, incoming: String, draft: String, reason: String): Long {
+    val id = writableDatabase.insert("reply_drafts", null, ContentValues().apply {
+      put("notif_key", notifKey); put("sender", sender.take(120)); put("pkg", pkg.take(120)); put("incoming", incoming.take(1200))
+      put("draft", draft.take(1500)); put("reason", reason.take(300)); put("ts", System.currentTimeMillis())
+    })
+    try { writableDatabase.execSQL("DELETE FROM reply_drafts WHERE id NOT IN (SELECT id FROM reply_drafts ORDER BY id DESC LIMIT 80)") } catch (_: Exception) {}
+    return id
+  }
+  fun replyDrafts(limit: Int = 40): List<ReplyDraft> {
+    val out = mutableListOf<ReplyDraft>()
+    readableDatabase.rawQuery("SELECT id,notif_key,sender,pkg,incoming,draft,reason,ts FROM reply_drafts ORDER BY id DESC LIMIT ${limit.coerceIn(1,200)}", null).use {
+      while (it.moveToNext()) out.add(ReplyDraft(it.getLong(0), it.getString(1) ?: "", it.getString(2) ?: "", it.getString(3) ?: "", it.getString(4) ?: "", it.getString(5) ?: "", it.getString(6) ?: "", it.getLong(7)))
+    }
+    return out
+  }
+  fun replyDraftDelete(id: Long) { writableDatabase.delete("reply_drafts", "id=?", arrayOf(id.toString())) }
+  fun replyDraftClear() { writableDatabase.delete("reply_drafts", null, null) }
+
+  // ---------- post-task verification ----------
+  fun actionVerificationAdd(goal: String, tool: String, args: String, result: String, ok: Boolean, verified: Boolean, retryCount: Int, note: String): Long {
+    val id = writableDatabase.insert("action_verifications", null, ContentValues().apply {
+      put("goal", goal.take(220)); put("tool", tool.take(80)); put("args", args.take(400)); put("result", result.take(800))
+      put("ok", if (ok) 1 else 0); put("verified", if (verified) 1 else 0); put("retry_count", retryCount); put("note", note.take(300)); put("ts", System.currentTimeMillis())
+    })
+    try { writableDatabase.execSQL("DELETE FROM action_verifications WHERE id NOT IN (SELECT id FROM action_verifications ORDER BY id DESC LIMIT 200)") } catch (_: Exception) {}
+    return id
+  }
+  fun actionVerifications(limit: Int = 40): List<ActionVerification> {
+    val out = mutableListOf<ActionVerification>()
+    readableDatabase.rawQuery("SELECT id,goal,tool,args,result,ok,verified,retry_count,note,ts FROM action_verifications ORDER BY id DESC LIMIT ${limit.coerceIn(1,200)}", null).use {
+      while (it.moveToNext()) out.add(ActionVerification(it.getLong(0), it.getString(1) ?: "", it.getString(2) ?: "", it.getString(3) ?: "", it.getString(4) ?: "", it.getInt(5) == 1, it.getInt(6) == 1, it.getInt(7), it.getString(8) ?: "", it.getLong(9)))
+    }
+    return out
+  }
 }
+

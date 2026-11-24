@@ -45,6 +45,8 @@ object Tools {
 {"name":"recall_task","description":"Recall which tool steps worked or failed for a similar mobile task. Stored locally on this phone.","parameters":{"type":"OBJECT","properties":{"query":{"type":"STRING"}},"required":["query"]}},
 {"name":"request_screen_share","description":"Ask Android for screen-capture permission and start live screen sharing when a task needs to see the current screen. The user sees a permission prompt and must tap Allow. Sharing requested this way stops automatically when the task ends.","parameters":{"type":"OBJECT","properties":{}}},
 {"name":"stop_screen_share","description":"Stop live screen sharing when the task no longer needs to see the screen.","parameters":{"type":"OBJECT","properties":{}}},
+{"name":"capture_screen_context","description":"Capture current screen once (with user permission prompt if needed) and return/summarize what is on screen: active app, forms, chats, invoices, errors, and suggested next steps.","parameters":{"type":"OBJECT","properties":{"mode":{"type":"STRING","description":"context|ocr"}}}},
+{"name":"screen_ocr_extract","description":"Capture screen and extract structured form/invoice/bill fields as JSON/text. Use before autofill or when user asks to read details from screen.","parameters":{"type":"OBJECT","properties":{}}},
 {"name":"shop_record","description":"Shop-owner ledger. kind = purchase (price the user BOUGHT stock at), sale (price SOLD at), cancellation (cancelled / returned order, price = refunded unit price), price (list or MRP price note). item, price per unit, qty, party = supplier or customer name, note.","parameters":{"type":"OBJECT","properties":{"item":{"type":"STRING"},"kind":{"type":"STRING"},"price":{"type":"NUMBER"},"qty":{"type":"NUMBER"},"party":{"type":"STRING"},"note":{"type":"STRING"}},"required":["item","kind","price"]}},
 {"name":"shop_report","description":"Read the shop ledger: purchase / sale prices, quantities, cancellations and margin per item. item optional (empty = all items).","parameters":{"type":"OBJECT","properties":{"item":{"type":"STRING"}}}},
 {"name":"schedule_task","description":"Schedule a task or reminder for later. text = what to do/say when it fires. Give in_minutes OR at (HH:mm 24h, or yyyy-MM-dd HH:mm). repeat = none | hourly | daily | weekly.","parameters":{"type":"OBJECT","properties":{"text":{"type":"STRING"},"in_minutes":{"type":"NUMBER"},"at":{"type":"STRING"},"repeat":{"type":"STRING"},"confirmed":{"type":"BOOLEAN"}},"required":["text"]}},
@@ -142,6 +144,7 @@ object Tools {
     val confirmation = TaskControl.confirmationFor(name, a)
     if (confirmation != null && !TaskControl.isApproved()) return TaskControl.request(confirmation)
     try { Db.get(c).recall(Bus.lastUser, 6) } catch (_: Exception) {} // pre-task memory touch/prune
+    val started = System.currentTimeMillis()
     val result = try {
       when (name) {
         "device_control" -> { Db.get(c).usage("action", a.optString("action")); if (a.optString("action") == "open_app") Db.get(c).usage("app", a.optString("target")); device(c, a) }
@@ -165,6 +168,22 @@ object Tools {
           if (Bus.screenOn) c.startService(Intent(c, VoiceService::class.java).setAction("SCREEN_STOP"))
           "screen sharing stopped"
         }
+        "capture_screen_context" -> {
+          if (!Prefs.on(c, "f_share", true)) off("Camera & screen sharing")
+          else if (!Bus.running) "Saara is not started. Ask the user to tap Start, then try again."
+          else if (!canLaunch(c)) LAUNCH_HINT
+          else {
+            val mode = a.optString("mode", "context").ifBlank { "context" }
+            launch(c, Intent(c, ScreenAskActivity::class.java).putExtra("mode", if (mode == "ocr") "ocr" else "capture"))
+            "screen capture prompt opened; after Allow Saara will analyze the screen"
+          }
+        },
+        "screen_ocr_extract" -> {
+          if (!Prefs.on(c, "f_share", true)) off("Camera & screen sharing")
+          else if (!Bus.running) "Saara is not started. Ask the user to tap Start, then try again."
+          else if (!canLaunch(c)) LAUNCH_HINT
+          else { launch(c, Intent(c, ScreenAskActivity::class.java).putExtra("mode", "ocr")); "screen OCR prompt opened; after Allow Saara will extract structured fields" }
+        },
         "shop_record" -> {
           val kind = a.optString("kind").lowercase().let { k -> when { k.startsWith("pur") || k.startsWith("buy") || k.startsWith("bought") -> "purchase"; k.startsWith("sal") || k.startsWith("sell") || k.startsWith("sold") -> "sale"; k.startsWith("can") || k.startsWith("ret") || k.startsWith("ref") -> "cancellation"; else -> "price" } }
           Db.get(c).shopAdd(a.optString("item"), kind, a.optDouble("price", 0.0), a.optDouble("qty", 1.0), a.optString("party"), a.optString("note"))
@@ -181,8 +200,12 @@ object Tools {
         else -> "unknown tool"
       }
     } catch (e: Exception) { "error: ${e.message}" }
+    val ok = !result.startsWith("error") && !result.startsWith("unknown") && !result.startsWith("timeout") && !result.contains("permission missing", true)
     if (name !in readOnly && Prefs.on(c, "learn_tasks", true)) {
       try { TaskLearning.note(c, Bus.lastUser, name, a, result) } catch (_: Exception) {}
+    }
+    if (name in setOf("ui_action","device_control","send_direct_message","reply_notification","request_screen_share","stop_screen_share")) {
+      try { PostTaskVerifier.verify(c, Bus.lastUser, name, a.toString(), result, ok) } catch (_: Exception) {}
     }
     return result
   }

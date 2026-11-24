@@ -29,6 +29,8 @@ object TaskControl {
     RegexOption.IGNORE_CASE
   )
   private val GATED_DEVICE = setOf("end_call", "reject_call")
+  private val RISKY_DEVICE = setOf("call", "sms")
+  private val RISKY_UI = Regex("\\b(delete|erase|remove|pay|payment|send|submit|order|buy|purchase|confirm|checkout|book|transfer|logout|log out|sign out|block|report)\\b", RegexOption.IGNORE_CASE)
 
   @Volatile private var askedSeq = -1
   @Volatile private var approvedSeq = -1
@@ -50,8 +52,9 @@ object TaskControl {
   fun confirmationFor(name: String, a: JSONObject): String? = when (name) {
     "device_control" -> {
       val act = a.optString("action")
-      if (act !in GATED_DEVICE) null else when (act) {
-        "end_call", "reject_call" -> "end or reject the call"
+      when {
+        act in GATED_DEVICE -> "end or reject the call"
+        act in RISKY_DEVICE && !a.optBoolean("confirmed", false) -> "$act ${a.optString("target").take(40)}".trim() + " (high-risk action)"
         else -> null
       }
     }
@@ -63,10 +66,14 @@ object TaskControl {
         a.has("x") || a.has("y") -> "tap at (${a.optDouble("x").toInt()}, ${a.optDouble("y").toInt()})"
         else -> "perform screen action '$op'"
       }
-      val intent = listOf(Bus.lastUser, a.optString("text"), a.optString("id"), a.optString("target"), a.optString("direction")).joinToString(" ")
-      if (DESTRUCTIVE.containsMatchIn(intent)) detail else null
+      val intent = listOf(Bus.lastUser, a.optString("text"), a.optString("id"), a.optString("target"), a.optString("direction"), a.optString("key")).joinToString(" ")
+      if (DESTRUCTIVE.containsMatchIn(intent) || RISKY_UI.containsMatchIn(intent)) detail else null
     }
     "cancel_task" -> "cancel scheduled task #${a.optLong("id")}"
+    "reply_notification", "send_direct_message" -> {
+      val target = a.optString("sender").ifBlank { a.optString("target") }
+      "send message to ${target.ifBlank { "recipient" }} (high-risk action)"
+    }
     else -> null
   }
 
@@ -91,7 +98,8 @@ object TaskControl {
     askedSeq = Bus.userSeq
     approvedSeq = -1
     requested = summary
-    return "CONFIRMATION REQUIRED: \"$summary\" has NOT been done. In the user's language, give one short summary of what you will do and ask them to confirm. Do not call any action tool until the user replies. After they confirm, retry with confirmed=true."
+    Bus.add("system", "Confirmation required: $summary", true)
+    return "CONFIRMATION REQUIRED: \"$summary\" has NOT been done. Ask the user clearly via voice/overlay to confirm. Do not call any action tool until the user confirms. After confirmation, retry with confirmed=true."
   }
 
   fun clear() {
