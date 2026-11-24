@@ -519,7 +519,7 @@ class MainActivity : AppCompatActivity() {
     feature(root, "Confirm before calls", "Ask before placing calls.", "confirm_calls", true, { true }, "", {})
     feature(root, "Confirm before SMS/messages", "Ask before sending SMS/WhatsApp/Telegram/replies.", "confirm_messages", true, { true }, "", {})
     feature(root, "Offline/503 fallback retry", "Auto-retry transient network/503 errors with backoff and queue pending tasks.", "f_offline_retry", true, { true }, "", {})
-
+  }
 
   private fun buildAutomation(): View {
     val (sv, root) = page()
@@ -1284,5 +1284,4 @@ class MainActivity : AppCompatActivity() {
   }
   override fun onPause() { visible = false; Bus.unlisten(busListener); super.onPause() }
   override fun onDestroy() { contactsHandler.removeCallbacks(contactsDebounce); contactsExecutor.shutdownNow(); knowledgeExecutor.shutdownNow(); super.onDestroy() }
-}
 }
