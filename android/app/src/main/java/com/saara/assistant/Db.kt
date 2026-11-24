@@ -168,21 +168,16 @@ class Db private constructor(c: Context) : SQLiteOpenHelper(c.applicationContext
   fun ruleAdd(text: String): Long {
     val t = text.trim().take(500); if (t.isEmpty()) return -1L
     val ts = System.currentTimeMillis()
-    val id = writableDatabase.insert("rules", null, ContentValues().apply { put("text", t); put("enabled", 1); put("ts", ts) })
-    if (id > 0) syncRule(Rule(id, t, true, ts))
-    return id
+    return writableDatabase.insert("rules", null, ContentValues().apply { put("text", t); put("enabled", 1); put("ts", ts) })
   }
   fun ruleUpdate(id: Long, text: String) {
     val t = text.trim().take(500); if (t.isEmpty()) return
     val ts = System.currentTimeMillis()
     writableDatabase.update("rules", ContentValues().apply { put("text", t); put("ts", ts) }, "id=?", arrayOf(id.toString()))
-    val r = rules().firstOrNull { it.id == id }
-    if (r != null) syncRule(r.copy(text = t, ts = ts)) else syncRule(Rule(id, t, true, ts))
   }
   fun ruleSetEnabled(id: Long, enabled: Boolean) {
     val ts = System.currentTimeMillis()
     writableDatabase.update("rules", ContentValues().apply { put("enabled", if (enabled) 1 else 0); put("ts", ts) }, "id=?", arrayOf(id.toString()))
-    rules().firstOrNull { it.id == id }?.let { syncRule(it) }
   }
   fun ruleDelete(id: Long) {
     writableDatabase.delete("rules", "id=?", arrayOf(id.toString()))
