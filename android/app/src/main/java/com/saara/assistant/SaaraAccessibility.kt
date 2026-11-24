@@ -51,6 +51,7 @@ class SaaraAccessibility : AccessibilityService() {
         else "not found: id '$id' after retries. Call dump_ui or list_fields and use the short id shown there."
       }
       "tap_xy" -> { if (!m.has("x") || !m.has("y")) return "error: x and y are required"; tapXY(m.optDouble("x").toFloat(), m.optDouble("y").toFloat()); return settled("tapped xy") }
+      "tap_key" -> return tapKey(m.optString("text").ifBlank { m.optString("key") })
       "double_tap" -> {
         val t = m.optString("text")
         if (t.isNotBlank()) {
@@ -519,8 +520,7 @@ class SaaraAccessibility : AccessibilityService() {
     while (p != null && !p.isClickable) p = p.parent
     if (p != null && p.performAction(AccessibilityNodeInfo.ACTION_CLICK)) return true
     val b = bounds(n)
-    if (!b.isEmpty && n.isVisibleToUser) { tapXY(b.exactCenterX(), b.exactCenterY()); return true }
-    return false
+    return !b.isEmpty && tapXY(b.exactCenterX(), b.exactCenterY())
   }
   private fun gesture(x1: Float, y1: Float, x2: Float, y2: Float, dur: Long): Boolean {
     val p = Path().apply { moveTo(x1, y1); if (x1 != x2 || y1 != y2) lineTo(x2, y2) }
@@ -528,7 +528,14 @@ class SaaraAccessibility : AccessibilityService() {
     sleep(dur + 150)
     return ok
   }
-  private fun tapXY(x: Float, y: Float) { gesture(x, y, x, y, 80) }
+  private fun clampX(x: Float) = x.coerceIn(2f, (sw() - 2).coerceAtLeast(2).toFloat())
+  private fun clampY(y: Float) = y.coerceIn(2f, (sh() - 2).coerceAtLeast(2).toFloat())
+  private fun tapXY(x: Float, y: Float): Boolean {
+    val cx = clampX(x); val cy = clampY(y)
+    val ok = gesture(cx, cy, cx + 1f, cy + 1f, 70)
+    sleep(60)
+    return ok
+  }
   private fun doubleTap(x: Float, y: Float) { tapXY(x, y); sleep(90); tapXY(x, y) }
 
   private fun waitText(t: String, timeoutMs: Long): String {
@@ -541,6 +548,30 @@ class SaaraAccessibility : AccessibilityService() {
       sleep(250)
     }
     return "not found: '$q' after ${timeout}ms. Screen now: " + dump(3000)
+  }
+
+  private fun tapKey(raw: String): String {
+    val k = raw.trim()
+    if (k.isBlank()) return "error: key/text is required"
+    val key = k.lowercase()
+    val candidates = when (key) {
+      "space", " " -> listOf("space", "spacebar")
+      "enter", "return", "go", "search", "done", "send" -> listOf(k, "enter", "return", "go", "search", "done", "send")
+      "backspace", "delete", "del" -> listOf("backspace", "delete", "del")
+      else -> listOf(k, key.uppercase())
+    }
+    for (c in candidates) if (tapTextSmart(c)) return settled("tapped key '$k'")
+    // Fallback: find smallest visible clickable node whose text/desc exactly matches key (keyboard keys)
+    for (r in allRoots()) {
+      val n = find(r) {
+        if (!it.isVisibleToUser) return@find false
+        val b = bounds(it); if (b.isEmpty || b.width() > sw() * 0.35) return@find false
+        val t = ((it.text ?: it.contentDescription)?.toString() ?: "").trim()
+        t.equals(k, true) || (k.length == 1 && t.equals(k, true))
+      }.minByOrNull { val b = bounds(it); b.width() * b.height() }
+      if (n != null && clickNode(n)) return settled("tapped key '$k'")
+    }
+    return "not found: keyboard key '$k'. Use dump_ui to locate key bounds and tap_xy center, or type text directly into the field."
   }
 
   private fun scrollNode(forward: Boolean): Boolean {

@@ -38,7 +38,7 @@ import java.util.concurrent.TimeoutException
 object Tools {
   fun declarations(): JSONArray = JSONArray("""[{"functionDeclarations":[
 {"name":"device_control","description":"Phone controls. action is one of: torch_on, torch_off, volume_up, volume_down, volume_set (level 0-100), open_app (target = app name, e.g. WhatsApp, WhatsApp Business, Instagram, Camera), open_camera, take_photo (opens the camera AND presses the shutter by itself; text = front for a selfie), call (target = contact name or number), answer_call, end_call, reject_call, sms (target + text), read_sms (target optional contact/name/number, limit), read_call_log (target optional, limit), read_contacts (target query optional, limit), wifi_panel, bluetooth_panel. open_app returns the new screen contents. PRE-TASK: before acting, check relevant memory/rules and current device/app context. For direct person actions (call/message/contact lookup), ALWAYS use read_contacts/read_sms/read_call_log or direct device actions rather than relying only on cached memory. Ask once only for destructive/irreversible steps or genuinely unclear targets; clear calls, messages, reads, app opens, taps and typing can proceed.","parameters":{"type":"OBJECT","properties":{"action":{"type":"STRING"},"target":{"type":"STRING"},"text":{"type":"STRING"},"level":{"type":"NUMBER"},"limit":{"type":"NUMBER"},"confirmed":{"type":"BOOLEAN"}},"required":["action"]}},
-{"name":"ui_action","description":"Control the screen via accessibility. EVERY op returns the new screen contents, so you can keep going without asking again. op: dump_ui, dump_small, list_fields (returns structured editable fields: index,id,resource_id,label,hint,desc,value,focused,bounds), tap_text, tap_id, tap_xy, double_tap, long_press, type, clear_text, select_all, copy_text, paste, enter, swipe, scroll_down, scroll_up, wait, wait_text, back, home, recents, notifications, shutter, flip_camera. FORM/MULTI-FIELD RULES (STRICT): before filling any form with 2+ inputs call list_fields and plan mapping. Enter values ONE FIELD AT A TIME: target the exact field with field_index or field_id or field_label, focus/verify target, then type only that field's value (replace=true to overwrite). If the UI shows multiple editable fields, do NOT guess and do NOT dump/paste combined multi-field data into one field; bulk multi-line text into one field is blocked unless allow_bulk=true is explicitly required. If you cannot confidently match a value to a specific field or mapping is ambiguous, STOP for that item and ask the user to clarify (report the available fields). Reporting: state clearly what was entered into which field. Ask once only for destructive/irreversible steps or genuinely unclear targets; clear taps/typing can proceed field-by-field.","parameters":{"type":"OBJECT","properties":{"op":{"type":"STRING"},"text":{"type":"STRING"},"id":{"type":"STRING"},"x":{"type":"NUMBER"},"y":{"type":"NUMBER"},"x2":{"type":"NUMBER"},"y2":{"type":"NUMBER"},"direction":{"type":"STRING"},"ms":{"type":"NUMBER"},"timeout":{"type":"NUMBER"},"replace":{"type":"BOOLEAN"},"field_index":{"type":"NUMBER"},"field_id":{"type":"STRING"},"field_label":{"type":"STRING"},"allow_bulk":{"type":"BOOLEAN"},"confirmed":{"type":"BOOLEAN"}},"required":["op"]}},
+{"name":"ui_action","description":"Control screen via accessibility. EVERY op returns new screen. op: dump_ui,dump_small,list_fields,tap_text,tap_id,tap_xy,tap_key (tap on-screen keyboard key by text/key),double_tap,long_press,type,clear_text,select_all,copy_text,paste,enter,swipe,scroll_down,scroll_up,wait,wait_text,back,home,recents,notifications,shutter,flip_camera. For keyboard typing, prefer type on focused field; for individual key taps use tap_key or dump_ui+tap_xy on key bounds. Keep trying alternate UI paths until success; report status after major steps. FORM RULES: for 2+ inputs call list_fields, fill one field at a time, verify target, no bulk dump into one field unless allow_bulk=true. If ambiguous, ask user to clarify.","parameters":{"type":"OBJECT","properties":{"op":{"type":"STRING"},"text":{"type":"STRING"},"id":{"type":"STRING"},"key":{"type":"STRING"},"x":{"type":"NUMBER"},"y":{"type":"NUMBER"},"x2":{"type":"NUMBER"},"y2":{"type":"NUMBER"},"direction":{"type":"STRING"},"ms":{"type":"NUMBER"},"timeout":{"type":"NUMBER"},"replace":{"type":"BOOLEAN"},"field_index":{"type":"NUMBER"},"field_id":{"type":"STRING"},"field_label":{"type":"STRING"},"allow_bulk":{"type":"BOOLEAN"},"confirmed":{"type":"BOOLEAN"}},"required":["op"]}},
 {"name":"remember","description":"Save a concise user fact for improvement. Store brief, categorized, non-conversational facts; consolidate related details under clear headwords (personal/work/preferences/shop). Prioritize new over stale data and update/remove obsolete facts on correction. Call quietly; do not announce. category = personal | work | preferences | shop | general.","parameters":{"type":"OBJECT","properties":{"fact":{"type":"STRING"},"category":{"type":"STRING"}},"required":["fact"]}},
 {"name":"recall","description":"Search everything you have learned about the user (older than the list in your instructions). query = keywords.","parameters":{"type":"OBJECT","properties":{"query":{"type":"STRING"}},"required":["query"]}},
 {"name":"remember_task","description":"Save which tool steps worked for a repeated mobile task so future attempts improve. goal = the task, method = concise working steps. Never include contacts, messages, ledger data, URLs, or screen text.","parameters":{"type":"OBJECT","properties":{"goal":{"type":"STRING"},"method":{"type":"STRING"}},"required":["goal","method"]}},
@@ -245,11 +245,14 @@ object Tools {
     val proj = arrayOf(ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME, ContactsContract.CommonDataKinds.Phone.NUMBER)
     val sel = if (q.isBlank()) null else "${ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME} LIKE ? OR ${ContactsContract.CommonDataKinds.Phone.NUMBER} LIKE ?"
     val args = if (q.isBlank()) null else arrayOf("%$q%", "%$q%")
-    c.contentResolver.query(uri, proj, sel, args, ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME + " ASC LIMIT $l")?.use { cur ->
-      while (cur.moveToNext()) {
-        val name = cur.getString(0).orEmpty()
-        val num = cur.getString(1).orEmpty()
-        if (name.isNotBlank() || num.isNotBlank()) out.add("${name.ifBlank { "Unknown" }}: $num")
+    try {
+      c.contentResolver.query(uri, proj, sel, args, ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME + " ASC LIMIT $l")?.use { cur ->
+        while (cur.moveToNext()) { val name = cur.getString(0).orEmpty(); val num = cur.getString(1).orEmpty(); if (name.isNotBlank() || num.isNotBlank()) out.add("${name.ifBlank { "Unknown" }}: $num") }
+      }
+    } catch (_: Exception) {
+      c.contentResolver.query(uri, proj, sel, args, ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME + " ASC")?.use { cur ->
+        var n = 0
+        while (cur.moveToNext() && n < l) { val name = cur.getString(0).orEmpty(); val num = cur.getString(1).orEmpty(); if (name.isNotBlank() || num.isNotBlank()) { out.add("${name.ifBlank { "Unknown" }}: $num"); n++ } }
       }
     }
     return if (out.isEmpty()) "No contacts found" + if (q.isNotBlank()) " for '$q'" else "" else out.joinToString("\n")
@@ -263,21 +266,36 @@ object Tools {
     val sel = if (target.isBlank()) null else "${CallLog.Calls.CACHED_NAME} LIKE ? OR ${CallLog.Calls.NUMBER} LIKE ?"
     val args = if (target.isBlank()) null else arrayOf("%$target%", "%$target%")
     val out = ArrayList<String>()
-    c.contentResolver.query(uri, proj, sel, args, CallLog.Calls.DATE + " DESC LIMIT $l")?.use { cur ->
-      while (cur.moveToNext()) {
-        val name = cur.getString(0).orEmpty()
-        val num = cur.getString(1).orEmpty()
-        val type = when (cur.getInt(2)) {
-          CallLog.Calls.INCOMING_TYPE -> "incoming"
-          CallLog.Calls.OUTGOING_TYPE -> "outgoing"
-          CallLog.Calls.MISSED_TYPE -> "missed"
-          CallLog.Calls.REJECTED_TYPE -> "rejected"
-          else -> "call"
+    try {
+      c.contentResolver.query(uri, proj, sel, args, CallLog.Calls.DATE + " DESC LIMIT $l")?.use { cur ->
+        while (cur.moveToNext()) {
+          val name = cur.getString(0).orEmpty(); val num = cur.getString(1).orEmpty()
+          val type = when (cur.getInt(2)) { CallLog.Calls.INCOMING_TYPE -> "incoming"; CallLog.Calls.OUTGOING_TYPE -> "outgoing"; CallLog.Calls.MISSED_TYPE -> "missed"; CallLog.Calls.REJECTED_TYPE -> "rejected"; else -> "call" }
+          val who = if (name.isNotBlank()) "$name ($num)" else num.ifBlank { "unknown" }
+          out.add("$type · $who · ${fmtTs(cur.getLong(3))} · ${cur.getLong(4)}s")
         }
-        val ts = cur.getLong(3)
-        val dur = cur.getLong(4)
-        val who = if (name.isNotBlank()) "$name ($num)" else num.ifBlank { "unknown" }
-        out.add("$type · $who · ${fmtTs(ts)} · ${dur}s")
+      }
+    } catch (_: Exception) {
+      try {
+        val q = android.os.Bundle().apply { putStringArray(android.content.ContentResolver.QUERY_ARG_SQL_SELECTION, null); putString(android.content.ContentResolver.QUERY_ARG_SQL_SELECTION, sel); putStringArray(android.content.ContentResolver.QUERY_ARG_SQL_SELECTION_ARGS, args); putStringArray(android.content.ContentResolver.QUERY_ARG_SORT_COLUMNS, arrayOf(CallLog.Calls.DATE)); putInt(android.content.ContentResolver.QUERY_ARG_SORT_DIRECTION, android.content.ContentResolver.QUERY_SORT_DIRECTION_DESCENDING); putInt(android.content.ContentResolver.QUERY_ARG_LIMIT, l) }
+        c.contentResolver.query(uri, proj, q, null)?.use { cur ->
+          while (cur.moveToNext()) {
+            val name = cur.getString(0).orEmpty(); val num = cur.getString(1).orEmpty()
+            val type = when (cur.getInt(2)) { CallLog.Calls.INCOMING_TYPE -> "incoming"; CallLog.Calls.OUTGOING_TYPE -> "outgoing"; CallLog.Calls.MISSED_TYPE -> "missed"; CallLog.Calls.REJECTED_TYPE -> "rejected"; else -> "call" }
+            val who = if (name.isNotBlank()) "$name ($num)" else num.ifBlank { "unknown" }
+            out.add("$type · $who · ${fmtTs(cur.getLong(3))} · ${cur.getLong(4)}s")
+          }
+        }
+      } catch (_: Exception) {
+        c.contentResolver.query(uri, proj, sel, args, CallLog.Calls.DATE + " DESC")?.use { cur ->
+          var n = 0
+          while (cur.moveToNext() && n < l) {
+            val name = cur.getString(0).orEmpty(); val num = cur.getString(1).orEmpty()
+            val type = when (cur.getInt(2)) { CallLog.Calls.INCOMING_TYPE -> "incoming"; CallLog.Calls.OUTGOING_TYPE -> "outgoing"; CallLog.Calls.MISSED_TYPE -> "missed"; CallLog.Calls.REJECTED_TYPE -> "rejected"; else -> "call" }
+            val who = if (name.isNotBlank()) "$name ($num)" else num.ifBlank { "unknown" }
+            out.add("$type · $who · ${fmtTs(cur.getLong(3))} · ${cur.getLong(4)}s"); n++
+          }
+        }
       }
     }
     return if (out.isEmpty()) "No call log entries found" + if (target.isNotBlank()) " for '$target'" else "" else out.joinToString("\n")
@@ -291,13 +309,22 @@ object Tools {
     val sel = if (target.isBlank()) null else "${Telephony.Sms.ADDRESS} LIKE ? OR ${Telephony.Sms.BODY} LIKE ?"
     val args = if (target.isBlank()) null else arrayOf("%$target%", "%$target%")
     val out = ArrayList<String>()
-    c.contentResolver.query(uri, proj, sel, args, Telephony.Sms.DATE + " DESC LIMIT $l")?.use { cur ->
-      while (cur.moveToNext()) {
-        val addr = cur.getString(0).orEmpty()
-        val body = cur.getString(1).orEmpty().replace("\n", " ").take(180)
-        val ts = cur.getLong(2)
-        val type = when (cur.getInt(3)) { Telephony.Sms.MESSAGE_TYPE_INBOX -> "in"; Telephony.Sms.MESSAGE_TYPE_SENT -> "out"; else -> "sms" }
-        out.add("$type · ${addr.ifBlank { "unknown" }} · ${fmtTs(ts)} · $body")
+    try {
+      c.contentResolver.query(uri, proj, sel, args, Telephony.Sms.DATE + " DESC LIMIT $l")?.use { cur ->
+        while (cur.moveToNext()) {
+          val addr = cur.getString(0).orEmpty(); val body = cur.getString(1).orEmpty().replace("\n", " ").take(180)
+          val type = when (cur.getInt(3)) { Telephony.Sms.MESSAGE_TYPE_INBOX -> "in"; Telephony.Sms.MESSAGE_TYPE_SENT -> "out"; else -> "sms" }
+          out.add("$type · ${addr.ifBlank { "unknown" }} · ${fmtTs(cur.getLong(2))} · $body")
+        }
+      }
+    } catch (_: Exception) {
+      c.contentResolver.query(uri, proj, sel, args, Telephony.Sms.DATE + " DESC")?.use { cur ->
+        var n = 0
+        while (cur.moveToNext() && n < l) {
+          val addr = cur.getString(0).orEmpty(); val body = cur.getString(1).orEmpty().replace("\n", " ").take(180)
+          val type = when (cur.getInt(3)) { Telephony.Sms.MESSAGE_TYPE_INBOX -> "in"; Telephony.Sms.MESSAGE_TYPE_SENT -> "out"; else -> "sms" }
+          out.add("$type · ${addr.ifBlank { "unknown" }} · ${fmtTs(cur.getLong(2))} · $body"); n++
+        }
       }
     }
     return if (out.isEmpty()) "No SMS messages found" + if (target.isNotBlank()) " for '$target'" else "" else out.joinToString("\n")
