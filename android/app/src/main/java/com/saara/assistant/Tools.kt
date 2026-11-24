@@ -277,8 +277,7 @@ object Tools {
         out.add("$type · $who · ${fmtTs(ts)} · ${dur}s")
       }
     }
-    return if (out.isEmpty()) "No call log entries found" + if (target.isNotBlank()) " for '$target'" else "" else out.joinToString("
-")
+    return if (out.isEmpty()) "No call log entries found" + if (target.isNotBlank()) " for '$target'" else "" else out.joinToString("\n")
   }
 
   private fun readSms(c: Context, target: String, limit: Int): String {
@@ -292,15 +291,13 @@ object Tools {
     c.contentResolver.query(uri, proj, sel, args, Telephony.Sms.DATE + " DESC LIMIT $l")?.use { cur ->
       while (cur.moveToNext()) {
         val addr = cur.getString(0).orEmpty()
-        val body = cur.getString(1).orEmpty().replace("
-", " ").take(180)
+        val body = cur.getString(1).orEmpty().replace("\n", " ").take(180)
         val ts = cur.getLong(2)
         val type = when (cur.getInt(3)) { Telephony.Sms.MESSAGE_TYPE_INBOX -> "in"; Telephony.Sms.MESSAGE_TYPE_SENT -> "out"; else -> "sms" }
         out.add("$type · ${addr.ifBlank { "unknown" }} · ${fmtTs(ts)} · $body")
       }
     }
-    return if (out.isEmpty()) "No SMS messages found" + if (target.isNotBlank()) " for '$target'" else "" else out.joinToString("
-")
+    return if (out.isEmpty()) "No SMS messages found" + if (target.isNotBlank()) " for '$target'" else "" else out.joinToString("\n")
   }
 
   private fun sendDirect(c: Context, a: JSONObject): String {
