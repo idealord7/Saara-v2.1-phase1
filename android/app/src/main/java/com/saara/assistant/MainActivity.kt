@@ -1285,3 +1285,4 @@ class MainActivity : AppCompatActivity() {
   override fun onPause() { visible = false; Bus.unlisten(busListener); super.onPause() }
   override fun onDestroy() { contactsHandler.removeCallbacks(contactsDebounce); contactsExecutor.shutdownNow(); knowledgeExecutor.shutdownNow(); super.onDestroy() }
 }
+}
