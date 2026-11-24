@@ -10,9 +10,10 @@ data class ShopRow(val id: Long, val item: String, val kind: String, val price: 
 data class TaskRow(val id: Long, val whenMs: Long, val text: String, val repeatMs: Long)
 data class TaskStep(val id: Long, val goal: String, val tool: String, val args: String, val result: String, val ok: Boolean, val ts: Long)
 data class Rule(val id: Long, val text: String, val enabled: Boolean, val ts: Long)
+data class ReplyRule(val id: Long, val name: String, val enabled: Boolean, val apps: String, val senders: String, val blockedSenders: String, val chatType: String, val keywords: String, val quietStart: String, val quietEnd: String, val screenOffOnly: Boolean, val mode: String, val instruction: String, val ts: Long)
 
 /** Local SQLite store: chat history, learned facts, shop ledger, usage stats, scheduled tasks, task steps. */
-class Db private constructor(c: Context) : SQLiteOpenHelper(c.applicationContext, "saara.db", null, 7) {
+class Db private constructor(c: Context) : SQLiteOpenHelper(c.applicationContext, "saara.db", null, 8) {
   private val appCtx = c.applicationContext
   companion object {
     @Volatile private var inst: Db? = null
@@ -22,7 +23,7 @@ class Db private constructor(c: Context) : SQLiteOpenHelper(c.applicationContext
     d.execSQL("CREATE TABLE chat(id INTEGER PRIMARY KEY AUTOINCREMENT, role TEXT, text TEXT, ts INTEGER)")
     d.execSQL("CREATE TABLE learned(id INTEGER PRIMARY KEY AUTOINCREMENT, cat TEXT, text TEXT, ts INTEGER)")
     d.execSQL("CREATE TABLE categories(name TEXT PRIMARY KEY)")
-    d.execSQL("INSERT OR IGNORE INTO categories(name) VALUES ('general'), ('preference'), ('work'), ('personal')")
+    d.execSQL("INSERT OR IGNORE INTO categories(name) VALUES ('general'), ('preference'), ('work'), ('personal'), ('shop')")
     d.execSQL("CREATE TABLE shop(id INTEGER PRIMARY KEY AUTOINCREMENT, item TEXT, kind TEXT, price REAL, qty REAL, party TEXT, note TEXT, ts INTEGER)")
     d.execSQL("CREATE TABLE usage(id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT, name TEXT, ts INTEGER)")
     d.execSQL("CREATE TABLE tasks(id INTEGER PRIMARY KEY AUTOINCREMENT, whenms INTEGER, text TEXT, repeatms INTEGER)")
@@ -35,11 +36,18 @@ class Db private constructor(c: Context) : SQLiteOpenHelper(c.applicationContext
     }
     if (o < 3) createTaskSteps(d)
     if (o < 6) d.execSQL("CREATE TABLE IF NOT EXISTS rules(id INTEGER PRIMARY KEY AUTOINCREMENT, text TEXT, enabled INTEGER, ts INTEGER)")
+    if (o < 8) {
+      d.execSQL("CREATE TABLE IF NOT EXISTS reply_rules(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, enabled INTEGER, apps TEXT, senders TEXT, blocked_senders TEXT, chat_type TEXT, keywords TEXT, quiet_start TEXT, quiet_end TEXT, screen_off_only INTEGER, mode TEXT, instruction TEXT, ts INTEGER)")
+      d.execSQL("INSERT OR IGNORE INTO categories(name) VALUES ('shop')")
+      try { d.execSQL("ALTER TABLE learned ADD COLUMN last_used INTEGER") } catch (_: Exception) {}
+      try { d.execSQL("UPDATE learned SET last_used=ts WHERE last_used IS NULL OR last_used=0") } catch (_: Exception) {}
+    }
   }
   private fun createTaskSteps(d: SQLiteDatabase) {
     d.execSQL("CREATE TABLE IF NOT EXISTS task_steps(id INTEGER PRIMARY KEY AUTOINCREMENT, goal TEXT, tool TEXT, args TEXT, result TEXT, ok INTEGER, ts INTEGER)")
     d.execSQL("CREATE INDEX IF NOT EXISTS idx_task_steps_goal ON task_steps(goal)")
     d.execSQL("CREATE TABLE IF NOT EXISTS rules(id INTEGER PRIMARY KEY AUTOINCREMENT, text TEXT, enabled INTEGER, ts INTEGER)")
+    d.execSQL("CREATE TABLE IF NOT EXISTS reply_rules(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, enabled INTEGER, apps TEXT, senders TEXT, blocked_senders TEXT, chat_type TEXT, keywords TEXT, quiet_start TEXT, quiet_end TEXT, screen_off_only INTEGER, mode TEXT, instruction TEXT, ts INTEGER)")
   }
 
   // ---------- chat ----------
@@ -59,11 +67,42 @@ class Db private constructor(c: Context) : SQLiteOpenHelper(c.applicationContext
   fun chatClear() { writableDatabase.delete("chat", null, null) }
 
   // ---------- learned facts ----------
+  private fun compactFactText(text: String, max: Int = 180): String {
+    val clean = text.trim().replace(Regex("\\s+"), " ")
+      .replace(Regex("^(user|the user|i)\\s+(likes|prefers|wants|said|is|has)\\s+", RegexOption.IGNORE_CASE), "")
+      .trim(' ', '-', ':', '.', '•')
+    if (clean.isBlank()) return ""
+    return clean.take(max).trim()
+  }
+  private fun normalizeCat(cat: String): String {
+    val c = cat.trim().lowercase()
+    return when {
+      c.isBlank() -> "general"
+      c.contains("personal") || c.contains("person") || c.contains("profile") -> "personal"
+      c.contains("work") || c.contains("office") || c.contains("biz") || c.contains("business") -> "work"
+      c.contains("shop") || c.contains("ledger") || c.contains("product") || c.contains("price") -> "shop"
+      c.contains("prefer") || c.contains("habit") || c.contains("routine") || c.contains("style") || c.contains("like") -> "preferences"
+      else -> c.replace(Regex("[^a-z0-9_ -]"), "").trim().ifBlank { "general" }
+    }
+  }
+  private fun factHead(text: String): String {
+    val t = compactFactText(text, 220).lowercase()
+    val key = t.substringBefore(":").substringBefore(" - ").substringBefore("=").trim()
+    val head = key.split(Regex("\\s+")).take(4).joinToString(" ")
+    return head.ifBlank { t.split(Regex("\\s+")).take(3).joinToString(" ") }
+  }
   fun factAdd(cat: String, text: String) {
-    val t = text.trim(); if (t.isEmpty()) return
+    val t = compactFactText(text); if (t.isEmpty()) return
+    val category = normalizeCat(cat)
+    val now = System.currentTimeMillis()
     val d = writableDatabase
-    d.query("learned", arrayOf("id"), "text=?", arrayOf(t), null, null, null).use { if (it.moveToFirst()) return }
-    d.insert("learned", null, ContentValues().apply { put("cat", cat.ifBlank { "general" }.lowercase()); put("text", t); put("ts", System.currentTimeMillis()) })
+    categoryAdd(category)
+    val existing = facts().firstOrNull { it.cat == category && (it.text.equals(t, true) || factHead(it.text) == factHead(t)) }
+    if (existing != null) {
+      d.update("learned", ContentValues().apply { put("cat", category); put("text", t); put("ts", now); put("last_used", now) }, "id=?", arrayOf(existing.id.toString()))
+      return
+    }
+    d.insert("learned", null, ContentValues().apply { put("cat", category); put("text", t); put("ts", now); put("last_used", now) })
   }
   fun facts(): List<Fact> {
     val out = ArrayList<Fact>()
@@ -74,34 +113,51 @@ class Db private constructor(c: Context) : SQLiteOpenHelper(c.applicationContext
   }
   fun factDelete(id: Long) { writableDatabase.delete("learned", "id=?", arrayOf(id.toString())) }
   fun factUpdate(id: Long, cat: String, text: String) {
-    val clean = text.trim(); if (clean.isEmpty()) return
-    val category = cat.trim().ifBlank { "general" }.lowercase()
+    val clean = compactFactText(text); if (clean.isEmpty()) return
+    val category = normalizeCat(cat.ifBlank { "general" })
     categoryAdd(category)
-    writableDatabase.update("learned", ContentValues().apply { put("cat", category); put("text", clean) }, "id=?", arrayOf(id.toString()))
+    writableDatabase.update("learned", ContentValues().apply { put("cat", category); put("text", clean); put("ts", System.currentTimeMillis()); put("last_used", System.currentTimeMillis()) }, "id=?", arrayOf(id.toString()))
   }
   fun categoryAdd(name: String) {
-    val clean = name.trim().lowercase(); if (clean.isNotEmpty()) writableDatabase.insertWithOnConflict("categories", null, ContentValues().apply { put("name", clean) }, SQLiteDatabase.CONFLICT_IGNORE)
+    val clean = normalizeCat(name); if (clean.isNotEmpty()) writableDatabase.insertWithOnConflict("categories", null, ContentValues().apply { put("name", clean) }, SQLiteDatabase.CONFLICT_IGNORE)
   }
   fun categories(): List<String> {
     val out = mutableListOf<String>()
     readableDatabase.rawQuery("SELECT name FROM categories ORDER BY name", null).use { while (it.moveToNext()) out.add(it.getString(0)) }
     facts().map { it.cat }.distinct().forEach { if (!out.contains(it)) out.add(it) }
+    for (d in listOf("general", "personal", "preferences", "work", "shop")) if (!out.contains(d)) out.add(d)
     return out.distinct().sorted()
   }
   fun categoryRename(old: String, new: String) {
-    val n = new.trim().lowercase(); if (n.isEmpty()) return
+    val n = normalizeCat(new); if (n.isEmpty()) return
     categoryAdd(n); writableDatabase.update("learned", ContentValues().apply { put("cat", n) }, "cat=?", arrayOf(old))
-    if (old != "general" && old != "preference" && old != "work" && old != "personal") writableDatabase.delete("categories", "name=?", arrayOf(old))
+    if (old !in setOf("general", "preference", "preferences", "work", "personal", "shop")) writableDatabase.delete("categories", "name=?", arrayOf(old))
   }
   fun categoryDelete(name: String) {
     writableDatabase.update("learned", ContentValues().apply { put("cat", "general") }, "cat=?", arrayOf(name))
-    if (name != "general" && name != "preference" && name != "work" && name != "personal") writableDatabase.delete("categories", "name=?", arrayOf(name))
+    if (name !in setOf("general", "preference", "preferences", "work", "personal", "shop")) writableDatabase.delete("categories", "name=?", arrayOf(name))
   }
   fun recall(q: String, limit: Int = 12): List<Fact> {
     val words = q.lowercase().split(Regex("[^\\p{L}\\p{N}]+")).filter { it.length >= 2 }
-    if (words.isEmpty()) return facts().take(limit)
-    return facts().map { f -> f to words.count { f.text.lowercase().contains(it) || f.cat.contains(it) } }
-      .filter { it.second > 0 }.sortedByDescending { it.second }.take(limit).map { it.first }
+    val now = System.currentTimeMillis()
+    val cutoff = now - 3L * 24 * 60 * 60 * 1000
+    try { writableDatabase.delete("learned", "ts < ? AND (last_used IS NULL OR last_used < ?)", arrayOf(cutoff.toString(), cutoff.toString())) } catch (_: Exception) {}
+    val all = facts()
+    val selected = if (words.isEmpty()) all.take(limit)
+      else all.map { f -> f to words.count { f.text.lowercase().contains(it) || f.cat.contains(it) } }
+        .filter { it.second > 0 }.sortedByDescending { it.second * 10 + (if (it.first.ts > cutoff) 2 else 0) }.take(limit).map { it.first }
+    selected.forEach { f -> try { writableDatabase.update("learned", ContentValues().apply { put("last_used", now) }, "id=?", arrayOf(f.id.toString())) } catch (_: Exception) {} }
+    return selected
+  }
+  fun factsPrompt(q: String = "", limit: Int = 18): String {
+    val picked = recall(q, limit)
+    if (picked.isEmpty()) return ""
+    val sb = StringBuilder("\nKNOWN USER FACTS (concise, categorized; use only if relevant):\n")
+    picked.groupBy { normalizeCat(it.cat) }.toSortedMap().forEach { (cat, items) ->
+      sb.append(cat.uppercase()).append(":\n")
+      items.take(6).forEachIndexed { i, f -> sb.append(i + 1).append(". ").append(compactFactText(f.text, 140)).append('\n') }
+    }
+    return sb.toString().take(2200)
   }
 
   // ---------- usage stats ----------
@@ -141,6 +197,13 @@ class Db private constructor(c: Context) : SQLiteOpenHelper(c.applicationContext
         it.getString(5) ?: "", it.getString(6) ?: "", it.getLong(7)))
     }
     return out
+  }
+  fun shopSummary(item: String = "", recent: Int = 10): Pair<List<ShopRow>, String> {
+    val rows = shopRows(item, 5000)
+    val recentRows = rows.take(recent)
+    val older = (rows.size - recentRows.size).coerceAtLeast(0)
+    val summary = if (older > 0) "User has ${rows.size} total shop records; showing $recent most recent, $older older records summarized." else "Showing ${rows.size} shop records."
+    return recentRows to summary
   }
 
   // ---------- scheduled tasks ----------
@@ -185,9 +248,28 @@ class Db private constructor(c: Context) : SQLiteOpenHelper(c.applicationContext
   fun rulesPrompt(max: Int = 40): String {
     val rs = rules().filter { it.enabled && it.text.isNotBlank() }.take(max)
     if (rs.isEmpty()) return ""
-    val sb = StringBuilder("\nUser rules (must follow before taking any action/tool/response):\n")
-    rs.forEachIndexed { i: Int, r: Rule -> sb.append(i + 1).append(". ").append(r.text.replace('\n', ' ').take(220)).append('\n') }
+    val sb = StringBuilder("\nUSER RULES (must follow before action/tool/response):\n")
+    rs.forEachIndexed { i: Int, r: Rule -> sb.append(i + 1).append(". ").append(compactFactText(r.text, 220)).append('\n') }
     return sb.toString()
+  }
+
+  // ---------- replying rules ----------
+  fun replyRules(): List<ReplyRule> {
+    val out = mutableListOf<ReplyRule>()
+    readableDatabase.rawQuery("SELECT id,name,enabled,apps,senders,blocked_senders,chat_type,keywords,quiet_start,quiet_end,screen_off_only,mode,instruction,ts FROM reply_rules ORDER BY id ASC", null).use {
+      while (it.moveToNext()) out.add(ReplyRule(it.getLong(0), it.getString(1) ?: "", it.getInt(2) == 1, it.getString(3) ?: "", it.getString(4) ?: "", it.getString(5) ?: "", it.getString(6) ?: "any", it.getString(7) ?: "", it.getString(8) ?: "", it.getString(9) ?: "", it.getInt(10) == 1, it.getString(11) ?: "ai", it.getString(12) ?: "", it.getLong(13)))
+    }
+    return out
+  }
+  fun replyRuleAdd(r: ReplyRule): Long = writableDatabase.insert("reply_rules", null, replyRuleCv(r))
+  fun replyRuleUpdate(r: ReplyRule) { writableDatabase.update("reply_rules", replyRuleCv(r), "id=?", arrayOf(r.id.toString())) }
+  fun replyRuleDelete(id: Long) { writableDatabase.delete("reply_rules", "id=?", arrayOf(id.toString())) }
+  fun replyRuleSetEnabled(id: Long, enabled: Boolean) { writableDatabase.update("reply_rules", ContentValues().apply { put("enabled", if (enabled) 1 else 0); put("ts", System.currentTimeMillis()) }, "id=?", arrayOf(id.toString())) }
+  private fun replyRuleCv(r: ReplyRule) = ContentValues().apply {
+    put("name", r.name.trim().take(80)); put("enabled", if (r.enabled) 1 else 0); put("apps", r.apps.trim()); put("senders", r.senders.trim())
+    put("blocked_senders", r.blockedSenders.trim()); put("chat_type", r.chatType.trim().ifBlank { "any" }); put("keywords", r.keywords.trim())
+    put("quiet_start", r.quietStart.trim()); put("quiet_end", r.quietEnd.trim()); put("screen_off_only", if (r.screenOffOnly) 1 else 0)
+    put("mode", r.mode.trim().ifBlank { "ai" }); put("instruction", r.instruction.trim().take(500)); put("ts", System.currentTimeMillis())
   }
 
   // ---------- task-step memory ----------

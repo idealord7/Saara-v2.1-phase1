@@ -37,9 +37,9 @@ import java.util.concurrent.TimeoutException
 /** Everything Saara can do on the phone, natively (no Termux needed). */
 object Tools {
   fun declarations(): JSONArray = JSONArray("""[{"functionDeclarations":[
-{"name":"device_control","description":"Phone controls. action is one of: torch_on, torch_off, volume_up, volume_down, volume_set (level 0-100), open_app (target = app name, e.g. WhatsApp, WhatsApp Business, Instagram, Camera), open_camera, take_photo (opens the camera AND presses the shutter by itself; text = front for a selfie), call (target = contact name or number), answer_call, end_call, reject_call, sms (target + text), read_sms (target optional contact/name/number, limit), read_call_log (target optional, limit), read_contacts (target query optional, limit), wifi_panel, bluetooth_panel. open_app returns the new screen contents. Use read_* actions when user asks what messages/calls/contacts are on the phone. Ask once only for destructive/irreversible steps or genuinely unclear targets; clear calls, messages, reads, app opens, taps and typing can proceed.","parameters":{"type":"OBJECT","properties":{"action":{"type":"STRING"},"target":{"type":"STRING"},"text":{"type":"STRING"},"level":{"type":"NUMBER"},"limit":{"type":"NUMBER"},"confirmed":{"type":"BOOLEAN"}},"required":["action"]}},
+{"name":"device_control","description":"Phone controls. action is one of: torch_on, torch_off, volume_up, volume_down, volume_set (level 0-100), open_app (target = app name, e.g. WhatsApp, WhatsApp Business, Instagram, Camera), open_camera, take_photo (opens the camera AND presses the shutter by itself; text = front for a selfie), call (target = contact name or number), answer_call, end_call, reject_call, sms (target + text), read_sms (target optional contact/name/number, limit), read_call_log (target optional, limit), read_contacts (target query optional, limit), wifi_panel, bluetooth_panel. open_app returns the new screen contents. PRE-TASK: before acting, check relevant memory/rules and current device/app context. For direct person actions (call/message/contact lookup), ALWAYS use read_contacts/read_sms/read_call_log or direct device actions rather than relying only on cached memory. Ask once only for destructive/irreversible steps or genuinely unclear targets; clear calls, messages, reads, app opens, taps and typing can proceed.","parameters":{"type":"OBJECT","properties":{"action":{"type":"STRING"},"target":{"type":"STRING"},"text":{"type":"STRING"},"level":{"type":"NUMBER"},"limit":{"type":"NUMBER"},"confirmed":{"type":"BOOLEAN"}},"required":["action"]}},
 {"name":"ui_action","description":"Control the screen via accessibility. EVERY op returns the new screen contents, so you can keep going without asking again. op: dump_ui, dump_small, list_fields (returns structured editable fields: index,id,resource_id,label,hint,desc,value,focused,bounds), tap_text, tap_id, tap_xy, double_tap, long_press, type, clear_text, select_all, copy_text, paste, enter, swipe, scroll_down, scroll_up, wait, wait_text, back, home, recents, notifications, shutter, flip_camera. FORM/MULTI-FIELD RULES (STRICT): before filling any form with 2+ inputs call list_fields and plan mapping. Enter values ONE FIELD AT A TIME: target the exact field with field_index or field_id or field_label, focus/verify target, then type only that field's value (replace=true to overwrite). If the UI shows multiple editable fields, do NOT guess and do NOT dump/paste combined multi-field data into one field; bulk multi-line text into one field is blocked unless allow_bulk=true is explicitly required. If you cannot confidently match a value to a specific field or mapping is ambiguous, STOP for that item and ask the user to clarify (report the available fields). Reporting: state clearly what was entered into which field. Ask once only for destructive/irreversible steps or genuinely unclear targets; clear taps/typing can proceed field-by-field.","parameters":{"type":"OBJECT","properties":{"op":{"type":"STRING"},"text":{"type":"STRING"},"id":{"type":"STRING"},"x":{"type":"NUMBER"},"y":{"type":"NUMBER"},"x2":{"type":"NUMBER"},"y2":{"type":"NUMBER"},"direction":{"type":"STRING"},"ms":{"type":"NUMBER"},"timeout":{"type":"NUMBER"},"replace":{"type":"BOOLEAN"},"field_index":{"type":"NUMBER"},"field_id":{"type":"STRING"},"field_label":{"type":"STRING"},"allow_bulk":{"type":"BOOLEAN"},"confirmed":{"type":"BOOLEAN"}},"required":["op"]}},
-{"name":"remember","description":"Save something you learned about the user so you keep improving: a preference, habit, routine, person/relationship, a correction, or HOW they like tasks done. Call it quietly whenever the user reveals such a thing; do not announce it. category = preference | habit | routine | person | correction | command_style | shop | general.","parameters":{"type":"OBJECT","properties":{"fact":{"type":"STRING"},"category":{"type":"STRING"}},"required":["fact"]}},
+{"name":"remember","description":"Save a concise user fact for improvement. Store brief, categorized, non-conversational facts; consolidate related details under clear headwords (personal/work/preferences/shop). Prioritize new over stale data and update/remove obsolete facts on correction. Call quietly; do not announce. category = personal | work | preferences | shop | general.","parameters":{"type":"OBJECT","properties":{"fact":{"type":"STRING"},"category":{"type":"STRING"}},"required":["fact"]}},
 {"name":"recall","description":"Search everything you have learned about the user (older than the list in your instructions). query = keywords.","parameters":{"type":"OBJECT","properties":{"query":{"type":"STRING"}},"required":["query"]}},
 {"name":"remember_task","description":"Save which tool steps worked for a repeated mobile task so future attempts improve. goal = the task, method = concise working steps. Never include contacts, messages, ledger data, URLs, or screen text.","parameters":{"type":"OBJECT","properties":{"goal":{"type":"STRING"},"method":{"type":"STRING"}},"required":["goal","method"]}},
 {"name":"recall_task","description":"Recall which tool steps worked or failed for a similar mobile task. Stored locally on this phone.","parameters":{"type":"OBJECT","properties":{"query":{"type":"STRING"}},"required":["query"]}},
@@ -56,21 +56,25 @@ object Tools {
 ]}]""")
 
   fun shopReport(c: Context, item: String): String {
-    val rows = Db.get(c).shopRows(item, 2000)
-    if (rows.isEmpty()) return "no ledger entries" + (if (item.isNotBlank()) " for $item" else "")
+    val (rows, summary) = Db.get(c).shopSummary(item, 10)
+    val totalCount = Db.get(c).shopRows(item, 5000).size
+    if (rows.isEmpty() && totalCount == 0) return "no ledger entries" + (if (item.isNotBlank()) " for $item" else "")
     val sb = StringBuilder()
-    for ((name, list) in rows.groupBy { it.item.lowercase() }) {
+    sb.append(summary).append("\n")
+    val grouped = rows.groupBy { it.item.lowercase() }
+    for ((name, list) in grouped) {
       val p = list.filter { it.kind == "purchase" }; val s = list.filter { it.kind == "sale" }; val x = list.filter { it.kind == "cancellation" }
       val pq = p.sumOf { it.qty }; val sq = s.sumOf { it.qty }
       val avgP = if (pq > 0) p.sumOf { it.price * it.qty } / pq else 0.0
       val avgS = if (sq > 0) s.sumOf { it.price * it.qty } / sq else 0.0
-      sb.append(name).append(": bought ").append(pq).append(" (avg ").append("%.2f".format(avgP)).append(", last ").append(p.firstOrNull()?.price ?: "-")
-        .append("); sold ").append(sq).append(" (avg ").append("%.2f".format(avgS)).append(", last ").append(s.firstOrNull()?.price ?: "-")
-        .append("); cancelled ").append(x.sumOf { it.qty })
+      sb.append("- ").append(name).append(": bought ").append(pq).append(" @avg ").append("%.2f".format(avgP))
+        .append("; sold ").append(sq).append(" @avg ").append("%.2f".format(avgS))
+        .append("; cancelled ").append(x.sumOf { it.qty })
       if (pq > 0 && sq > 0) sb.append("; margin/unit ").append("%.2f".format(avgS - avgP))
-      val pr = list.firstOrNull { it.kind == "price" }; if (pr != null) sb.append("; listed price ").append(pr.price)
+      val pr = list.firstOrNull { it.kind == "price" }; if (pr != null) sb.append("; listed ").append(pr.price)
       sb.append("\n")
     }
+    if (totalCount > rows.size) sb.append("- older records: ").append(totalCount - rows.size).append(" summarized (not listed)\n")
     return sb.toString().take(3500)
   }
 
@@ -137,12 +141,13 @@ object Tools {
     }
     val confirmation = TaskControl.confirmationFor(name, a)
     if (confirmation != null && !TaskControl.isApproved()) return TaskControl.request(confirmation)
+    try { Db.get(c).recall(Bus.lastUser, 6) } catch (_: Exception) {} // pre-task memory touch/prune
     val result = try {
       when (name) {
         "device_control" -> { Db.get(c).usage("action", a.optString("action")); if (a.optString("action") == "open_app") Db.get(c).usage("app", a.optString("target")); device(c, a) }
         "ui_action" -> ui(c, a)
         "remember" -> { Db.get(c).factAdd(a.optString("category", "general"), a.optString("fact")); "saved" }
-        "recall" -> Db.get(c).recall(a.optString("query")).joinToString("\n") { "[${it.cat}] ${it.text}" }.ifBlank { "nothing found" }
+        "recall" -> Db.get(c).recall(a.optString("query")).joinToString("\n") { "- [${it.cat}] ${it.text}" }.ifBlank { "nothing found" }
         "remember_task" -> TaskLearning.remember(c, a.optString("goal"), a.optString("method"))
         "recall_task" -> TaskLearning.recall(c, a.optString("query"))
         "request_screen_share" -> when {
@@ -185,8 +190,7 @@ object Tools {
   /** Tool output that may be returned to Gemini. Sensitive local DB contents are limited/redacted. */
   fun modelResult(name: String, result: String): String {
     if (name in setOf("recall", "recall_task")) {
-      // Allow Saara to use user-taught learning/task methods (stored locally), but redact obvious PII patterns and limit size.
-      return redact(result).take(4000).ifBlank { "nothing found" }
+      return redact(result).take(2500).ifBlank { "nothing found" }
     }
     if (name in setOf("shop_report", "shop_record", "list_tasks", "fetch_url")) {
       return "Completed on this phone. Private local contents were kept on the device."

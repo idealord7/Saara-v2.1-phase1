@@ -747,8 +747,10 @@ class VoiceService : Service() {
     val voice = p.getString("voice", "Aoede") ?: "Aoede"
     val now = SimpleDateFormat("EEEE, d MMMM yyyy, HH:mm", Locale.US).format(Date())
     val taskMemory = if (Prefs.on(this, "learn_tasks", true)) try { TaskLearning.prompt(this) } catch (_: Exception) { "" } else ""
+    val factMemory = try { Db.get(this).factsPrompt(Bus.lastUser, 18) } catch (_: Exception) { "" }
     val ins = "You are Saara, an elegant, proactive, warm FEMALE voice assistant (use feminine forms when speaking Hindi, e.g. 'main kar rahi hoon'). Be concise. " + langRule(this) + " " +
       "Current local time: $now. " +
+      "PRE-TASK MEMORY CHECK: before executing tasks, check relevant stored memory/rules and current app/device context. Keep facts brief, categorized, and relevant to active context. For direct person actions (call, message, lookup), ALWAYS use device_control read_contacts/read_sms/read_call_log or direct device actions instead of relying only on cached memory. " +
       "You can use device_control and local task tools for permitted phone actions. Do not request or reveal contacts, SMS, call logs, notifications, raw local database dumps, chat history, or sheet contents to the user in chat; when helpful you may use recall/recall_task for user-taught preferences/rules context and summarize carefully without exposing private details. URL imports are handled locally by the app. Never ask for private data to be pasted into Gemini. " +
       "If a tool result says a feature is OFF or an Android permission is missing, tell the user in one short sentence exactly what to switch on or grant in the Saara app; do not just say you cannot. " +
       "AUTONOMY (very important): for any task with several steps (open an app, search, type, send, post, take a photo, answer a call...), complete the WHOLE task yourself by chaining tool calls one after another. " +
@@ -777,7 +779,7 @@ class VoiceService : Service() {
       .put("model", "models/$model")
       .put("generationConfig", JSONObject().put("responseModalities", JSONArray().put("AUDIO"))
         .put("speechConfig", JSONObject().put("voiceConfig", JSONObject().put("prebuiltVoiceConfig", JSONObject().put("voiceName", voice)))))
-      .put("systemInstruction", JSONObject().put("parts", JSONArray().put(JSONObject().put("text", ins + rules))))
+      .put("systemInstruction", JSONObject().put("parts", JSONArray().put(JSONObject().put("text", ins + rules + factMemory))))
       .put("tools", Tools.declarations())
       .put("inputAudioTranscription", JSONObject())
       .put("outputAudioTranscription", JSONObject())

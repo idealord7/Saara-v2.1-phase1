@@ -5,6 +5,7 @@ import android.content.ComponentName
 import android.content.Intent
 import android.os.Build
 import android.os.Bundle
+import android.os.PowerManager
 import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
 import android.util.Log
@@ -25,6 +26,7 @@ class SaaraNotifications : NotificationListenerService() {
       "com.facebook.orca", "com.facebook.mlite", "com.instagram.android", "org.thoughtcrime.securesms",
       "com.google.android.apps.messaging", "com.samsung.android.messaging"
     )
+    fun supportedMsgApps() = MSG_APPS
 
     private fun log(ctx: android.content.Context?, msg: String) {
       Log.d(TAG, msg)
@@ -235,16 +237,15 @@ class SaaraNotifications : NotificationListenerService() {
     val isWhatsApp = pkg == "com.whatsapp" || pkg == "com.whatsapp.w4b"
     val messagingStyle = Build.VERSION.SDK_INT >= 24 && n.extras.containsKey(Notification.EXTRA_MESSAGES)
     val hasReply = replyAction(n) != null
-    if (!isWhatsApp && !messagingStyle && !hasReply) return // avoid noisy non-message notifications
+    if (!isWhatsApp && !messagingStyle && !hasReply && pkg !in MSG_APPS) return
 
     if (!Prefs.on(ctx, "f_notif", false)) { log(ctx, "Filtered (Notification auto-reply off) · $pkg · $preview"); return }
     if (title.isBlank() && text.isBlank()) { log(ctx, "Filtered empty title/text · $pkg"); return }
     if (text.isBlank()) { log(ctx, "Filtered blank text · $pkg · sender=$title"); return }
 
-    val names = (Prefs.plain(ctx).getString("reply_names", "") ?: "")
-      .split(",").map { it.trim().lowercase() }.filter { it.isNotEmpty() }
-    val wanted = if (names.isEmpty()) pkg in MSG_APPS else names.any { title.lowercase().contains(it) || it.contains(pkg.lowercase()) }
-    if (!wanted) { log(ctx, "Filtered by name/app rule · $pkg · $preview"); return }
+    val isGroup = isGroupConversation(n, title)
+    val allowed = AiAutoReply.shouldReply(ctx, pkg, title, text, isGroup, screenOff())
+    if (!allowed.first) { log(ctx, "Filtered by Replying Rules: ${allowed.second} · $pkg · $preview"); return }
 
     val act = replyAction(n)
     if (act != null) {
@@ -257,7 +258,6 @@ class SaaraNotifications : NotificationListenerService() {
       log(ctx, "No direct-reply action now · $pkg · $preview")
     }
 
-    // Ignore our own just-sent reply echoing back as a new notification (prevents reply loops).
     if (synchronized(sentTexts) { sentTexts.any { it.isNotBlank() && (text == it || text.contains(it)) } }) {
       log(ctx, "Filtered self-echo · $pkg · $preview")
       return
@@ -275,21 +275,24 @@ class SaaraNotifications : NotificationListenerService() {
       while (lastSeen.size > 120) lastSeen.remove(lastSeen.keys.first())
     }
 
-    val isGroup = isGroupConversation(n, title)
     log(ctx, "Received notification · $pkg · sender=$title · group=$isGroup · replyAction=${act != null}\n← ${text.take(400)}")
 
-    val aiOn = Prefs.on(ctx, "f_ai_reply", false)
-    if (aiOn) {
-      AiAutoReply.handle(ctx, sbn.key, pkg, title, text, isGroup)
+    if (Prefs.on(ctx, "f_ai_reply", false)) {
+      AiAutoReply.handle(ctx, sbn.key, pkg, title, text, isGroup, allowed.third)
     } else {
       val vs = VoiceService.instance
       if (vs == null) {
         log(ctx, "Not auto-replied (AI smart auto-reply off, Saara not running) · $pkg · $title")
-        Bus.add("system", "Message from $title received (notification reply is on). Start Saara for live handling, or enable AI smart auto-reply for background replies.", true)
+        Bus.add("system", "Message from $title received. Start Saara or enable AI smart auto-reply.", true)
         return
       }
       log(ctx, "Routing to live VoiceService (AI smart auto-reply off) · $pkg · $title")
       vs.onNotification(sbn.key, pkg, title, text)
     }
   }
+
+  private fun screenOff(): Boolean = try {
+    val pm = getSystemService(POWER_SERVICE) as? PowerManager
+    pm?.isInteractive == false
+  } catch (_: Exception) { false }
 }

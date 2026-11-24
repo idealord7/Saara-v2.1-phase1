@@ -419,9 +419,9 @@ class MainActivity : AppCompatActivity() {
     feature(root, "Live caption overlay", "Transparent text over other apps showing what Saara hears, says and does", "f_overlay", true,
       { Settings.canDrawOverlays(this) }, "Allow display over other apps",
       { startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName"))) })
-    feature(root, "Notification auto-reply", "Read incoming WhatsApp/Telegram notifications and auto-reply (AI smart replies when enabled). Works in background with Notification access; no root needed.", "f_notif", false, { notifOn() },
+    feature(root, "Notification auto-reply", "Read incoming message notifications and auto-reply with AI/rules, even screen-off. Uses Notification access (no app open).", "f_notif", false, { notifOn() },
       "Enable Notification access", { startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)) }) { c ->
-      val names = edit("Only these sender names (comma separated). Leave empty = all chats in supported apps")
+      val names = edit("Fallback sender names (comma separated) when no Replying Rules match")
       names.setText(Prefs.plain(this).getString("reply_names", ""))
       names.doAfterTextChanged { Prefs.plain(this).edit().putString("reply_names", it.toString()).apply() }
       c.addView(names)
@@ -432,7 +432,7 @@ class MainActivity : AppCompatActivity() {
       aiRow.addView(aiLbl, LinearLayout.LayoutParams(0, -2, 1f)); aiRow.addView(aiSw)
       c.addView(aiRow)
       val grpRow = LinearLayout(this); grpRow.gravity = Gravity.CENTER_VERTICAL
-      val grpLbl = tv("Reply in group chats too", 14f, TXT)
+      val grpLbl = tv("Reply in group chats too (fallback)", 14f, TXT)
       val grpSw = Switch(this); grpSw.isChecked = Prefs.on(this, "reply_groups", false)
       grpSw.setOnCheckedChangeListener { _, v -> Prefs.plain(this).edit().putBoolean("reply_groups", v).apply() }
       grpRow.addView(grpLbl, LinearLayout.LayoutParams(0, -2, 1f)); grpRow.addView(grpSw)
@@ -444,9 +444,11 @@ class MainActivity : AppCompatActivity() {
       prompt.minLines = 3
       prompt.doAfterTextChanged { Prefs.plain(this).edit().putString("ai_reply_prompt", it.toString()).apply() }
       c.addView(prompt)
-      c.addView(tv("Note: Enabled user Rules (Learning tab) are always applied to AI auto-replies. Uses saved Gemini API key; replies send in background without opening WhatsApp.", 11f, SUB))
+      c.addView(tv("Replying Rules (new): configure allow/block apps/senders, group/direct, keywords, quiet hours, screen-off, per-rule instructions.", 11f, SUB))
+      val rrBtn = btn("Manage Replying Rules", SURF2) { showReplyRulesDialog() }
+      val lp = LinearLayout.LayoutParams(-1, -2); lp.topMargin = dp(6); c.addView(rrBtn, lp)
       val logBtn = btn("View auto-reply logs", SURF2) { showAutoReplyLogs() }
-      val lp = LinearLayout.LayoutParams(-1, -2); lp.topMargin = dp(6); c.addView(logBtn, lp)
+      c.addView(logBtn, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(6) })
     }
     feature(root, "Floating bubble", "Messenger-style chat head over any app. Tap to open a floating Saara window, drag to X to dismiss.", "f_bubble", false,
       { Settings.canDrawOverlays(this) }, "Allow display over other apps",
@@ -458,6 +460,62 @@ class MainActivity : AppCompatActivity() {
     heading(root, "Tasks & Automation", "Time-based reminders are supported. Advanced event triggers are not yet implemented.")
     taskBox = card(root)
     return sv
+  }
+
+  private fun showReplyRulesDialog() {
+    val db = Db.get(this)
+    val box = LinearLayout(this); box.orientation = LinearLayout.VERTICAL; box.setPadding(dp(12), dp(8), dp(12), dp(8))
+    fun refresh() {
+      box.removeAllViews()
+      box.addView(tv("Replying Rules control where/when Saara replies. First matching block/quiet/screen-off rule can stop replies; matching allow rules add instructions.", 12f, SUB))
+      box.addView(btn("Add rule", ACC2) { showReplyRuleEditor(null) { showReplyRulesDialog() } }, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8) })
+      val rules = db.replyRules()
+      if (rules.isEmpty()) box.addView(tv("No rules yet. Fallback uses sender filter + group toggle.", 13f, SUB))
+      for (r in rules) {
+        val card = LinearLayout(this); card.orientation = LinearLayout.VERTICAL; card.background = bg(SURF2, 14); card.setPadding(dp(10), dp(8), dp(10), dp(8))
+        val top = LinearLayout(this); top.gravity = Gravity.CENTER_VERTICAL
+        top.addView(tv(r.name.ifBlank { "Rule ${r.id}" }, 14f, TXT, true), LinearLayout.LayoutParams(0, -2, 1f))
+        val sw = Switch(this); sw.isChecked = r.enabled; sw.setOnCheckedChangeListener { _, v -> db.replyRuleSetEnabled(r.id, v) }
+        top.addView(sw); card.addView(top)
+        card.addView(tv("apps=${r.apps.ifBlank { "any" }} · senders=${r.senders.ifBlank { "any" }} · block=${r.blockedSenders.ifBlank { "none" }} · chat=${r.chatType} · mode=${r.mode}", 11f, SUB))
+        card.addView(tv("keywords=${r.keywords.ifBlank { "any" }} · quiet=${r.quietStart.ifBlank { "--" }}-${r.quietEnd.ifBlank { "--" }} · screenOffOnly=${r.screenOffOnly}", 11f, SUB))
+        if (r.instruction.isNotBlank()) card.addView(tv("instruction: ${r.instruction}", 11f, SUB))
+        val actions = LinearLayout(this)
+        actions.addView(btn("Edit", SURF) { showReplyRuleEditor(r) { showReplyRulesDialog() } }, LinearLayout.LayoutParams(0, -2, 1f))
+        actions.addView(btn("Delete", SURF) { db.replyRuleDelete(r.id); refresh() }, LinearLayout.LayoutParams(0, -2, 1f))
+        card.addView(actions)
+        box.addView(card, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8) })
+      }
+    }
+    refresh()
+    val sv = ScrollView(this); sv.addView(box)
+    AlertDialog.Builder(this).setTitle("Replying Rules").setView(sv).setPositiveButton("Close", null).show()
+  }
+
+  private fun showReplyRuleEditor(existing: ReplyRule?, onDone: () -> Unit) {
+    val db = Db.get(this)
+    val root = LinearLayout(this); root.orientation = LinearLayout.VERTICAL; root.setPadding(dp(12), dp(8), dp(12), dp(8))
+    fun e(h: String, v: String = "") = edit(h).apply { setText(v) }
+    val name = e("Rule name", existing?.name ?: "")
+    val apps = e("Apps CSV: whatsapp,whatsapp_business,instagram,telegram (empty=any)", existing?.apps ?: "")
+    val senders = e("Allow senders/contacts CSV (empty=any)", existing?.senders ?: "")
+    val blocked = e("Blocked senders/contacts CSV", existing?.blockedSenders ?: "")
+    val chatType = e("Chat type: any/direct/group", existing?.chatType ?: "any")
+    val keywords = e("Keywords CSV (empty=any)", existing?.keywords ?: "")
+    val quietStart = e("Quiet start HH:mm (optional)", existing?.quietStart ?: "")
+    val quietEnd = e("Quiet end HH:mm (optional)", existing?.quietEnd ?: "")
+    val instruction = e("Per-rule reply instruction (optional)", existing?.instruction ?: "")
+    val mode = e("Mode: ai/block", existing?.mode ?: "ai")
+    val screenOff = Switch(this); screenOff.text = "Only when screen is off"; screenOff.isChecked = existing?.screenOffOnly == true
+    val enabled = Switch(this); enabled.text = "Enabled"; enabled.isChecked = existing?.enabled ?: true
+    listOf<View>(name, apps, senders, blocked, chatType, keywords, quietStart, quietEnd, instruction, mode, screenOff, enabled).forEach { root.addView(it) }
+    AlertDialog.Builder(this).setTitle(if (existing == null) "Add Replying Rule" else "Edit Replying Rule").setView(ScrollView(this).apply { addView(root) })
+      .setPositiveButton("Save") { _, _ ->
+        val r = ReplyRule(existing?.id ?: 0, name.text.toString(), enabled.isChecked, apps.text.toString(), senders.text.toString(), blocked.text.toString(), chatType.text.toString(), keywords.text.toString(), quietStart.text.toString(), quietEnd.text.toString(), screenOff.isChecked, mode.text.toString(), instruction.text.toString(), System.currentTimeMillis())
+        if (existing == null) db.replyRuleAdd(r) else db.replyRuleUpdate(r)
+        onDone()
+      }
+      .setNegativeButton("Cancel", null).show()
   }
 
   private fun showAutoReplyLogs() {
