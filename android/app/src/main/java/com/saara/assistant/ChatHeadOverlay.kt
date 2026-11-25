@@ -39,6 +39,7 @@ class ChatHeadOverlay(
     fun isSpeaking(): Boolean
     fun statusText(): String
     fun recentMessages(limit: Int): List<Msg>
+    fun onAnchorChanged() {}
   }
 
   private val wm = ctx.getSystemService(Context.WINDOW_SERVICE) as WindowManager
@@ -86,7 +87,14 @@ class ChatHeadOverlay(
       if (bubbleView == null) createBubble()
       refreshStatus()
       renderMessages()
+      callbacks.onAnchorChanged()
     }
+  }
+
+  fun anchorForOverlay(): Overlay.Anchor? {
+    val lp = bubbleLp ?: return null
+    val onRight = lp.x + bubbleSize / 2 >= sw / 2
+    return Overlay.Anchor(lp.x, lp.y, bubbleSize, onRight)
   }
 
   fun hide() {
@@ -155,10 +163,13 @@ class ChatHeadOverlay(
       rightMargin = dp(2); bottomMargin = dp(2)
     })
 
+    val sp = Prefs.plain(ctx)
+    val savedX = sp.getInt("bubble_x", dp(8))
+    val savedY = sp.getInt("bubble_y", (sh * 0.35f).toInt())
     val lp = overlayLp(size, size).apply {
       gravity = Gravity.TOP or Gravity.START
-      x = dp(8)
-      y = (sh * 0.35f).toInt()
+      x = clamp(savedX, -dp(10), sw - size + dp(10))
+      y = clamp(savedY, dp(24), sh - size - dp(24))
       flags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
         WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
     }
@@ -192,6 +203,7 @@ class ChatHeadOverlay(
             lp.y = clamp(startY + dy, dp(24), sh - bubbleSize - dp(24))
             updateBubbleLayout()
             updateCloseHover(e.rawX, e.rawY)
+            callbacks.onAnchorChanged()
           }
           true
         }
@@ -535,15 +547,31 @@ class ChatHeadOverlay(
         lp.x = (sx + (targetX - sx) * f).toInt()
         lp.y = (sy + (targetY - sy) * f).toInt()
         updateBubbleLayout()
+        callbacks.onAnchorChanged()
       }
+      addListener(object : android.animation.AnimatorListenerAdapter() {
+        override fun onAnimationEnd(animation: android.animation.Animator) {
+          Prefs.plain(ctx).edit().putInt("bubble_x", lp.x).putInt("bubble_y", lp.y).apply()
+          callbacks.onAnchorChanged()
+        }
+      })
       start()
     }
   }
 
-  private fun updateBubbleLayout() { val v = bubbleView ?: return; val lp = bubbleLp ?: return; try { wm.updateViewLayout(v, lp) } catch (_: Exception) {} }
+  private fun updateBubbleLayout() {
+    val v = bubbleView ?: return; val lp = bubbleLp ?: return
+    try { wm.updateViewLayout(v, lp) } catch (_: Exception) {}
+    if (expanded) positionPanel()
+  }
 
   private fun removeBubble() { bubbleView?.let { try { wm.removeView(it) } catch (_: Exception) {} }; bubbleView = null; bubbleLp = null; bubbleStatusRing = null; bubbleDot = null }
-  private fun removePanel() { hideKeyboard(); panelView?.let { try { wm.removeView(it) } catch (_: Exception) {} }; panelView = null; panelLp = null; chatList = null; chatScroll = null; inputField = null; statusDot = null; statusLabel = null; micBtn = null; screenBtn = null; msgViews.clear() }
+  private fun removePanel() {
+    hideKeyboard()
+    panelView?.let { try { wm.removeView(it) } catch (_: Exception) {} }
+    panelView = null; panelLp = null; chatList = null; chatScroll = null; inputField = null
+    statusDot = null; statusLabel = null; micBtn = null; screenBtn = null; msgViews.clear()
+  }
 
   private fun overlayLp(w: Int, h: Int): WindowManager.LayoutParams {
     val type = WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY

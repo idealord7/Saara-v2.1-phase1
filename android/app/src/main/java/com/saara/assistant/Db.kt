@@ -15,9 +15,10 @@ data class ActionVerification(val id: Long, val goal: String, val tool: String, 
 data class ReplyRule(val id: Long, val name: String, val enabled: Boolean, val apps: String, val senders: String, val blockedSenders: String, val chatType: String, val keywords: String, val quietStart: String, val quietEnd: String, val screenOffOnly: Boolean, val mode: String, val instruction: String, val ts: Long, val confidenceThreshold: Int = 75, val rateLimitPerHour: Int = 6, val loopWindowMin: Int = 10, val vipSenders: String = "", val muteSenders: String = "")
 data class AutoRule(val id: Long, val name: String, val enabled: Boolean, val trigger: String, val condition: String, val action: String, val cooldownMs: Long, val lastFiredMs: Long, val ts: Long)
 data class MemoryFact(val id: Long, val cat: String, val text: String, val ts: Long, val lastUsed: Long = 0L, val pinned: Boolean = false, val source: String = "")
+data class SessionState(val sessionId: String, val status: String, val activeGoal: String, val lastStep: String, val pending: String, val lastError: String, val updatedTs: Long)
 
 /** Local SQLite store: chat history, learned facts, shop ledger, usage stats, scheduled tasks, task steps. */
-class Db private constructor(c: Context) : SQLiteOpenHelper(c.applicationContext, "saara.db", null, 9) {
+class Db private constructor(c: Context) : SQLiteOpenHelper(c.applicationContext, "saara.db", null, 10) {
   private val appCtx = c.applicationContext
   companion object {
     @Volatile private var inst: Db? = null
@@ -32,6 +33,7 @@ class Db private constructor(c: Context) : SQLiteOpenHelper(c.applicationContext
     d.execSQL("CREATE TABLE usage(id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT, name TEXT, ts INTEGER)")
     d.execSQL("CREATE TABLE tasks(id INTEGER PRIMARY KEY AUTOINCREMENT, whenms INTEGER, text TEXT, repeatms INTEGER)")
     createTaskSteps(d)
+    createSessionTables(d)
   }
   override fun onUpgrade(d: SQLiteDatabase, o: Int, n: Int) {
     if (o < 2) {
@@ -59,6 +61,7 @@ class Db private constructor(c: Context) : SQLiteOpenHelper(c.applicationContext
       try { d.execSQL("CREATE TABLE IF NOT EXISTS action_verifications(id INTEGER PRIMARY KEY AUTOINCREMENT, goal TEXT, tool TEXT, args TEXT, result TEXT, ok INTEGER, verified INTEGER, retry_count INTEGER, note TEXT, ts INTEGER)") } catch (_: Exception) {}
       d.execSQL("INSERT OR IGNORE INTO categories(name) VALUES ('mistakes_and_lessons')")
     }
+    if (o < 10) createSessionTables(d)
   }
   private fun createTaskSteps(d: SQLiteDatabase) {
     d.execSQL("CREATE TABLE IF NOT EXISTS task_steps(id INTEGER PRIMARY KEY AUTOINCREMENT, goal TEXT, tool TEXT, args TEXT, result TEXT, ok INTEGER, ts INTEGER)")
@@ -68,6 +71,11 @@ class Db private constructor(c: Context) : SQLiteOpenHelper(c.applicationContext
     d.execSQL("CREATE TABLE IF NOT EXISTS auto_rules(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, enabled INTEGER, trigger TEXT, condition TEXT, action TEXT, cooldown_ms INTEGER, last_fired_ms INTEGER, ts INTEGER)")
     d.execSQL("CREATE TABLE IF NOT EXISTS reply_drafts(id INTEGER PRIMARY KEY AUTOINCREMENT, notif_key TEXT, sender TEXT, pkg TEXT, incoming TEXT, draft TEXT, reason TEXT, ts INTEGER)")
     d.execSQL("CREATE TABLE IF NOT EXISTS action_verifications(id INTEGER PRIMARY KEY AUTOINCREMENT, goal TEXT, tool TEXT, args TEXT, result TEXT, ok INTEGER, verified INTEGER, retry_count INTEGER, note TEXT, ts INTEGER)")
+  }
+
+  private fun createSessionTables(d: SQLiteDatabase) {
+    d.execSQL("CREATE TABLE IF NOT EXISTS session_state(id INTEGER PRIMARY KEY, session_id TEXT, status TEXT, active_goal TEXT, last_step TEXT, pending TEXT, last_error TEXT, updated_ts INTEGER)")
+    d.execSQL("INSERT OR IGNORE INTO session_state(id,session_id,status,active_goal,last_step,pending,last_error,updated_ts) VALUES (1,'','idle','','','','',0)")
   }
 
   // ---------- chat ----------
@@ -84,7 +92,70 @@ class Db private constructor(c: Context) : SQLiteOpenHelper(c.applicationContext
     }
     out.reverse(); return out
   }
+  fun chatRecent(n: Int = 40): List<Msg> = chatBefore(0, n.coerceIn(1, 200))
   fun chatClear() { writableDatabase.delete("chat", null, null) }
+
+  // ---------- session continuity ----------
+  fun sessionState(): SessionState {
+    readableDatabase.rawQuery("SELECT session_id,status,active_goal,last_step,pending,last_error,updated_ts FROM session_state WHERE id=1", null).use {
+      if (it.moveToFirst()) return SessionState(it.getString(0) ?: "", it.getString(1) ?: "idle", it.getString(2) ?: "", it.getString(3) ?: "", it.getString(4) ?: "", it.getString(5) ?: "", it.getLong(6))
+    }
+    return SessionState("", "idle", "", "", "", "", 0L)
+  }
+  fun sessionStateSave(sessionId: String? = null, status: String? = null, activeGoal: String? = null, lastStep: String? = null, pending: String? = null, lastError: String? = null) {
+    val cur = sessionState()
+    val cv = ContentValues().apply {
+      put("id", 1)
+      put("session_id", (sessionId ?: cur.sessionId).take(120))
+      put("status", (status ?: cur.status).ifBlank { "idle" }.take(40))
+      put("active_goal", (activeGoal ?: cur.activeGoal).take(400))
+      put("last_step", (lastStep ?: cur.lastStep).take(600))
+      put("pending", (pending ?: cur.pending).take(600))
+      put("last_error", (lastError ?: cur.lastError).take(500))
+      put("updated_ts", System.currentTimeMillis())
+    }
+    writableDatabase.insertWithOnConflict("session_state", null, cv, SQLiteDatabase.CONFLICT_REPLACE)
+  }
+  fun sessionStateClear(keepSessionId: Boolean = false) {
+    val sid = if (keepSessionId) sessionState().sessionId else ""
+    sessionStateSave(sessionId = sid, status = "idle", activeGoal = "", lastStep = "", pending = "", lastError = "")
+  }
+  fun recentSessionPrompt(limit: Int = 12): String {
+    if (!Prefs.on(appCtx, "f_session_continuity", true)) return ""
+    val st = sessionState()
+    val msgs = chatRecent(limit).filter { it.role == "you" || it.role == "saara" || it.role == "system" }
+    val now = System.currentTimeMillis()
+    val recent = st.updatedTs > 0 && now - st.updatedTs < 6L * 60 * 60 * 1000
+    val hasActive = recent && (st.activeGoal.isNotBlank() || st.pending.isNotBlank() || st.lastError.isNotBlank())
+    if (msgs.isEmpty() && !hasActive) return ""
+    val sb = StringBuilder("
+RECENT SESSION CONTINUITY (local, private; use to continue seamlessly without asking user to repeat):
+")
+    if (recent && st.sessionId.isNotBlank()) sb.append("Session: ").append(st.sessionId.take(40)).append(" · status=").append(st.status).append('
+')
+    if (hasActive) {
+      if (st.activeGoal.isNotBlank()) sb.append("Active goal: ").append(compactFactText(st.activeGoal, 180)).append('
+')
+      if (st.lastStep.isNotBlank()) sb.append("Last completed/attempted step: ").append(compactFactText(st.lastStep, 180)).append('
+')
+      if (st.pending.isNotBlank()) sb.append("Pending/next step: ").append(compactFactText(st.pending, 180)).append('
+')
+      if (st.lastError.isNotBlank()) sb.append("Last interruption/error: ").append(compactFactText(st.lastError, 180)).append('
+')
+      sb.append("Resume rule: continue from pending/next step unless user changed topic. On reconnect/network error, acknowledge briefly and resume.
+")
+    }
+    if (msgs.isNotEmpty()) {
+      sb.append("Recent chat turns:
+")
+      msgs.takeLast(limit).forEach { m ->
+        val role = when (m.role) { "you" -> "User"; "saara" -> "Saara"; "system" -> "System"; else -> m.role }
+        sb.append("- ").append(role).append(": ").append(compactFactText(m.text, 160)).append('
+')
+      }
+    }
+    return sb.toString().take(2600)
+  }
 
   // ---------- learned facts ----------
   private fun compactFactText(text: String, max: Int = 180): String {

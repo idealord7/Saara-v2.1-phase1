@@ -490,8 +490,8 @@ class MainActivity : AppCompatActivity() {
     heading(root, "Screen, Vision & Overlay", "Control screen sharing, capture/OCR, and overlay behavior.")
     feature(root, "Screen automation (Accessibility)", "Read screen, tap/type/scroll in other apps.", "f_ui", true, { a11yOn() }, "Enable Accessibility", { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) })
     feature(root, "Camera & screen sharing", "Allow live camera/screen frames and one-shot screen capture/OCR.", "f_share", true, { has(Manifest.permission.CAMERA) }, "Allow camera", { requestPermissions(arrayOf(Manifest.permission.CAMERA), 3) })
-    feature(root, "Live caption overlay", "Compact status/caption pill over other apps.", "f_overlay", true, { Settings.canDrawOverlays(this) }, "Allow overlay", { startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName"))) })
-    feature(root, "Floating bubble", "Messenger-style chat head. Tap to open panel; drag to X to hide.", "f_bubble", false, { Settings.canDrawOverlays(this) }, "Allow overlay", { startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName"))) })
+    feature(root, "Live caption overlay", "Compact status/caption pill over other apps. When bubble is ON, caption stays beside bubble.", "f_overlay", true, { Settings.canDrawOverlays(this) }, "Allow overlay", { startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName"))) })
+    feature(root, "Floating bubble", "Messenger-style chat head. Tap to open panel; drag to X to hide. When ON, Saara shows it on every start/trigger.", "f_bubble", false, { Settings.canDrawOverlays(this) }, "Allow overlay", { startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName"))) })
     feature(root, "Clipboard copy & paste", "Allow UI automation copy/paste helpers.", "f_clipboard", true, { true }, "", {})
     val scr = card(root)
     scr.addView(tv("ScreenAsk / OCR quick actions", 16f, bold = true))
@@ -1171,12 +1171,35 @@ class MainActivity : AppCompatActivity() {
 
     // data
     val c4 = card(root)
-    c4.addView(tv("Chat history", 16f, bold = true))
-    c4.addView(tv("Old chats are kept on this phone and load as you scroll up in the Chat tab.", 12f, SUB))
+    c4.addView(tv("Chat history & session continuity", 16f, bold = true))
+    c4.addView(tv("Old chats stay on-device and load as you scroll up. Recent session context can resume after reconnect/restart.", 12f, SUB))
+    val contRow = LinearLayout(this); contRow.gravity = Gravity.CENTER_VERTICAL
+    contRow.addView(tv("Resume recent session/task", 14f, TXT), LinearLayout.LayoutParams(0, -2, 1f))
+    val contSw = Switch(this); contSw.isChecked = Prefs.on(this, "f_session_continuity", true)
+    contSw.setOnCheckedChangeListener { _, v -> Prefs.plain(this).edit().putBoolean("f_session_continuity", v).apply(); toast(if (v) "Session continuity ON" else "Session continuity OFF") }
+    contRow.addView(contSw); c4.addView(contRow)
+    val st = try { Db.get(this).sessionState() } catch (_: Exception) { null }
+    val recent = try { Db.get(this).chatRecent(8) } catch (_: Exception) { emptyList() }
+    val summary = buildString {
+      append("Saved turns: ").append(recent.size).append(" recent loaded")
+      if (st != null && st.updatedTs > 0) {
+        append("\nStatus: ").append(st.status)
+        if (st.activeGoal.isNotBlank()) append("\nActive goal: ").append(st.activeGoal.take(120))
+        if (st.pending.isNotBlank()) append("\nPending: ").append(st.pending.take(120))
+        if (st.lastError.isNotBlank()) append("\nLast issue: ").append(st.lastError.take(120))
+      }
+    }
+    c4.addView(tv(summary, 12f, SUB))
     val clr = btn("Clear chat history", SURF2) {
       AlertDialog.Builder(this).setMessage("Delete all saved chats? Learned memory and shop data stay.").setPositiveButton("Delete") { _, _ -> Bus.clear() }.setNegativeButton("Cancel", null).show()
     }
     c4.addView(clr, lp1)
+    val clrSession = btn("Clear recent session state", SURF2) {
+      try { Db.get(this).sessionStateClear(true) } catch (_: Exception) {}
+      toast("Recent session state cleared")
+      refresh()
+    }
+    c4.addView(clrSession, lp1)
 
     // about
     val c5 = card(root); c5.gravity = Gravity.CENTER_HORIZONTAL
@@ -1289,6 +1312,7 @@ class MainActivity : AppCompatActivity() {
   override fun onResume() {
     super.onResume(); visible = true; Bus.listen(busListener); refresh()
     SaaraNotifications.requestRebindIfPossible(this)
+    VoiceService.instance?.refreshBubble()
     if (curTab == 3 && has(Manifest.permission.READ_CONTACTS)) scheduleContactsRefresh()
     Bus.ping()
   }
