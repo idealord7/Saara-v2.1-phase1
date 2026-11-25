@@ -98,6 +98,7 @@ class VoiceService : Service() {
   @Volatile private var callActive = false
   @Volatile private var enrolling = false
   @Volatile private var pendingWakeNoPhrase = false
+  @Volatile private var bubbleDismissedByUser = false
   private val micLock = Any()
   private var lastMicToggle = 0L
   private val main = Handler(Looper.getMainLooper())
@@ -175,13 +176,19 @@ class VoiceService : Service() {
       micEnabled = !micEnabled
       Prefs.plain(this).edit().putBoolean("mic_enabled", micEnabled).apply()
       if (micEnabled) {
-        isSaraActive = false
-        main.removeCallbacks(sessionTimer)
-        Bus.add("system", "Microphone ON (software). Say a wake phrase to start; background speech/noise is ignored until wake.", true)
+        bubbleDismissedByUser = false
+        Bus.add("system", "Microphone ON. Listening now.", true)
         ensureCaptureStarted()
-        maybeStartIdleWakeEngine()
+        if (ready && running && !callActive) {
+          startSession()
+          Bus.setStatus("Listening")
+        } else {
+          pendingWakeNoPhrase = true
+        }
+        refreshBubble()
       } else {
         isSaraActive = false
+        pendingWakeNoPhrase = false
         main.removeCallbacks(sessionTimer)
         stopIdleWakeEngine()
         stopCapture()
@@ -267,9 +274,14 @@ class VoiceService : Service() {
     Bus.ping()
   }
 
+  fun onExplicitTrigger() {
+    bubbleDismissedByUser = false
+    refreshBubble()
+  }
+
   fun refreshBubble() {
     val want = Prefs.on(this, "f_bubble", false)
-    if (want && Settings.canDrawOverlays(this)) {
+    if (want && !bubbleDismissedByUser && Settings.canDrawOverlays(this)) {
       if (chatHead == null) chatHead = ChatHeadOverlay(this, object : ChatHeadOverlay.Callbacks {
         override fun onOpenApp() { openMainApp() }
         override fun onSendText(text: String) { sendText(text) }
@@ -298,10 +310,10 @@ class VoiceService : Service() {
   }
 
   private fun hideChatHeadByUser() {
-    // User dismissed bubble via X target: hide overlay but keep service/wake active.
+    // User dismissed bubble via X target: hide runtime bubble only; keep f_bubble setting for next start/trigger.
+    bubbleDismissedByUser = true
     chatHead?.hide(); chatHead = null
-    Prefs.plain(this).edit().putBoolean("f_bubble", false).apply()
-    Bus.add("system", "Floating bubble hidden. Turn it on in Settings > App features.", true)
+    Bus.add("system", "Floating bubble hidden for this session. It will return on next start if enabled in Settings.", true)
     updateOverlay()
     Bus.ping()
   }
@@ -653,20 +665,25 @@ class VoiceService : Service() {
   override fun onStartCommand(i: Intent?, f: Int, id: Int): Int {
     Bus.init(this)
     val wakeNoPhrase = i?.action == ACTION_WAKE || i?.getBooleanExtra(ASSISTANT_WAKE, false) == true
-    when (i?.action) {
-      "STOP" -> { stopSelf(); return START_NOT_STICKY }
-      ACTION_WAKE -> { if (running && ready && micEnabled && !callActive) { ensureCaptureStarted(); startSession(); Bus.add("system", "Woke up from device button.", true) }; if (!running) { /* fall through to start then wake */ } else return START_STICKY }
-      "CAM_START", "CAM_STOP", "SCREEN_START", "SCREEN_CAPTURE", "SCREEN_STOP" -> { if (!running) { stopSelf(); return START_NOT_STICKY }; share(i!!); return START_STICKY }
-    }
     val cmd = i?.getStringExtra(ASSISTANT_COMMAND)?.trim()?.takeIf { it.isNotEmpty() }
       ?: i?.getStringExtra("action_text")?.trim()?.takeIf { it.isNotEmpty() }
+    val explicitTrigger = wakeNoPhrase || cmd != null
+    if (i?.action != "STOP") bubbleDismissedByUser = false
+    when (i?.action) {
+      "STOP" -> { stopSelf(); return START_NOT_STICKY }
+      ACTION_WAKE -> { if (running && ready && micEnabled && !callActive) { ensureCaptureStarted(); startSession(); Bus.add("system", "Woke up from device button.", true) }; if (!running) { /* fall through to start then wake */ } else { refreshBubble(); return START_STICKY } }
+      "CAM_START", "CAM_STOP", "SCREEN_START", "SCREEN_CAPTURE", "SCREEN_STOP" -> { if (!running) { stopSelf(); return START_NOT_STICKY }; share(i!!); return START_STICKY }
+    }
     if (cmd != null) {
       if (ready) {
         startSession(); processUtterance(cmd)
       } else pendingCommand = cmd
     }
     if (running) {
-      if (wakeNoPhrase && ready && micEnabled && !callActive) { ensureCaptureStarted(); startSession() }
+      if (wakeNoPhrase) {
+        if (ready && micEnabled && !callActive) { ensureCaptureStarted(); startSession() }
+        else pendingWakeNoPhrase = true
+      }
       refreshBubble()
       return START_STICKY
     }
@@ -908,6 +925,7 @@ class VoiceService : Service() {
       val wakeNow = pendingWakeNoPhrase; pendingWakeNoPhrase = false
       val cmd = pendingCommand?.takeIf { it.isNotBlank() }; pendingCommand = null
       if (cmd != null) {
+        startSession()
         processUtterance(cmd)
       } else if (wakeNow && micEnabled) {
         startSession()

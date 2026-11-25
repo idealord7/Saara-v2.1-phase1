@@ -381,11 +381,14 @@ class MainActivity : AppCompatActivity() {
     titles.addView(tv(title, 16f, bold = true)); titles.addView(tv(desc, 12f, SUB))
     val sw = Switch(this)
     sw.isChecked = Prefs.on(this, key, def)
-    sw.setOnCheckedChangeListener { _, v ->
-      Prefs.plain(this).edit().putBoolean(key, v).apply()
-      if (key == "f_bubble" || key == "f_overlay") VoiceService.instance?.refreshBubble()
-      if (key == "f_calls") VoiceService.instance?.refreshCalls()
-    }
+      sw.setOnCheckedChangeListener { _, v ->
+        Prefs.plain(this).edit().putBoolean(key, v).apply()
+        if (key == "f_bubble" || key == "f_overlay") {
+          val vs = VoiceService.instance
+          if (key == "f_bubble" && v) vs?.onExplicitTrigger() else vs?.refreshBubble()
+        }
+        if (key == "f_calls") VoiceService.instance?.refreshCalls()
+      }
     top.addView(titles, LinearLayout.LayoutParams(0, -2, 1f)); top.addView(sw)
     c.addView(top)
     val st = tv("", 12f)
@@ -1235,6 +1238,7 @@ class MainActivity : AppCompatActivity() {
     startBtn.isEnabled = false
     startBtn.postDelayed({ startBtn.isEnabled = true }, 900L)
     if (Bus.running) { startService(svc("STOP")); return }
+    pendingAssistantWake = true
     if (!has(Manifest.permission.RECORD_AUDIO)) {
       pendingStart = true
       requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO, Manifest.permission.POST_NOTIFICATIONS), 1)
