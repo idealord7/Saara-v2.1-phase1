@@ -177,7 +177,7 @@ object ModelRouter {
           if (!auto) throw e
           if (attempt < maxTry && transient) {
             Bus.add("system", "Model $model busy/error, retrying ($attempt/$maxTry)...", true)
-            try { Thread.sleep((delay * attempt).coerceAtMost(5000L).toLong()) } catch (_: Exception) {}
+            try { Thread.sleep((delay.toLong() * attempt).coerceAtMost(5000L)) } catch (_: Exception) {}
             continue
           }
           if (transient && idx < candidates.lastIndex) {
