@@ -136,21 +136,21 @@ object AiAutoReply {
       try {
         val rules = try { Db.get(ctx).rulesPrompt(40) } catch (_: Exception) { "" }
         val facts = try { Db.get(ctx).factsPrompt(msg, 10) } catch (_: Exception) { "" }
-        val reply = generateWithRetry(apiKey, systemPrompt(ctx), rules, facts, decision.instruction, who, msg, contextFor(who))
-        val clean = sanitize(reply)
-        if (clean.isBlank()) { addLog(ctx, "Empty reply after sanitizing · $who · ${appLabel(pkg)}"); return@execute }
+        val mr = generateWithRetry(ctx, systemPrompt(ctx), rules, facts, decision.instruction, who, msg, contextFor(who))
+        val clean = sanitize(mr.text)
+        if (clean.isBlank()) { addLog(ctx, "Empty reply after sanitizing · $who · ${appLabel(pkg)} · model=${mr.model}"); return@execute }
         val confidence = estimateConfidence(msg, clean, decision)
         if (decision.draftOnly || confidence < decision.confidenceThreshold) {
-          try { Db.get(ctx).replyDraftAdd(key, who, pkg, msg, clean, "confidence=$confidence<threshold=${decision.confidenceThreshold}; ${decision.reason}") } catch (_: Exception) {}
-          addLog(ctx, "Draft held #$mySeq · $who · ${appLabel(pkg)} · confidence=$confidence\n← ${msg.take(400)}\n✎ ${clean.take(600)}")
-          Bus.add("system", "Auto-reply draft held for $who (${appLabel(pkg)}, confidence $confidence%). Review in Auto-reply logs/drafts.", true)
+          try { Db.get(ctx).replyDraftAdd(key, who, pkg, msg, clean, "confidence=$confidence<threshold=${decision.confidenceThreshold}; model=${mr.model}; ${decision.reason}") } catch (_: Exception) {}
+          addLog(ctx, "Draft held #$mySeq · $who · ${appLabel(pkg)} · model=${mr.model} · confidence=$confidence\n← ${msg.take(400)}\n✎ ${clean.take(600)}")
+          Bus.add("system", "Auto-reply draft held for $who (${appLabel(pkg)}, confidence $confidence%, model ${mr.model}).", true)
           return@execute
         }
         pushContext(who, "You: $clean")
         val result = SaaraNotifications.reply(key, who, clean)
         val ok = result == "replied"
-        addLog(ctx, (if (ok) "Replied #$mySeq" else "Failed ($result)") + " · $who · ${appLabel(pkg)} · confidence=$confidence\n← ${msg.take(500)}\n→ ${clean.take(700)}")
-        if (ok) Bus.add("system", "Auto-replied to $who (${appLabel(pkg)}): ${clean.take(250)}", true) else Bus.add("system", "Auto-reply failed for $who: $result", true)
+        addLog(ctx, (if (ok) "Replied #$mySeq" else "Failed ($result)") + " · $who · ${appLabel(pkg)} · model=${mr.model} · confidence=$confidence\n← ${msg.take(500)}\n→ ${clean.take(700)}")
+        if (ok) Bus.add("system", "Auto-replied to $who (${appLabel(pkg)}, model ${mr.model}): ${clean.take(250)}", true) else Bus.add("system", "Auto-reply failed for $who: $result", true)
       } catch (e: Exception) {
         val detail = e.message?.take(300) ?: e.javaClass.simpleName
         addLog(ctx, "API/error · $who · ${appLabel(pkg)}: $detail")
@@ -291,23 +291,7 @@ object AiAutoReply {
     return Triple(d.allow, d.reason, d.instruction)
   }
 
-  private fun generateWithRetry(apiKey: String, system: String, rules: String, facts: String, ruleInstr: String, sender: String, message: String, context: String): String {
-    var last: Exception? = null
-    for (attempt in 1..3) {
-      try { return generate(apiKey, system, rules, facts, ruleInstr, sender, message, context) }
-      catch (e: Exception) {
-        last = e
-        val msg = e.message.orEmpty()
-        val retryable = msg.contains("HTTP 503") || msg.contains("UNAVAILABLE") || msg.contains("high demand", true) || msg.contains("temporar", true) || msg.contains("timeout", true)
-        if (!retryable || attempt == 3) throw e
-        try { Thread.sleep((attempt * 1200L).coerceAtMost(3000L)) } catch (_: Exception) {}
-      }
-    }
-    throw last ?: RuntimeException("Unknown auto-reply error")
-  }
-
-  private fun generate(apiKey: String, system: String, rules: String, facts: String, ruleInstr: String, sender: String, message: String, context: String): String {
-    val model = "gemini-3.8-flash"
+  private fun generateWithRetry(ctx: Context, system: String, rules: String, facts: String, ruleInstr: String, sender: String, message: String, context: String): ModelResult {
     val instruction = buildString {
       append(system.trim())
       append("\n\nSTRICT COMPLIANCE:\n- Output only reply text to send. No preamble/quotes/markdown.\n- Follow all user rules and replying rules.\n")
@@ -320,32 +304,9 @@ object AiAutoReply {
       if (context.isNotBlank()) append("Recent conversation:\n").append(context.take(2500)).append('\n')
       append("Incoming message: ").append(message.take(1800)).append("\nWrite the best reply now.")
     }
-    val body = JSONObject()
-      .put("system_instruction", JSONObject().put("parts", JSONArray().put(JSONObject().put("text", instruction))))
-      .put("contents", JSONArray().put(JSONObject().put("role", "user").put("parts", JSONArray().put(JSONObject().put("text", user)))))
-      .put("generationConfig", JSONObject().put("temperature", 0.4).put("topP", 0.95).put("maxOutputTokens", 220))
-    val req = Request.Builder()
-      .url("https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent?key=$apiKey")
-      .header("Content-Type", "application/json")
-      .post(body.toString().toRequestBody("application/json; charset=utf-8".toMediaType()))
-      .build()
-    http.newCall(req).execute().use { resp ->
-      val s = resp.body?.string().orEmpty()
-      if (!resp.isSuccessful) {
-        val detail = try { JSONObject(s).optJSONObject("error")?.optString("message")?.take(220) ?: s.take(220) } catch (_: Exception) { s.take(220) }
-        throw RuntimeException("HTTP ${resp.code}: $detail")
-      }
-      val j = JSONObject(s)
-      val blocked = j.optJSONObject("promptFeedback")?.optString("blockReason")?.takeIf { it.isNotBlank() }
-      if (blocked != null) throw RuntimeException("Blocked by Gemini: $blocked")
-      val cand = j.optJSONArray("candidates")?.optJSONObject(0)
-      val finish = cand?.optString("finishReason").orEmpty()
-      val parts = cand?.optJSONObject("content")?.optJSONArray("parts")
-      val sb = StringBuilder()
-      if (parts != null) for (i in 0 until parts.length()) sb.append(parts.optJSONObject(i)?.optString("text").orEmpty())
-      val out = sb.toString().trim()
-      if (out.isBlank()) throw RuntimeException("Empty model output" + if (finish.isNotBlank()) " (finishReason=$finish)" else "")
-      return out
-    }
+    val preferred = Prefs.plain(ctx).getString("model_auto_reply", "")?.trim()?.takeIf { it.isNotBlank() }
+    return ModelRouter.generateContentWithFallback(
+      ctx, ModelTask.AUTO_REPLY, user, system = instruction, preferredModel = preferred, temperature = 0.4, maxOutputTokens = 220
+    )
   }
 }

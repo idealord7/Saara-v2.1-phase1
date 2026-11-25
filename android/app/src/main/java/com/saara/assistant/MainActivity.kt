@@ -406,6 +406,65 @@ class MainActivity : AppCompatActivity() {
   }
 
   private fun addFeatures(root: LinearLayout) {
+    heading(root, "Model & Auto-Fallback", "Automatic model switching on 503/busy/rate-limit and task-aware model selection.")
+    val mc = card(root)
+    val autoSw = Switch(this); autoSw.text = "Auto-switch model on error / busy (503, 429, timeout)"; autoSw.isChecked = Prefs.on(this, "f_auto_model_fallback", true)
+    autoSw.setOnCheckedChangeListener { _, v -> Prefs.plain(this).edit().putBoolean("f_auto_model_fallback", v).apply(); toast(if (v) "Auto model fallback ON" else "Auto model fallback OFF") }
+    mc.addView(autoSw)
+    val smartSw = Switch(this); smartSw.text = "Smart task-based model selection"; smartSw.isChecked = Prefs.on(this, "f_smart_model", true)
+    smartSw.setOnCheckedChangeListener { _, v -> Prefs.plain(this).edit().putBoolean("f_smart_model", v).apply(); toast(if (v) "Smart model selection ON" else "Smart model selection OFF") }
+    mc.addView(smartSw)
+    val status = tv("Status: ${ModelRouter.lastStatus(this).ifBlank { "No model fallback event yet." }}", 12f, SUB); status.setPadding(0, dp(8), 0, dp(8)); mc.addView(status)
+    val primary = edit("Preferred primary live model"); primary.setText(ModelRouter.primaryModel(this)); mc.addView(primary)
+    val arModel = edit("Fast auto-reply model (task)"); arModel.setText(Prefs.plain(this).getString("model_auto_reply", ModelRouter.DEFAULT_TEXT_FAST.first()) ?: ""); mc.addView(arModel)
+    val visionModel = edit("Vision/screen analysis model (task)"); visionModel.setText(Prefs.plain(this).getString("model_vision", ModelRouter.DEFAULT_VISION.first()) ?: ""); mc.addView(visionModel)
+    val complexModel = edit("Complex/reasoning model (task)"); complexModel.setText(Prefs.plain(this).getString("model_complex", ModelRouter.DEFAULT_TEXT_CAPABLE.first()) ?: ""); mc.addView(complexModel)
+    mc.addView(tv("Fallback model order (one per line, used on 503/busy/error):", 12f, SUB))
+    val fb = edit("Fallback models, one per line"); fb.minLines = 3; fb.setText(ModelRouter.fallbackModels(this).joinToString("\n")); mc.addView(fb)
+    fun seekInt(title:String, key:String, def:Int, min:Int, max:Int, suffix:String) {
+      val lbl = tv("", 12f, TXT)
+      fun paint() { lbl.text = "$title: ${Prefs.plain(this).getInt(key, def)}$suffix" }
+      paint(); mc.addView(lbl)
+      val sk = SeekBar(this); sk.max = max - min; sk.progress = (Prefs.plain(this).getInt(key, def) - min).coerceIn(0, max-min)
+      sk.setOnSeekBarChangeListener(object: SeekBar.OnSeekBarChangeListener {
+        override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) { if (fromUser) { Prefs.plain(this@MainActivity).edit().putInt(key, min + progress).apply(); paint() } }
+        override fun onStartTrackingTouch(seekBar: SeekBar?) {}
+        override fun onStopTrackingTouch(seekBar: SeekBar?) {}
+      })
+      mc.addView(sk)
+    }
+    seekInt("Retry count before fallback/fail", "model_retry_count", 2, 0, 5, "")
+    seekInt("Retry delay", "model_retry_delay_ms", 1200, 250, 10000, " ms")
+    val rowBtns = LinearLayout(this); rowBtns.orientation = LinearLayout.HORIZONTAL
+    rowBtns.addView(btn("Save model settings", ACC2) {
+      val p = Prefs.plain(this).edit()
+      p.putString("model_primary", primary.text.toString().trim())
+      p.putString("model", primary.text.toString().trim().ifBlank { ModelRouter.primaryModel(this) })
+      p.putString("model_auto_reply", arModel.text.toString().trim())
+      p.putString("model_vision", visionModel.text.toString().trim())
+      p.putString("model_complex", complexModel.text.toString().trim())
+      p.apply()
+      ModelRouter.saveFallbackModels(this, fb.text.toString().split('\n', ','))
+      toast("Model settings saved. Restart Saara for live model changes.")
+      status.text = "Status: ${ModelRouter.lastStatus(this).ifBlank { "Saved." }}"
+    }, LinearLayout.LayoutParams(0, -2, 1f))
+    rowBtns.addView(btn("Detect supported models", SURF2) {
+      Thread {
+        val models = ModelRouter.fetchSupportedModels(this)
+        runOnUiThread {
+          if (models.isEmpty()) toast("No models detected (check API key/network)")
+          else {
+            ModelRouter.saveSupportedCache(this, models)
+            val cur = fb.text.toString().split('\n').map { it.trim() }.filter { it.isNotBlank() }.toMutableSet()
+            models.filter { it.contains("flash", true) || it.contains("pro", true) }.take(8).forEach { cur.add(it) }
+            fb.setText(cur.joinToString("\n"))
+            toast("Detected ${models.size} models; supported cache updated")
+          }
+        }
+      }.start()
+    }, LinearLayout.LayoutParams(0, -2, 1f))
+    mc.addView(rowBtns, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8) })
+
     heading(root, "Permissions & System Readiness", "Live status and one-tap shortcuts for required system access.")
     val ready = card(root)
     fun statusRow(label: String, ok: Boolean, actionLabel: String, action: () -> Unit): View {

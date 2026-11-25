@@ -84,6 +84,9 @@ class VoiceService : Service() {
   @Volatile private var micEnabled = true
   @Volatile private var captureRunning = false
   private var retries = 0
+  @Volatile private var liveModelIndex = 0
+  private var liveCandidates: List<String> = emptyList()
+  private var liveModel: String = ""
   private var pendingCommand: String? = null
   private var track: AudioTrack? = null
   private val audioQ = java.util.concurrent.LinkedBlockingQueue<ByteArray>()
@@ -695,6 +698,7 @@ class VoiceService : Service() {
     micEnabled = Prefs.plain(this).getBoolean("mic_enabled", true)
     wakePatterns = buildWakePatterns(loadWakePhrases(Prefs.plain(this)))
     localWakeUnavailable = false; localWakeWarned = false
+    liveModelIndex = 0; liveCandidates = emptyList(); liveModel = ModelRouter.primaryModel(this)
     migrateFacts(this)
     ensureSessionId()
     noteSession(status = "connecting", lastStep = "service starting", lastError = "")
@@ -837,9 +841,14 @@ class VoiceService : Service() {
 
   private fun connect() {
     if (!running) return
-    ready = false; Bus.setStatus("Connecting / Thinking")
+    ready = false
     val key = Prefs.secure(this).getString("apiKey", "") ?: ""
     if (key.isBlank()) { Bus.add("system", "API key missing. Add it in Settings.", true); stopSelf(); return }
+    val primary = ModelRouter.primaryModel(this)
+    liveCandidates = ModelRouter.candidatesFor(this, ModelTask.LIVE_VOICE, primary).ifEmpty { listOf(primary) }
+    if (liveModelIndex >= liveCandidates.size) liveModelIndex = 0
+    liveModel = liveCandidates.getOrElse(liveModelIndex) { primary }
+    Bus.setStatus("Connecting / Thinking · $liveModel")
     val url = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=$key"
     ws = http.newWebSocket(Request.Builder().url(url).build(), object : WebSocketListener() {
       override fun onOpen(w: WebSocket, r: Response) { w.send(setup()) }
@@ -854,25 +863,36 @@ class VoiceService : Service() {
   private fun lost(msg: String) {
     ready = false
     if (!running) return
-    val transient = Regex("503|unavailable|high demand|timeout|temporar|network|reset|closed", RegexOption.IGNORE_CASE).containsMatchIn(msg)
+    val transient = ModelRouter.isTransientError(msg)
     val retryEnabled = Prefs.on(this, "f_offline_retry", true)
+    val autoSwitch = ModelRouter.autoFallbackEnabled(this)
     noteSession(status = if (transient) "reconnecting" else "disconnected", lastError = msg.take(240), pending = lastTaskNote.ifBlank { "Resume recent conversation when reconnected." })
-    Bus.add("system", if (transient && retryEnabled) "$msg — using offline-safe fallback and retrying." else msg, true)
+    Bus.add("system", if (transient && (retryEnabled || autoSwitch)) "$msg — retrying with model fallback." else msg, true)
+    if (transient && autoSwitch && liveCandidates.isNotEmpty() && liveModelIndex < liveCandidates.lastIndex) {
+      val failed = liveModel
+      liveModelIndex++
+      val next = liveCandidates[liveModelIndex]
+      retries = 0
+      ModelRouter.recordStatus(this, "Live model fallback: $failed -> $next after error: ${msg.take(160)}")
+      Bus.setStatus("Retrying / 503 wait · switching to $next")
+      main.postDelayed({ if (running) connect() }, 900L)
+      return
+    }
     if (transient && retryEnabled) {
-      Bus.setStatus("Retrying / 503 wait")
+      Bus.setStatus("Retrying / 503 wait · $liveModel")
       val delay = (1500L * retries.coerceAtLeast(1)).coerceAtMost(12000L)
       retries++
       main.postDelayed({ if (running) connect() }, delay)
       return
     }
-    if (++retries > 3) { Bus.add("system", "Stopped after repeated failures. Check API key / model name in Settings.", true); main.post { stopSelf() }; return }
-    if (retryEnabled) { Bus.setStatus("Retrying / 503 wait"); main.postDelayed({ connect() }, 3000) }
+    if (++retries > 3) { Bus.add("system", "Stopped after repeated failures. Check API key / model availability in Settings.", true); main.post { stopSelf() }; return }
+    if (retryEnabled) { Bus.setStatus("Retrying / 503 wait · $liveModel"); main.postDelayed({ connect() }, 3000) }
     else { Bus.setStatus("Disconnected"); Bus.add("system", "Auto-retry is off. Tap Start/reconnect manually.", true) }
   }
 
   private fun setup(): String {
     val p = Prefs.plain(this)
-    val model = p.getString("model", "gemini-3.1-flash-live-preview") ?: "gemini-3.1-flash-live-preview"
+    val model = liveModel.ifBlank { ModelRouter.primaryModel(this) }
     val voice = p.getString("voice", "Aoede") ?: "Aoede"
     val now = SimpleDateFormat("EEEE, d MMMM yyyy, HH:mm", Locale.US).format(Date())
     val taskMemory = if (Prefs.on(this, "learn_tasks", true)) try { TaskLearning.prompt(this) } catch (_: Exception) { "" } else ""
@@ -920,6 +940,7 @@ class VoiceService : Service() {
     val m = try { JSONObject(s) } catch (_: Exception) { return }
     if (m.has("setupComplete")) {
       ready = true; retries = 0
+      Prefs.plain(this).edit().putString("model_last_used", liveModel).putString("model_last_status", "Live model connected: $liveModel").putLong("model_last_status_ts", System.currentTimeMillis()).apply()
       val resumed = try { Db.get(this).sessionState().updatedTs > 0 && System.currentTimeMillis() - Db.get(this).sessionState().updatedTs < 6L * 60 * 60 * 1000 } catch (_: Exception) { false }
       noteSession(status = if (isSaraActive) "active" else "listening_for_wake", lastError = "")
       val wakeNow = pendingWakeNoPhrase; pendingWakeNoPhrase = false
@@ -932,10 +953,10 @@ class VoiceService : Service() {
         Bus.add("system", "Woke up — listening (no wake phrase needed).", true)
         maybeResumeContext("wake")
       } else {
-        Bus.setStatus("Listening for wake phrase")
+        Bus.setStatus("Listening for wake phrase · $liveModel")
         if (resumed) maybeResumeContext("reconnect")
       }
-      if (micEnabled) { ensureCaptureStarted(); if (!isSaraActive) maybeStartIdleWakeEngine() } else Bus.add("system", "Gemini connected. Microphone is muted.", true)
+      if (micEnabled) { ensureCaptureStarted(); if (!isSaraActive) maybeStartIdleWakeEngine() } else Bus.add("system", "Gemini connected ($liveModel). Microphone is muted.", true)
     }
     if (m.has("error")) Bus.add("system", "Gemini error: " + m.optString("error"), true)
     val sc = m.optJSONObject("serverContent")

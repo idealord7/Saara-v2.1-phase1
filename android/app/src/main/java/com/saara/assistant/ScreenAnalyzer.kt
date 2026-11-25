@@ -47,32 +47,12 @@ Mask sensitive numbers partially. If no fields, return empty fields array."""
 
   fun geminiVision(c: Context, prompt: String, imageB64: String, cb: (String) -> Unit) {
     Thread {
-      val key = Prefs.secure(c).getString("apiKey", "") ?: ""
-      if (key.isBlank()) { cb("Gemini API key missing. Set it in Settings."); return@Thread }
-      val model = Prefs.plain(c).getString("model", "gemini-3.1-flash-live-preview") ?: "gemini-3.1-flash-live-preview"
-      // Use text model endpoint for image understanding; fallback to configured model.
-      val visionModel = if (model.contains("live", true)) "gemini-2.5-flash" else model
-      val body = JSONObject()
-        .put("contents", JSONArray().put(JSONObject().put("role", "user").put("parts", JSONArray()
-          .put(JSONObject().put("text", prompt))
-          .put(JSONObject().put("inline_data", JSONObject().put("mime_type", "image/jpeg").put("data", imageB64))))))
-        .put("generationConfig", JSONObject().put("temperature", 0.2).put("maxOutputTokens", 900))
-      val req = Request.Builder().url("https://generativelanguage.googleapis.com/v1beta/models/$visionModel:generateContent?key=$key")
-        .post(body.toString().toRequestBody("application/json; charset=utf-8".toMediaType())).build()
       try {
-        http.newCall(req).execute().use { resp ->
-          val s = resp.body?.string().orEmpty()
-          if (!resp.isSuccessful) {
-            val msg = try { JSONObject(s).optJSONObject("error")?.optString("message") ?: s } catch (_: Exception) { s }
-            cb("Screen analysis failed: HTTP ${resp.code} ${msg.take(220)}")
-            return@use
-          }
-          val j = JSONObject(s)
-          val parts = j.optJSONArray("candidates")?.optJSONObject(0)?.optJSONObject("content")?.optJSONArray("parts")
-          val sb = StringBuilder()
-          if (parts != null) for (i in 0 until parts.length()) sb.append(parts.optJSONObject(i)?.optString("text").orEmpty())
-          cb(sb.toString().trim().ifBlank { "No screen analysis returned." })
-        }
+        val preferred = Prefs.plain(c).getString("model_vision", "")?.trim()?.takeIf { it.isNotBlank() }
+        val mr = ModelRouter.generateContentWithFallback(
+          c, ModelTask.VISION, prompt, imageB64 = imageB64, preferredModel = preferred, temperature = 0.2, maxOutputTokens = 900
+        )
+        cb(mr.text.ifBlank { "No screen analysis returned." } + "\n\n[model: ${mr.model}]")
       } catch (e: Exception) {
         cb("Screen analysis error: ${e.message}")
       }
