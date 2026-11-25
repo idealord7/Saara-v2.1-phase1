@@ -128,30 +128,20 @@ class Db private constructor(c: Context) : SQLiteOpenHelper(c.applicationContext
     val recent = st.updatedTs > 0 && now - st.updatedTs < 6L * 60 * 60 * 1000
     val hasActive = recent && (st.activeGoal.isNotBlank() || st.pending.isNotBlank() || st.lastError.isNotBlank())
     if (msgs.isEmpty() && !hasActive) return ""
-    val sb = StringBuilder("
-RECENT SESSION CONTINUITY (local, private; use to continue seamlessly without asking user to repeat):
-")
-    if (recent && st.sessionId.isNotBlank()) sb.append("Session: ").append(st.sessionId.take(40)).append(" · status=").append(st.status).append('
-')
+    val sb = StringBuilder("\nRECENT SESSION CONTINUITY (local, private; use to continue seamlessly without asking user to repeat):\n")
+    if (recent && st.sessionId.isNotBlank()) sb.append("Session: ").append(st.sessionId.take(40)).append(" · status=").append(st.status).append('\n')
     if (hasActive) {
-      if (st.activeGoal.isNotBlank()) sb.append("Active goal: ").append(compactFactText(st.activeGoal, 180)).append('
-')
-      if (st.lastStep.isNotBlank()) sb.append("Last completed/attempted step: ").append(compactFactText(st.lastStep, 180)).append('
-')
-      if (st.pending.isNotBlank()) sb.append("Pending/next step: ").append(compactFactText(st.pending, 180)).append('
-')
-      if (st.lastError.isNotBlank()) sb.append("Last interruption/error: ").append(compactFactText(st.lastError, 180)).append('
-')
-      sb.append("Resume rule: continue from pending/next step unless user changed topic. On reconnect/network error, acknowledge briefly and resume.
-")
+      if (st.activeGoal.isNotBlank()) sb.append("Active goal: ").append(compactFactText(st.activeGoal, 180)).append('\n')
+      if (st.lastStep.isNotBlank()) sb.append("Last completed/attempted step: ").append(compactFactText(st.lastStep, 180)).append('\n')
+      if (st.pending.isNotBlank()) sb.append("Pending/next step: ").append(compactFactText(st.pending, 180)).append('\n')
+      if (st.lastError.isNotBlank()) sb.append("Last interruption/error: ").append(compactFactText(st.lastError, 180)).append('\n')
+      sb.append("Resume rule: continue from pending/next step unless user changed topic. On reconnect/network error, acknowledge briefly and resume.\n")
     }
     if (msgs.isNotEmpty()) {
-      sb.append("Recent chat turns:
-")
+      sb.append("Recent chat turns:\n")
       msgs.takeLast(limit).forEach { m ->
         val role = when (m.role) { "you" -> "User"; "saara" -> "Saara"; "system" -> "System"; else -> m.role }
-        sb.append("- ").append(role).append(": ").append(compactFactText(m.text, 160)).append('
-')
+        sb.append("- ").append(role).append(": ").append(compactFactText(m.text, 160)).append('\n')
       }
     }
     return sb.toString().take(2600)
