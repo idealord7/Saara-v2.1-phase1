@@ -315,9 +315,9 @@ class VoiceService : Service() {
     }
     return sessionId
   }
-  private fun noteSession(status: String? = null, goal: String? = null, lastStep: String? = null, pending: String? = null, err: String? = null) {
+  private fun noteSession(status: String? = null, activeGoal: String? = null, lastStep: String? = null, pending: String? = null, lastError: String? = null) {
     if (!sessionContinuityEnabled()) return
-    try { Db.get(this).sessionStateSave(sessionId = ensureSessionId(), status = status, activeGoal = goal, lastStep = lastStep, pending = pending, lastError = err) } catch (_: Exception) {}
+    try { Db.get(this).sessionStateSave(sessionId = ensureSessionId(), status = status, activeGoal = activeGoal, lastStep = lastStep, pending = pending, lastError = lastError) } catch (_: Exception) {}
   }
   private fun maybeResumeContext(reason: String) {
     if (!sessionContinuityEnabled()) return
