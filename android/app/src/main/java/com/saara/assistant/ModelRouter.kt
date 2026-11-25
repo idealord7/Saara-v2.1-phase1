@@ -25,26 +25,25 @@ object ModelRouter {
 
   val DEFAULT_LIVE = listOf(
     "gemini-3.1-flash-live-preview",
-    "gemini-2.5-flash-native-audio-preview-12-2025",
-    "gemini-live-2.5-flash-preview"
+    "gemini-2.5-flash-native-audio-preview-12-2025"
   )
   val DEFAULT_TEXT_FAST = listOf(
-    "gemini-2.5-flash",
-    "gemini-2.0-flash",
-    "gemini-2.0-flash-lite",
-    "gemini-1.5-flash"
+    "gemini-3.5-flash-lite",
+    "gemini-3.1-flash-lite",
+    "gemini-3-flash-preview",
+    "gemini-2.5-flash-lite"
   )
   val DEFAULT_TEXT_CAPABLE = listOf(
+    "gemini-3.8-flash",
+    "gemini-3-flash-preview",
     "gemini-2.5-pro",
-    "gemini-2.5-flash",
-    "gemini-2.0-flash",
-    "gemini-1.5-pro"
+    "gemini-3.5-flash-lite"
   )
   val DEFAULT_VISION = listOf(
-    "gemini-2.5-flash",
-    "gemini-2.0-flash",
-    "gemini-2.5-pro",
-    "gemini-1.5-flash"
+    "gemini-3.5-flash-lite",
+    "gemini-3.8-flash",
+    "gemini-3-flash-preview",
+    "gemini-2.5-flash-lite"
   )
 
   fun autoFallbackEnabled(c: Context) = Prefs.on(c, "f_auto_model_fallback", true)
@@ -137,6 +136,12 @@ object ModelRouter {
       m.contains("timeout", true) || m.contains("deadline", true)
   }
 
+  private fun isModelUnavailable(msg: String?, code: Int = 0): Boolean {
+    val m = msg.orEmpty()
+    return code == 404 || m.contains("not found", true) || m.contains("no longer available", true) ||
+      m.contains("not supported for generateContent", true) || m.contains("is not found for API version", true)
+  }
+
   fun generateContentWithFallback(
     c: Context,
     task: ModelTask,
@@ -150,12 +155,15 @@ object ModelRouter {
     val apiKey = Prefs.secure(c).getString("apiKey", "") ?: ""
     if (apiKey.isBlank()) throw RuntimeException("Gemini API key missing")
     val auto = autoFallbackEnabled(c)
-    val candidates = if (auto) candidatesFor(c, task, preferredModel) else listOf(preferredModel ?: candidatesFor(c, task).firstOrNull() ?: DEFAULT_TEXT_FAST.first())
+    var candidates = if (auto) candidatesFor(c, task, preferredModel) else listOf(preferredModel ?: candidatesFor(c, task).firstOrNull() ?: DEFAULT_TEXT_FAST.first())
     val retries = retryCount(c)
     val delay = retryDelayMs(c)
     val attempts = ArrayList<ModelAttempt>()
     var lastErr: Exception? = null
-    for ((idx, model) in candidates.withIndex()) {
+    var refreshed = false
+    var idx = 0
+    while (idx < candidates.size) {
+      val model = candidates[idx]
       val maxTry = if (auto) retries + 1 else 1
       for (attempt in 1..maxTry) {
         val t0 = System.currentTimeMillis()
@@ -173,24 +181,38 @@ object ModelRouter {
           attempts.add(ModelAttempt(model, task, false, msg, ms))
           lastErr = e
           val transient = isTransientError(msg)
+          val unavailable = isModelUnavailable(msg)
           Prefs.plain(c).edit().putString("model_last_status", "Model $model failed (${task.name.lowercase()}): ${msg.take(180)}").putLong("model_last_status_ts", System.currentTimeMillis()).apply()
           if (!auto) throw e
-          if (attempt < maxTry && transient) {
+          if (attempt < maxTry && transient && !unavailable) {
             Bus.add("system", "Model $model busy/error, retrying ($attempt/$maxTry)...", true)
             try { Thread.sleep((delay.toLong() * attempt).coerceAtMost(5000L)) } catch (_: Exception) {}
             continue
           }
-          if (transient && idx < candidates.lastIndex) {
+          if ((transient || unavailable) && idx < candidates.lastIndex) {
             Bus.add("system", "Model $model unavailable (${msg.take(120)}). Switching to ${candidates[idx + 1]}...", true)
             break
           }
-          if (!transient && idx < candidates.lastIndex) {
+          if (unavailable && !refreshed && auto) {
+            refreshed = true
+            val fresh = fetchSupportedModels(c).filter { it.isNotBlank() }
+            if (fresh.isNotEmpty()) {
+              val merged = LinkedHashSet<String>()
+              candidates.forEach { merged.add(it) }
+              fresh.filter { !it.contains("live", true) && !it.contains("tts", true) && !it.contains("image", true) }.forEach { merged.add(it) }
+              candidates = merged.toList()
+              Bus.add("system", "Detected ${fresh.size} supported models; retrying with available models...", true)
+              break
+            }
+          }
+          if (!transient && !unavailable && idx < candidates.lastIndex) {
             Bus.add("system", "Model $model failed (${msg.take(120)}). Trying ${candidates[idx + 1]}...", true)
             break
           }
           throw e
         }
       }
+      idx++
     }
     throw lastErr ?: RuntimeException("No model available")
   }
