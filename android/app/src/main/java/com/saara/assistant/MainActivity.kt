@@ -628,6 +628,7 @@ class MainActivity : AppCompatActivity() {
         card.addView(tv("apps=${r.apps.ifBlank { "any" }} · senders=${r.senders.ifBlank { "any" }} · vip=${r.vipSenders.ifBlank { "none" }} · mute=${r.muteSenders.ifBlank { "none" }} · chat=${r.chatType} · mode=${r.mode}", 11f, SUB))
         card.addView(tv("keywords=${r.keywords.ifBlank { "any" }} · quiet=${r.quietStart.ifBlank { "--" }}-${r.quietEnd.ifBlank { "--" }} · screenOffOnly=${r.screenOffOnly}", 11f, SUB))
         if (r.instruction.isNotBlank()) card.addView(tv("instruction: ${r.instruction}", 11f, SUB))
+        if (r.replyData.isNotBlank()) card.addView(tv("reply data: configured (${r.replyData.take(60).replace("\n", " ")}${if (r.replyData.length > 60) "…" else ""})", 11f, ACC))
         val actions = LinearLayout(this)
         actions.addView(btn("Edit", SURF) { showReplyRuleEditor(r) { showReplyRulesDialog() } }, LinearLayout.LayoutParams(0, -2, 1f))
         actions.addView(btn("Delete", SURF) { db.replyRuleDelete(r.id); refresh() }, LinearLayout.LayoutParams(0, -2, 1f))
@@ -655,13 +656,15 @@ class MainActivity : AppCompatActivity() {
     val quietStart = e("Quiet start HH:mm (optional)", existing?.quietStart ?: "")
     val quietEnd = e("Quiet end HH:mm (optional)", existing?.quietEnd ?: "")
     val instruction = e("Per-rule reply instruction (optional)", existing?.instruction ?: "")
+    val replyData = e("Per-rule reply data (optional)", existing?.replyData ?: ""); replyData.minLines = 3
+    root.addView(tv("Saara checks this data first when replying for this rule. Put facts, FAQs, prices, availability, or answers here.", 11f, SUB))
     val mode = e("Mode: ai/block", existing?.mode ?: "ai")
     val screenOff = Switch(this); screenOff.text = "Only when screen is off"; screenOff.isChecked = existing?.screenOffOnly == true
     val enabled = Switch(this); enabled.text = "Enabled"; enabled.isChecked = existing?.enabled ?: true
-    listOf<View>(name, apps, senders, blocked, vip, mute, chatType, keywords, quietStart, quietEnd, instruction, mode, screenOff, enabled).forEach { root.addView(it) }
+    listOf<View>(name, apps, senders, blocked, vip, mute, chatType, keywords, quietStart, quietEnd, instruction, replyData, mode, screenOff, enabled).forEach { root.addView(it) }
     AlertDialog.Builder(this).setTitle(if (existing == null) "Add Replying Rule" else "Edit Replying Rule").setView(ScrollView(this).apply { addView(root) })
       .setPositiveButton("Save") { _, _ ->
-        val r = ReplyRule(existing?.id ?: 0, name.text.toString(), enabled.isChecked, apps.text.toString(), senders.text.toString(), blocked.text.toString(), chatType.text.toString(), keywords.text.toString(), quietStart.text.toString(), quietEnd.text.toString(), screenOff.isChecked, mode.text.toString(), instruction.text.toString(), System.currentTimeMillis(), vip.text.toString(), mute.text.toString())
+        val r = ReplyRule(existing?.id ?: 0, name.text.toString(), enabled.isChecked, apps.text.toString(), senders.text.toString(), blocked.text.toString(), chatType.text.toString(), keywords.text.toString(), quietStart.text.toString(), quietEnd.text.toString(), screenOff.isChecked, mode.text.toString(), instruction.text.toString(), System.currentTimeMillis(), vip.text.toString(), mute.text.toString(), replyData.text.toString())
         if (existing == null) db.replyRuleAdd(r) else db.replyRuleUpdate(r)
         onDone()
       }

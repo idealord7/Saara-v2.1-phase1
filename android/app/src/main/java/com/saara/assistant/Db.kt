@@ -11,13 +11,13 @@ data class TaskRow(val id: Long, val whenMs: Long, val text: String, val repeatM
 data class TaskStep(val id: Long, val goal: String, val tool: String, val args: String, val result: String, val ok: Boolean, val ts: Long)
 data class Rule(val id: Long, val text: String, val enabled: Boolean, val ts: Long)
 data class ActionVerification(val id: Long, val goal: String, val tool: String, val args: String, val result: String, val ok: Boolean, val verified: Boolean, val retryCount: Int, val note: String, val ts: Long)
-data class ReplyRule(val id: Long, val name: String, val enabled: Boolean, val apps: String, val senders: String, val blockedSenders: String, val chatType: String, val keywords: String, val quietStart: String, val quietEnd: String, val screenOffOnly: Boolean, val mode: String, val instruction: String, val ts: Long, val vipSenders: String = "", val muteSenders: String = "")
+data class ReplyRule(val id: Long, val name: String, val enabled: Boolean, val apps: String, val senders: String, val blockedSenders: String, val chatType: String, val keywords: String, val quietStart: String, val quietEnd: String, val screenOffOnly: Boolean, val mode: String, val instruction: String, val ts: Long, val vipSenders: String = "", val muteSenders: String = "", val replyData: String = "")
 data class AutoRule(val id: Long, val name: String, val enabled: Boolean, val trigger: String, val condition: String, val action: String, val cooldownMs: Long, val lastFiredMs: Long, val ts: Long)
 data class MemoryFact(val id: Long, val cat: String, val text: String, val ts: Long, val lastUsed: Long = 0L, val pinned: Boolean = false, val source: String = "")
 data class SessionState(val sessionId: String, val status: String, val activeGoal: String, val lastStep: String, val pending: String, val lastError: String, val updatedTs: Long)
 
 /** Local SQLite store: chat history, learned facts, shop ledger, usage stats, scheduled tasks, task steps. */
-class Db private constructor(c: Context) : SQLiteOpenHelper(c.applicationContext, "saara.db", null, 11) {
+class Db private constructor(c: Context) : SQLiteOpenHelper(c.applicationContext, "saara.db", null, 12) {
   private val appCtx = c.applicationContext
   companion object {
     @Volatile private var inst: Db? = null
@@ -64,13 +64,16 @@ class Db private constructor(c: Context) : SQLiteOpenHelper(c.applicationContext
     if (o < 11) {
       // v11: remove confidence/rate/loop from reply_rules. Rebuild table for schema cleanliness.
       try { d.execSQL("ALTER TABLE reply_rules RENAME TO reply_rules_old") } catch (_: Exception) {}
-      d.execSQL("CREATE TABLE IF NOT EXISTS reply_rules(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, enabled INTEGER, apps TEXT, senders TEXT, blocked_senders TEXT, chat_type TEXT, keywords TEXT, quiet_start TEXT, quiet_end TEXT, screen_off_only INTEGER, mode TEXT, instruction TEXT, ts INTEGER, vip_senders TEXT DEFAULT '', mute_senders TEXT DEFAULT '')")
+    d.execSQL("CREATE TABLE IF NOT EXISTS reply_rules(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, enabled INTEGER, apps TEXT, senders TEXT, blocked_senders TEXT, chat_type TEXT, keywords TEXT, quiet_start TEXT, quiet_end TEXT, screen_off_only INTEGER, mode TEXT, instruction TEXT, ts INTEGER, vip_senders TEXT DEFAULT '', mute_senders TEXT DEFAULT '', reply_data TEXT DEFAULT '')")
       try {
         d.execSQL("INSERT INTO reply_rules(id,name,enabled,apps,senders,blocked_senders,chat_type,keywords,quiet_start,quiet_end,screen_off_only,mode,instruction,ts,vip_senders,mute_senders) SELECT id,name,enabled,apps,senders,blocked_senders,chat_type,keywords,quiet_start,quiet_end,screen_off_only,mode,instruction,ts,COALESCE(vip_senders,''),COALESCE(mute_senders,'') FROM reply_rules_old")
       } catch (_: Exception) {}
       try { d.execSQL("DROP TABLE IF EXISTS reply_rules_old") } catch (_: Exception) {}
       try { d.execSQL("DROP TABLE IF EXISTS reply_drafts") } catch (_: Exception) {}
       d.execSQL("CREATE TABLE IF NOT EXISTS reply_drafts(id INTEGER PRIMARY KEY AUTOINCREMENT, notif_key TEXT, sender TEXT, pkg TEXT, incoming TEXT, draft TEXT, reason TEXT, ts INTEGER)")
+    }
+    if (o < 12) {
+      try { d.execSQL("ALTER TABLE reply_rules ADD COLUMN reply_data TEXT DEFAULT ''") } catch (_: Exception) {}
     }
   }
   private fun createTaskSteps(d: SQLiteDatabase) {
@@ -381,8 +384,8 @@ class Db private constructor(c: Context) : SQLiteOpenHelper(c.applicationContext
   // ---------- replying rules ----------
   fun replyRules(): List<ReplyRule> {
     val out = mutableListOf<ReplyRule>()
-    readableDatabase.rawQuery("SELECT id,name,enabled,apps,senders,blocked_senders,chat_type,keywords,quiet_start,quiet_end,screen_off_only,mode,instruction,ts,COALESCE(vip_senders,''),COALESCE(mute_senders,'') FROM reply_rules ORDER BY id ASC", null).use {
-      while (it.moveToNext()) out.add(ReplyRule(it.getLong(0), it.getString(1) ?: "", it.getInt(2) == 1, it.getString(3) ?: "", it.getString(4) ?: "", it.getString(5) ?: "", it.getString(6) ?: "any", it.getString(7) ?: "", it.getString(8) ?: "", it.getString(9) ?: "", it.getInt(10) == 1, it.getString(11) ?: "ai", it.getString(12) ?: "", it.getLong(13), it.getString(14) ?: "", it.getString(15) ?: ""))
+    readableDatabase.rawQuery("SELECT id,name,enabled,apps,senders,blocked_senders,chat_type,keywords,quiet_start,quiet_end,screen_off_only,mode,instruction,ts,COALESCE(vip_senders,''),COALESCE(mute_senders,''),COALESCE(reply_data,'') FROM reply_rules ORDER BY id ASC", null).use {
+      while (it.moveToNext()) out.add(ReplyRule(it.getLong(0), it.getString(1) ?: "", it.getInt(2) == 1, it.getString(3) ?: "", it.getString(4) ?: "", it.getString(5) ?: "", it.getString(6) ?: "any", it.getString(7) ?: "", it.getString(8) ?: "", it.getString(9) ?: "", it.getInt(10) == 1, it.getString(11) ?: "ai", it.getString(12) ?: "", it.getLong(13), it.getString(14) ?: "", it.getString(15) ?: "", it.getString(16) ?: ""))
     }
     return out
   }
@@ -395,7 +398,7 @@ class Db private constructor(c: Context) : SQLiteOpenHelper(c.applicationContext
     put("blocked_senders", r.blockedSenders.trim()); put("chat_type", r.chatType.trim().ifBlank { "any" }); put("keywords", r.keywords.trim())
     put("quiet_start", r.quietStart.trim()); put("quiet_end", r.quietEnd.trim()); put("screen_off_only", if (r.screenOffOnly) 1 else 0)
     put("mode", r.mode.trim().ifBlank { "ai" }); put("instruction", r.instruction.trim().take(500)); put("ts", System.currentTimeMillis())
-    put("vip_senders", r.vipSenders.trim()); put("mute_senders", r.muteSenders.trim())
+    put("vip_senders", r.vipSenders.trim()); put("mute_senders", r.muteSenders.trim()); put("reply_data", r.replyData.trim().take(8000))
   }
 
   // ---------- task-step memory ----------

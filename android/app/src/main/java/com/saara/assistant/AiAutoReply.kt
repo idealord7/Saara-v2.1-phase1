@@ -86,7 +86,7 @@ object AiAutoReply {
     }
   }
 
-  data class GuardDecision(val allow: Boolean, val reason: String, val instruction: String = "")
+  data class GuardDecision(val allow: Boolean, val reason: String, val instruction: String = "", val replyData: String = "")
 
   private fun normSender(s: String) = s.lowercase().trim().replace(Regex("\\s+"), " ")
   private fun normForCompare(s: String): String = s.lowercase(Locale.ROOT).replace(Regex("[^\\p{L}\\p{N}\\s]+"), " ").replace(Regex("\\s+"), " ").trim()
@@ -116,8 +116,8 @@ object AiAutoReply {
     addLog(ctx, "Queued #$mySeq · $who · ${appLabel(pkg)}\n← ${msg.take(500)}")
     exec.execute {
       try {
-        // Privacy: auto-reply must not inject learned facts/knowledge/memory. Only Manage Replying AI prompt + matched replying rules + incoming message.
-        val mr = generateWithRetry(ctx, systemPrompt(ctx), decision.instruction, who, msg, contextFor(who))
+        // Privacy: auto-reply must not inject learned facts/knowledge/memory. Only Manage Replying AI prompt + matched replying rules + optional per-rule reply data + incoming message.
+        val mr = generateWithRetry(ctx, systemPrompt(ctx), decision.instruction, decision.replyData, who, msg, contextFor(who))
         val clean = sanitize(mr.text)
         if (clean.isBlank()) { addLog(ctx, "Empty reply after sanitizing · $who · ${appLabel(pkg)} · model=${mr.model}"); return@execute }
         pushContext(who, "You: $clean")
@@ -225,6 +225,7 @@ object AiAutoReply {
       if (vip) append("\n- VIP sender: be extra careful, polite, and accurate.")
       if (extraInstruction.isNotBlank()) { if (isNotEmpty()) append('\n'); append(extraInstruction.trim()) }
     }
+    val replyData = applicable.mapNotNull { it.replyData.trim().takeIf { s -> s.isNotBlank() } }.distinct().joinToString("\n\n---\n\n").take(8000)
     val reason = when {
       applicable.isNotEmpty() -> "matched ${applicable.size} rule(s)"
       rules.isEmpty() -> "default filter"
@@ -236,7 +237,7 @@ object AiAutoReply {
       if (!wanted) return GuardDecision(false, "name/app filter")
       if (isGroup && !Prefs.on(c, "reply_groups", false)) return GuardDecision(false, "group replies off")
     }
-    return GuardDecision(true, reason, instr)
+    return GuardDecision(true, reason, instr, replyData)
   }
 
   // Backward-compatible helper for older callers
@@ -245,16 +246,22 @@ object AiAutoReply {
     return Triple(d.allow, d.reason, d.instruction)
   }
 
-  private fun generateWithRetry(ctx: Context, system: String, ruleInstr: String, sender: String, message: String, context: String): ModelResult {
+  private fun generateWithRetry(ctx: Context, system: String, ruleInstr: String, ruleData: String, sender: String, message: String, context: String): ModelResult {
     val instruction = buildString {
       append(system.trim())
-      append("\n\nSTRICT COMPLIANCE:\n- Output only reply text to send. No preamble/quotes/markdown.\n- Follow Manage Replying AI instructions and matched Replying Rules only.\n- Do NOT use stored learning, personal facts, knowledge base, memory, or external context beyond the incoming message and recent chat context provided.\n")
+      append("\n\nSTRICT COMPLIANCE:\n- Output only reply text to send. No preamble/quotes/markdown.\n- Follow Manage Replying AI instructions and matched Replying Rules only.\n- Do NOT use stored learning, personal facts, knowledge base, memory, or external context beyond the incoming message, recent chat context, and matched Per-Rule Reply Data provided.\n")
       if (ruleInstr.isNotBlank()) append("MATCHED REPLYING RULES FOR THIS CHAT:\n").append(ruleInstr.trim()).append('\n')
+      if (ruleData.isNotBlank()) {
+        append("PER-RULE REPLY DATA (check this first; ground answer primarily in this data):\n").append(ruleData.trim().take(8000)).append('\n')
+        append("If the answer is not present in PER-RULE REPLY DATA, do not invent details. Reply politely using only allowed rule instructions and ask for clarification if needed.\n")
+      }
     }
     val user = buildString {
       append("App chat auto-reply request.\nSender: ").append(sender.ifBlank { "Unknown" }).append('\n')
       if (context.isNotBlank()) append("Recent conversation (in-chat only):\n").append(context.take(2500)).append('\n')
-      append("Incoming message: ").append(message.take(1800)).append("\nWrite the best reply now.")
+      append("Incoming message: ").append(message.take(1800)).append('\n')
+      if (ruleData.isNotBlank()) append("Use matched PER-RULE REPLY DATA first when composing the reply.\n")
+      append("Write the best reply now.")
     }
     val preferred = Prefs.plain(ctx).getString("model_auto_reply", "")?.trim()?.takeIf { it.isNotBlank() }
     return ModelRouter.generateContentWithFallback(
