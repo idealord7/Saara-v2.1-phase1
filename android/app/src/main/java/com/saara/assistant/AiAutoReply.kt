@@ -181,63 +181,98 @@ object AiAutoReply {
   fun evaluate(c: Context, pkg: String, sender: String, text: String, isGroup: Boolean, screenOff: Boolean, extraInstruction: String = ""): GuardDecision {
     if (!Prefs.on(c, "f_notif", false)) return GuardDecision(false, "Notification auto-reply off")
     val rules = try { Db.get(c).replyRules().filter { it.enabled } } catch (_: Exception) { emptyList() }
-    val senderNorm = sender.lowercase().trim()
-    val textNorm = text.lowercase()
+    val senderNorm = normSender(sender)
+    val textNorm = text.lowercase(Locale.ROOT)
     val app = appKey(pkg)
     val cal = java.util.Calendar.getInstance()
     val nowMin = cal.get(java.util.Calendar.HOUR_OF_DAY) * 60 + cal.get(java.util.Calendar.MINUTE)
 
     fun appMatch(r: ReplyRule): Boolean {
       val apps = csvList(r.apps)
-      return apps.isEmpty() || apps.any { it == app || it == pkg.lowercase() || appLabel(pkg).lowercase().contains(it) }
+      return apps.isEmpty() || apps.any { it == app || it == pkg.lowercase(Locale.ROOT) || appLabel(pkg).lowercase(Locale.ROOT).contains(it) }
     }
-    fun senderMatch(r: ReplyRule): Boolean {
+    fun senderAllowed(r: ReplyRule): Boolean {
       val allowSenders = csvList(r.senders)
       val senderOk = allowSenders.isEmpty() || matchesAny(senderNorm, allowSenders)
-      val blocked = csvList(r.blockedSenders)
+      val blocked = csvList(r.blockedSenders) + csvList(r.muteSenders)
       val blockedOk = blocked.isEmpty() || !matchesAny(senderNorm, blocked)
       return senderOk && blockedOk
     }
-    val matched = if (rules.isNotEmpty()) rules.filter { r ->
-      val chatOk = when (r.chatType.lowercase()) { "group" -> isGroup; "direct" -> !isGroup; else -> true }
-      val kws = csvList(r.keywords)
-      val kwOk = kws.isEmpty() || matchesAny(textNorm, kws)
-      appMatch(r) && senderMatch(r) && chatOk && kwOk
-    } else emptyList()
-
-    if (rules.isNotEmpty() && matched.isEmpty()) return GuardDecision(false, "no matching Replying Rule")
-    val applicable = if (matched.isNotEmpty()) matched else rules.filter { appMatch(it) && senderMatch(it) }.ifEmpty { emptyList() }
-
-    val mute = applicable.firstOrNull { csvList(it.muteSenders).any { senderNorm.contains(it) } || csvList(it.blockedSenders).any { senderNorm.contains(it) } }
-    if (mute != null) return GuardDecision(false, "muted/blocked sender by rule '${mute.name.ifBlank { "rule" }}'")
-    val block = applicable.firstOrNull { it.mode.equals("block", true) || it.mode.equals("never", true) }
-    if (block != null) return GuardDecision(false, "blocked by rule '${block.name.ifBlank { "rule" }}'")
-    val quiet = applicable.firstOrNull { inQuietHours(nowMin, it.quietStart, it.quietEnd) }
-    if (quiet != null) return GuardDecision(false, "quiet hours rule '${quiet.name.ifBlank { "rule" }}'")
-    val screenRule = applicable.firstOrNull { it.screenOffOnly }
-    if (screenRule != null && !screenOff) return GuardDecision(false, "screen-off-only rule '${screenRule.name.ifBlank { "rule" }}'")
-
-    val vip = applicable.any { csvList(it.vipSenders).any { senderNorm.contains(it) } }
-
-    val instr = buildString {
-      val ruleInstr = applicable.mapNotNull { it.instruction.takeIf { s -> s.isNotBlank() } }
-      if (ruleInstr.isNotEmpty()) append(ruleInstr.joinToString("\n- ", prefix = "- "))
-      if (vip) append("\n- VIP sender: be extra careful, polite, and accurate.")
-      if (extraInstruction.isNotBlank()) { if (isNotEmpty()) append('\n'); append(extraInstruction.trim()) }
+    fun chatOk(r: ReplyRule) = when (r.chatType.lowercase(Locale.ROOT)) { "group" -> isGroup; "direct" -> !isGroup; else -> true }
+    fun keywordMatched(r: ReplyRule): Boolean { val kws = csvList(r.keywords); return kws.isNotEmpty() && matchesAny(textNorm, kws) }
+    fun senderSpecific(r: ReplyRule): Boolean {
+      val targets = csvList(r.senders) + csvList(r.vipSenders) + csvList(r.blockedSenders) + csvList(r.muteSenders)
+      return targets.isNotEmpty() && matchesAny(senderNorm, targets)
     }
-    val replyData = applicable.mapNotNull { it.replyData.trim().takeIf { s -> s.isNotBlank() } }.distinct().joinToString("\n\n---\n\n").take(8000)
-    val reason = when {
-      applicable.isNotEmpty() -> "matched ${applicable.size} rule(s)"
-      rules.isEmpty() -> "default filter"
-      else -> "app/sender rule"
+    fun ruleName(r: ReplyRule) = r.name.ifBlank { "rule#${r.id}" }
+    fun ineligibleReason(r: ReplyRule): String? {
+      if (r.mode.equals("block", true) || r.mode.equals("never", true)) return "blocked by rule '${ruleName(r)}'"
+      if (inQuietHours(nowMin, r.quietStart, r.quietEnd)) return "quiet hours rule '${ruleName(r)}'"
+      if (r.screenOffOnly && !screenOff) return "screen-off-only rule '${ruleName(r)}'"
+      return null
     }
-    if (rules.isEmpty()) {
-      val names = (Prefs.plain(c).getString("reply_names", "") ?: "").split(",").map { it.trim().lowercase() }.filter { it.isNotEmpty() }
-      val wanted = if (names.isEmpty()) pkg in SaaraNotifications.supportedMsgApps() else names.any { senderNorm.contains(it) || it.contains(pkg.lowercase()) }
-      if (!wanted) return GuardDecision(false, "name/app filter")
-      if (isGroup && !Prefs.on(c, "reply_groups", false)) return GuardDecision(false, "group replies off")
+
+    if (rules.isNotEmpty()) {
+      val trace = ArrayList<String>()
+      val base = rules.filter { appMatch(it) && senderAllowed(it) && chatOk(it) }
+      val specific = base.filter { senderSpecific(it) || keywordMatched(it) }
+      val fallback = base.filterNot { specific.contains(it) }
+      val ordered = specific + fallback
+      if (ordered.isEmpty()) {
+        val reason = "no compatible Replying Rule for sender/app/chat"
+        addLog(c, "Rule eval: $reason · sender=$sender · ${appLabel(pkg)}")
+        return GuardDecision(false, reason)
+      }
+      val applicable = ArrayList<ReplyRule>()
+      var blockedReason: String? = null
+      for (r in ordered) {
+        val kws = csvList(r.keywords)
+        if (kws.isNotEmpty() && !matchesAny(textNorm, kws)) { trace.add("skip:${ruleName(r)}:keyword-mismatch"); continue }
+        val ineligible = ineligibleReason(r)
+        if (ineligible != null) {
+          trace.add("skip:${ruleName(r)}:${ineligible}")
+          // hard blocks should stop for this sender; quiet/screen-off should fall through
+          if (r.mode.equals("block", true) || r.mode.equals("never", true)) { blockedReason = ineligible; break }
+          continue
+        }
+        val tag = when {
+          senderSpecific(r) && keywordMatched(r) -> "specific:sender+keyword"
+          senderSpecific(r) -> "specific:sender"
+          keywordMatched(r) -> "specific:keyword"
+          else -> "fallback"
+        }
+        trace.add("match:${ruleName(r)}:$tag")
+        applicable.add(r)
+        // Prefer first specific match; if it was specific, avoid mixing broad catch-all unless needed? Keep first selected and also include other compatible specific? safer: select first matched rule only to honor "apply matching specific rule first".
+        break
+      }
+      if (blockedReason != null) {
+        addLog(c, "Rule eval blocked · sender=$sender · ${appLabel(pkg)} · $blockedReason · ${trace.take(8).joinToString(" | ")}")
+        return GuardDecision(false, blockedReason)
+      }
+      if (applicable.isEmpty()) {
+        val reason = "no compatible Replying Rule (all ineligible)"
+        addLog(c, "Rule eval: $reason · sender=$sender · ${appLabel(pkg)} · ${trace.take(8).joinToString(" | ")}")
+        return GuardDecision(false, reason)
+      }
+      val r = applicable.first()
+      val vip = csvList(r.vipSenders).any { senderNorm.contains(it) }
+      val instr = buildString {
+        if (r.instruction.isNotBlank()) append(r.instruction.trim())
+        if (vip) { if (isNotEmpty()) append('\n'); append("- VIP sender: be extra careful, polite, and accurate.") }
+        if (extraInstruction.isNotBlank()) { if (isNotEmpty()) append('\n'); append(extraInstruction.trim()) }
+      }
+      val reason = "matched rule '${ruleName(r)}' (${trace.firstOrNull { it.startsWith("match:${ruleName(r)}") }?.substringAfterLast(':') ?: "rule"})"
+      addLog(c, "Rule eval: $reason · sender=$sender · ${appLabel(pkg)} · ${trace.take(8).joinToString(" | ")}")
+      return GuardDecision(true, reason, instr, r.replyData.trim().take(8000))
     }
-    return GuardDecision(true, reason, instr, replyData)
+
+    // No rules: legacy fallback behavior
+    val names = (Prefs.plain(c).getString("reply_names", "") ?: "").split(",").map { it.trim().lowercase(Locale.ROOT) }.filter { it.isNotEmpty() }
+    val wanted = if (names.isEmpty()) pkg in SaaraNotifications.supportedMsgApps() else names.any { senderNorm.contains(it) || it.contains(pkg.lowercase(Locale.ROOT)) }
+    if (!wanted) return GuardDecision(false, "name/app filter")
+    if (isGroup && !Prefs.on(c, "reply_groups", false)) return GuardDecision(false, "group replies off")
+    return GuardDecision(true, "default filter", extraInstruction.trim())
   }
 
   // Backward-compatible helper for older callers
