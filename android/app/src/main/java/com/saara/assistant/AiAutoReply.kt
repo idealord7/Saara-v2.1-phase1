@@ -116,9 +116,8 @@ object AiAutoReply {
     addLog(ctx, "Queued #$mySeq · $who · ${appLabel(pkg)}\n← ${msg.take(500)}")
     exec.execute {
       try {
-        val rules = try { Db.get(ctx).rulesPrompt(40) } catch (_: Exception) { "" }
-        val facts = try { Db.get(ctx).factsPrompt(msg, 10) } catch (_: Exception) { "" }
-        val mr = generateWithRetry(ctx, systemPrompt(ctx), rules, facts, decision.instruction, who, msg, contextFor(who))
+        // Privacy: auto-reply must not inject learned facts/knowledge/memory. Only Manage Replying AI prompt + matched replying rules + incoming message.
+        val mr = generateWithRetry(ctx, systemPrompt(ctx), decision.instruction, who, msg, contextFor(who))
         val clean = sanitize(mr.text)
         if (clean.isBlank()) { addLog(ctx, "Empty reply after sanitizing · $who · ${appLabel(pkg)} · model=${mr.model}"); return@execute }
         pushContext(who, "You: $clean")
@@ -246,17 +245,15 @@ object AiAutoReply {
     return Triple(d.allow, d.reason, d.instruction)
   }
 
-  private fun generateWithRetry(ctx: Context, system: String, rules: String, facts: String, ruleInstr: String, sender: String, message: String, context: String): ModelResult {
+  private fun generateWithRetry(ctx: Context, system: String, ruleInstr: String, sender: String, message: String, context: String): ModelResult {
     val instruction = buildString {
       append(system.trim())
-      append("\n\nSTRICT COMPLIANCE:\n- Output only reply text to send. No preamble/quotes/markdown.\n- Follow all user rules and replying rules.\n")
-      if (rules.isNotBlank()) append(rules.trim()).append('\n')
-      if (facts.isNotBlank()) append(facts.trim()).append('\n')
-      if (ruleInstr.isNotBlank()) append("REPLYING RULES FOR THIS CHAT:\n").append(ruleInstr.trim()).append('\n')
+      append("\n\nSTRICT COMPLIANCE:\n- Output only reply text to send. No preamble/quotes/markdown.\n- Follow Manage Replying AI instructions and matched Replying Rules only.\n- Do NOT use stored learning, personal facts, knowledge base, memory, or external context beyond the incoming message and recent chat context provided.\n")
+      if (ruleInstr.isNotBlank()) append("MATCHED REPLYING RULES FOR THIS CHAT:\n").append(ruleInstr.trim()).append('\n')
     }
     val user = buildString {
       append("App chat auto-reply request.\nSender: ").append(sender.ifBlank { "Unknown" }).append('\n')
-      if (context.isNotBlank()) append("Recent conversation:\n").append(context.take(2500)).append('\n')
+      if (context.isNotBlank()) append("Recent conversation (in-chat only):\n").append(context.take(2500)).append('\n')
       append("Incoming message: ").append(message.take(1800)).append("\nWrite the best reply now.")
     }
     val preferred = Prefs.plain(ctx).getString("model_auto_reply", "")?.trim()?.takeIf { it.isNotBlank() }
