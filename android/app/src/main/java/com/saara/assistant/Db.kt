@@ -10,15 +10,14 @@ data class ShopRow(val id: Long, val item: String, val kind: String, val price: 
 data class TaskRow(val id: Long, val whenMs: Long, val text: String, val repeatMs: Long)
 data class TaskStep(val id: Long, val goal: String, val tool: String, val args: String, val result: String, val ok: Boolean, val ts: Long)
 data class Rule(val id: Long, val text: String, val enabled: Boolean, val ts: Long)
-data class ReplyDraft(val id: Long, val notifKey: String, val sender: String, val pkg: String, val incoming: String, val draft: String, val reason: String, val ts: Long)
 data class ActionVerification(val id: Long, val goal: String, val tool: String, val args: String, val result: String, val ok: Boolean, val verified: Boolean, val retryCount: Int, val note: String, val ts: Long)
-data class ReplyRule(val id: Long, val name: String, val enabled: Boolean, val apps: String, val senders: String, val blockedSenders: String, val chatType: String, val keywords: String, val quietStart: String, val quietEnd: String, val screenOffOnly: Boolean, val mode: String, val instruction: String, val ts: Long, val confidenceThreshold: Int = 75, val rateLimitPerHour: Int = 6, val loopWindowMin: Int = 10, val vipSenders: String = "", val muteSenders: String = "")
+data class ReplyRule(val id: Long, val name: String, val enabled: Boolean, val apps: String, val senders: String, val blockedSenders: String, val chatType: String, val keywords: String, val quietStart: String, val quietEnd: String, val screenOffOnly: Boolean, val mode: String, val instruction: String, val ts: Long, val vipSenders: String = "", val muteSenders: String = "")
 data class AutoRule(val id: Long, val name: String, val enabled: Boolean, val trigger: String, val condition: String, val action: String, val cooldownMs: Long, val lastFiredMs: Long, val ts: Long)
 data class MemoryFact(val id: Long, val cat: String, val text: String, val ts: Long, val lastUsed: Long = 0L, val pinned: Boolean = false, val source: String = "")
 data class SessionState(val sessionId: String, val status: String, val activeGoal: String, val lastStep: String, val pending: String, val lastError: String, val updatedTs: Long)
 
 /** Local SQLite store: chat history, learned facts, shop ledger, usage stats, scheduled tasks, task steps. */
-class Db private constructor(c: Context) : SQLiteOpenHelper(c.applicationContext, "saara.db", null, 10) {
+class Db private constructor(c: Context) : SQLiteOpenHelper(c.applicationContext, "saara.db", null, 11) {
   private val appCtx = c.applicationContext
   companion object {
     @Volatile private var inst: Db? = null
@@ -62,12 +61,23 @@ class Db private constructor(c: Context) : SQLiteOpenHelper(c.applicationContext
       d.execSQL("INSERT OR IGNORE INTO categories(name) VALUES ('mistakes_and_lessons')")
     }
     if (o < 10) createSessionTables(d)
+    if (o < 11) {
+      // v11: remove confidence/rate/loop from reply_rules. Rebuild table for schema cleanliness.
+      try { d.execSQL("ALTER TABLE reply_rules RENAME TO reply_rules_old") } catch (_: Exception) {}
+      d.execSQL("CREATE TABLE IF NOT EXISTS reply_rules(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, enabled INTEGER, apps TEXT, senders TEXT, blocked_senders TEXT, chat_type TEXT, keywords TEXT, quiet_start TEXT, quiet_end TEXT, screen_off_only INTEGER, mode TEXT, instruction TEXT, ts INTEGER, vip_senders TEXT DEFAULT '', mute_senders TEXT DEFAULT '')")
+      try {
+        d.execSQL("INSERT INTO reply_rules(id,name,enabled,apps,senders,blocked_senders,chat_type,keywords,quiet_start,quiet_end,screen_off_only,mode,instruction,ts,vip_senders,mute_senders) SELECT id,name,enabled,apps,senders,blocked_senders,chat_type,keywords,quiet_start,quiet_end,screen_off_only,mode,instruction,ts,COALESCE(vip_senders,''),COALESCE(mute_senders,'') FROM reply_rules_old")
+      } catch (_: Exception) {}
+      try { d.execSQL("DROP TABLE IF EXISTS reply_rules_old") } catch (_: Exception) {}
+      try { d.execSQL("DROP TABLE IF EXISTS reply_drafts") } catch (_: Exception) {}
+      d.execSQL("CREATE TABLE IF NOT EXISTS reply_drafts(id INTEGER PRIMARY KEY AUTOINCREMENT, notif_key TEXT, sender TEXT, pkg TEXT, incoming TEXT, draft TEXT, reason TEXT, ts INTEGER)")
+    }
   }
   private fun createTaskSteps(d: SQLiteDatabase) {
     d.execSQL("CREATE TABLE IF NOT EXISTS task_steps(id INTEGER PRIMARY KEY AUTOINCREMENT, goal TEXT, tool TEXT, args TEXT, result TEXT, ok INTEGER, ts INTEGER)")
     d.execSQL("CREATE INDEX IF NOT EXISTS idx_task_steps_goal ON task_steps(goal)")
     d.execSQL("CREATE TABLE IF NOT EXISTS rules(id INTEGER PRIMARY KEY AUTOINCREMENT, text TEXT, enabled INTEGER, ts INTEGER)")
-    d.execSQL("CREATE TABLE IF NOT EXISTS reply_rules(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, enabled INTEGER, apps TEXT, senders TEXT, blocked_senders TEXT, chat_type TEXT, keywords TEXT, quiet_start TEXT, quiet_end TEXT, screen_off_only INTEGER, mode TEXT, instruction TEXT, ts INTEGER, confidence_threshold INTEGER DEFAULT 75, rate_limit_per_hour INTEGER DEFAULT 6, loop_window_min INTEGER DEFAULT 10, vip_senders TEXT DEFAULT '', mute_senders TEXT DEFAULT '')")
+    d.execSQL("CREATE TABLE IF NOT EXISTS reply_rules(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, enabled INTEGER, apps TEXT, senders TEXT, blocked_senders TEXT, chat_type TEXT, keywords TEXT, quiet_start TEXT, quiet_end TEXT, screen_off_only INTEGER, mode TEXT, instruction TEXT, ts INTEGER, vip_senders TEXT DEFAULT '', mute_senders TEXT DEFAULT '')")
     d.execSQL("CREATE TABLE IF NOT EXISTS auto_rules(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, enabled INTEGER, trigger TEXT, condition TEXT, action TEXT, cooldown_ms INTEGER, last_fired_ms INTEGER, ts INTEGER)")
     d.execSQL("CREATE TABLE IF NOT EXISTS reply_drafts(id INTEGER PRIMARY KEY AUTOINCREMENT, notif_key TEXT, sender TEXT, pkg TEXT, incoming TEXT, draft TEXT, reason TEXT, ts INTEGER)")
     d.execSQL("CREATE TABLE IF NOT EXISTS action_verifications(id INTEGER PRIMARY KEY AUTOINCREMENT, goal TEXT, tool TEXT, args TEXT, result TEXT, ok INTEGER, verified INTEGER, retry_count INTEGER, note TEXT, ts INTEGER)")
@@ -371,8 +381,8 @@ class Db private constructor(c: Context) : SQLiteOpenHelper(c.applicationContext
   // ---------- replying rules ----------
   fun replyRules(): List<ReplyRule> {
     val out = mutableListOf<ReplyRule>()
-    readableDatabase.rawQuery("SELECT id,name,enabled,apps,senders,blocked_senders,chat_type,keywords,quiet_start,quiet_end,screen_off_only,mode,instruction,ts,COALESCE(confidence_threshold,75),COALESCE(rate_limit_per_hour,6),COALESCE(loop_window_min,10),COALESCE(vip_senders,''),COALESCE(mute_senders,'') FROM reply_rules ORDER BY id ASC", null).use {
-      while (it.moveToNext()) out.add(ReplyRule(it.getLong(0), it.getString(1) ?: "", it.getInt(2) == 1, it.getString(3) ?: "", it.getString(4) ?: "", it.getString(5) ?: "", it.getString(6) ?: "any", it.getString(7) ?: "", it.getString(8) ?: "", it.getString(9) ?: "", it.getInt(10) == 1, it.getString(11) ?: "ai", it.getString(12) ?: "", it.getLong(13), it.getInt(14), it.getInt(15), it.getInt(16), it.getString(17) ?: "", it.getString(18) ?: ""))
+    readableDatabase.rawQuery("SELECT id,name,enabled,apps,senders,blocked_senders,chat_type,keywords,quiet_start,quiet_end,screen_off_only,mode,instruction,ts,COALESCE(vip_senders,''),COALESCE(mute_senders,'') FROM reply_rules ORDER BY id ASC", null).use {
+      while (it.moveToNext()) out.add(ReplyRule(it.getLong(0), it.getString(1) ?: "", it.getInt(2) == 1, it.getString(3) ?: "", it.getString(4) ?: "", it.getString(5) ?: "", it.getString(6) ?: "any", it.getString(7) ?: "", it.getString(8) ?: "", it.getString(9) ?: "", it.getInt(10) == 1, it.getString(11) ?: "ai", it.getString(12) ?: "", it.getLong(13), it.getString(14) ?: "", it.getString(15) ?: ""))
     }
     return out
   }
@@ -385,8 +395,7 @@ class Db private constructor(c: Context) : SQLiteOpenHelper(c.applicationContext
     put("blocked_senders", r.blockedSenders.trim()); put("chat_type", r.chatType.trim().ifBlank { "any" }); put("keywords", r.keywords.trim())
     put("quiet_start", r.quietStart.trim()); put("quiet_end", r.quietEnd.trim()); put("screen_off_only", if (r.screenOffOnly) 1 else 0)
     put("mode", r.mode.trim().ifBlank { "ai" }); put("instruction", r.instruction.trim().take(500)); put("ts", System.currentTimeMillis())
-    put("confidence_threshold", r.confidenceThreshold.coerceIn(0, 100)); put("rate_limit_per_hour", r.rateLimitPerHour.coerceIn(1, 60))
-    put("loop_window_min", r.loopWindowMin.coerceIn(1, 120)); put("vip_senders", r.vipSenders.trim()); put("mute_senders", r.muteSenders.trim())
+    put("vip_senders", r.vipSenders.trim()); put("mute_senders", r.muteSenders.trim())
   }
 
   // ---------- task-step memory ----------
@@ -437,24 +446,7 @@ class Db private constructor(c: Context) : SQLiteOpenHelper(c.applicationContext
     put("cooldown_ms", r.cooldownMs.coerceAtLeast(0L)); put("last_fired_ms", r.lastFiredMs); put("ts", System.currentTimeMillis())
   }
 
-  // ---------- reply drafts / guardrails ----------
-  fun replyDraftAdd(notifKey: String, sender: String, pkg: String, incoming: String, draft: String, reason: String): Long {
-    val id = writableDatabase.insert("reply_drafts", null, ContentValues().apply {
-      put("notif_key", notifKey); put("sender", sender.take(120)); put("pkg", pkg.take(120)); put("incoming", incoming.take(1200))
-      put("draft", draft.take(1500)); put("reason", reason.take(300)); put("ts", System.currentTimeMillis())
-    })
-    try { writableDatabase.execSQL("DELETE FROM reply_drafts WHERE id NOT IN (SELECT id FROM reply_drafts ORDER BY id DESC LIMIT 80)") } catch (_: Exception) {}
-    return id
-  }
-  fun replyDrafts(limit: Int = 40): List<ReplyDraft> {
-    val out = mutableListOf<ReplyDraft>()
-    readableDatabase.rawQuery("SELECT id,notif_key,sender,pkg,incoming,draft,reason,ts FROM reply_drafts ORDER BY id DESC LIMIT ${limit.coerceIn(1,200)}", null).use {
-      while (it.moveToNext()) out.add(ReplyDraft(it.getLong(0), it.getString(1) ?: "", it.getString(2) ?: "", it.getString(3) ?: "", it.getString(4) ?: "", it.getString(5) ?: "", it.getString(6) ?: "", it.getLong(7)))
-    }
-    return out
-  }
-  fun replyDraftDelete(id: Long) { writableDatabase.delete("reply_drafts", "id=?", arrayOf(id.toString())) }
-  fun replyDraftClear() { writableDatabase.delete("reply_drafts", null, null) }
+
 
   // ---------- post-task verification ----------
   fun actionVerificationAdd(goal: String, tool: String, args: String, result: String, ok: Boolean, verified: Boolean, retryCount: Int, note: String): Long {

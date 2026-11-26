@@ -86,27 +86,9 @@ object AiAutoReply {
     }
   }
 
-  data class GuardDecision(val allow: Boolean, val reason: String, val instruction: String = "", val confidenceThreshold: Int = 75, val draftOnly: Boolean = false)
+  data class GuardDecision(val allow: Boolean, val reason: String, val instruction: String = "")
 
   private fun normSender(s: String) = s.lowercase().trim().replace(Regex("\\s+"), " ")
-  private fun recentReplyCount(ctx: Context, sender: String, windowMin: Int): Int {
-    val cutoff = System.currentTimeMillis() - windowMin.coerceIn(1, 120) * 60_000L
-    return synchronized(log) { log.count { it.contains("Replied", true) && it.contains("· $sender ·", true) && tsFromLog(it) >= cutoff } }
-  }
-  private fun tsFromLog(line: String): Long {
-    return try {
-      val m = Regex("^\\[(.*?)\\]").find(line)?.groupValues?.getOrNull(1) ?: return 0L
-      SimpleDateFormat("dd MMM HH:mm:ss", Locale.getDefault()).parse(m)?.time ?: 0L
-    } catch (_: Exception) { 0L }
-  }
-  private fun looksLikeLoop(sender: String, incoming: String): Boolean {
-    val n = normForCompare(incoming)
-    if (n.isBlank()) return true
-    val ctxLines = synchronized(recent) { recent[sender]?.toList() ?: emptyList() }
-    val recentFromSender = ctxLines.takeLast(4).count { it.startsWith("$sender:") }
-    val repeated = ctxLines.takeLast(6).any { normForCompare(it.removePrefix("$sender:").trim()) == n }
-    return repeated || recentFromSender >= 3
-  }
   private fun normForCompare(s: String): String = s.lowercase(Locale.ROOT).replace(Regex("[^\\p{L}\\p{N}\\s]+"), " ").replace(Regex("\\s+"), " ").trim()
 
   fun handle(c: Context, key: String, pkg: String, sender: String, text: String, isGroup: Boolean, ruleInstruction: String = "") {
@@ -139,17 +121,10 @@ object AiAutoReply {
         val mr = generateWithRetry(ctx, systemPrompt(ctx), rules, facts, decision.instruction, who, msg, contextFor(who))
         val clean = sanitize(mr.text)
         if (clean.isBlank()) { addLog(ctx, "Empty reply after sanitizing · $who · ${appLabel(pkg)} · model=${mr.model}"); return@execute }
-        val confidence = estimateConfidence(msg, clean, decision)
-        if (decision.draftOnly || confidence < decision.confidenceThreshold) {
-          try { Db.get(ctx).replyDraftAdd(key, who, pkg, msg, clean, "confidence=$confidence<threshold=${decision.confidenceThreshold}; model=${mr.model}; ${decision.reason}") } catch (_: Exception) {}
-          addLog(ctx, "Draft held #$mySeq · $who · ${appLabel(pkg)} · model=${mr.model} · confidence=$confidence\n← ${msg.take(400)}\n✎ ${clean.take(600)}")
-          Bus.add("system", "Auto-reply draft held for $who (${appLabel(pkg)}, confidence $confidence%, model ${mr.model}).", true)
-          return@execute
-        }
         pushContext(who, "You: $clean")
         val result = SaaraNotifications.reply(key, who, clean)
         val ok = result == "replied"
-        addLog(ctx, (if (ok) "Replied #$mySeq" else "Failed ($result)") + " · $who · ${appLabel(pkg)} · model=${mr.model} · confidence=$confidence\n← ${msg.take(500)}\n→ ${clean.take(700)}")
+        addLog(ctx, (if (ok) "Replied #$mySeq" else "Failed ($result)") + " · $who · ${appLabel(pkg)} · model=${mr.model}\n← ${msg.take(500)}\n→ ${clean.take(700)}")
         if (ok) Bus.add("system", "Auto-replied to $who (${appLabel(pkg)}, model ${mr.model}): ${clean.take(250)}", true) else Bus.add("system", "Auto-reply failed for $who: $result", true)
       } catch (e: Exception) {
         val detail = e.message?.take(300) ?: e.javaClass.simpleName
@@ -159,18 +134,7 @@ object AiAutoReply {
     }
   }
 
-  private fun estimateConfidence(incoming: String, reply: String, d: GuardDecision): Int {
-    var score = 72
-    val inLen = incoming.trim().length
-    val outLen = reply.trim().length
-    if (inLen in 4..240) score += 8
-    if (outLen in 2..280) score += 8
-    if (Regex("\\b(otp|password|pin|cvv|bank|upi|pay|payment|address|card|login)\\b", RegexOption.IGNORE_CASE).containsMatchIn(incoming)) score -= 25
-    if (incoming.contains("?") && outLen < 2) score -= 20
-    if (d.instruction.contains("vip", true)) score += 5
-    if (looksLikeLoop("sender", incoming)) score -= 15
-    return score.coerceIn(0, 100)
-  }
+
 
   private fun screenOff(c: Context): Boolean = try {
     val pm = c.getSystemService(Context.POWER_SERVICE) as? android.os.PowerManager
@@ -254,15 +218,7 @@ object AiAutoReply {
     val screenRule = applicable.firstOrNull { it.screenOffOnly }
     if (screenRule != null && !screenOff) return GuardDecision(false, "screen-off-only rule '${screenRule.name.ifBlank { "rule" }}'")
 
-    val defThreshold = Prefs.plain(c).getInt("ai_reply_confidence", 75).coerceIn(0,100)
-    val defRate = Prefs.plain(c).getInt("ai_reply_rate_limit", 6).coerceIn(1,60)
-    val defLoop = Prefs.plain(c).getInt("ai_reply_loop_min", 10).coerceIn(1,120)
     val vip = applicable.any { csvList(it.vipSenders).any { senderNorm.contains(it) } }
-    val threshold = applicable.minOfOrNull { it.confidenceThreshold.coerceIn(0,100) } ?: defThreshold
-    val rateLimit = applicable.minOfOrNull { it.rateLimitPerHour.coerceIn(1,60) } ?: defRate
-    val loopWindow = applicable.maxOfOrNull { it.loopWindowMin.coerceIn(1,120) } ?: defLoop
-    if (recentReplyCount(c, sender, 60) >= rateLimit) return GuardDecision(false, "rate limit reached (${rateLimit}/h)")
-    if (looksLikeLoop(sender, text)) return GuardDecision(false, "loop protection: repeated/self-loop conversation detected")
 
     val instr = buildString {
       val ruleInstr = applicable.mapNotNull { it.instruction.takeIf { s -> s.isNotBlank() } }
@@ -270,7 +226,6 @@ object AiAutoReply {
       if (vip) append("\n- VIP sender: be extra careful, polite, and accurate.")
       if (extraInstruction.isNotBlank()) { if (isNotEmpty()) append('\n'); append(extraInstruction.trim()) }
     }
-    val draftOnly = !vip && Regex("\\b(otp|password|pin|cvv|bank|upi|pay|payment|login|address|card)\\b", RegexOption.IGNORE_CASE).containsMatchIn(text)
     val reason = when {
       applicable.isNotEmpty() -> "matched ${applicable.size} rule(s)"
       rules.isEmpty() -> "default filter"
@@ -282,7 +237,7 @@ object AiAutoReply {
       if (!wanted) return GuardDecision(false, "name/app filter")
       if (isGroup && !Prefs.on(c, "reply_groups", false)) return GuardDecision(false, "group replies off")
     }
-    return GuardDecision(true, reason, instr, threshold, draftOnly)
+    return GuardDecision(true, reason, instr)
   }
 
   // Backward-compatible helper for older callers

@@ -522,22 +522,9 @@ class MainActivity : AppCompatActivity() {
       prompt.setText(Prefs.plain(this).getString("ai_reply_prompt", null) ?: AiAutoReply.defaultPrompt())
       prompt.doAfterTextChanged { Prefs.plain(this).edit().putString("ai_reply_prompt", it.toString()).apply() }; c.addView(prompt)
 
-      fun numSetting(label:String, key:String, def:Int, min:Int, max:Int) {
-        c.addView(tv("$label: ${Prefs.plain(this).getInt(key,def)}", 12f, SUB))
-        val s = SeekBar(this); s.max = max-min; s.progress = (Prefs.plain(this).getInt(key,def)-min).coerceIn(0,max-min)
-        s.setOnSeekBarChangeListener(object: SeekBar.OnSeekBarChangeListener{
-          override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) { if(fromUser){ Prefs.plain(this@MainActivity).edit().putInt(key,min+progress).apply(); refresh() } }
-          override fun onStartTrackingTouch(seekBar: SeekBar?) {}
-          override fun onStopTrackingTouch(seekBar: SeekBar?) {}
-        }); c.addView(s)
-      }
-      numSetting("Default confidence threshold (uncertain->draft)", "ai_reply_confidence", 75, 0, 100)
-      numSetting("Default rate limit / hour / sender", "ai_reply_rate_limit", 6, 1, 30)
-      numSetting("Default anti-loop window (minutes)", "ai_reply_loop_min", 10, 1, 120)
-
       val rrBtn = btn("Manage Replying Rules (per-app/sender/quiet/chat/keywords)", SURF2) { showReplyRulesDialog() }
       c.addView(rrBtn, LinearLayout.LayoutParams(-1,-2).apply{topMargin=dp(8)})
-      c.addView(btn("View auto-reply logs & drafts", SURF2) { showAutoReplyLogs() }, LinearLayout.LayoutParams(-1,-2).apply{topMargin=dp(6)})
+      c.addView(btn("View auto-reply logs", SURF2) { showAutoReplyLogs() }, LinearLayout.LayoutParams(-1,-2).apply{topMargin=dp(6)})
     }
 
     heading(root, "Automation & Triggers", "Condition + Trigger + Action rules and task verification.")
@@ -639,7 +626,7 @@ class MainActivity : AppCompatActivity() {
         val sw = Switch(this); sw.isChecked = r.enabled; sw.setOnCheckedChangeListener { _, v -> db.replyRuleSetEnabled(r.id, v) }
         top.addView(sw); card.addView(top)
         card.addView(tv("apps=${r.apps.ifBlank { "any" }} · senders=${r.senders.ifBlank { "any" }} · vip=${r.vipSenders.ifBlank { "none" }} · mute=${r.muteSenders.ifBlank { "none" }} · chat=${r.chatType} · mode=${r.mode}", 11f, SUB))
-        card.addView(tv("keywords=${r.keywords.ifBlank { "any" }} · quiet=${r.quietStart.ifBlank { "--" }}-${r.quietEnd.ifBlank { "--" }} · screenOffOnly=${r.screenOffOnly} · conf>=${r.confidenceThreshold}% · rate=${r.rateLimitPerHour}/h · loop=${r.loopWindowMin}m", 11f, SUB))
+        card.addView(tv("keywords=${r.keywords.ifBlank { "any" }} · quiet=${r.quietStart.ifBlank { "--" }}-${r.quietEnd.ifBlank { "--" }} · screenOffOnly=${r.screenOffOnly}", 11f, SUB))
         if (r.instruction.isNotBlank()) card.addView(tv("instruction: ${r.instruction}", 11f, SUB))
         val actions = LinearLayout(this)
         actions.addView(btn("Edit", SURF) { showReplyRuleEditor(r) { showReplyRulesDialog() } }, LinearLayout.LayoutParams(0, -2, 1f))
@@ -669,16 +656,12 @@ class MainActivity : AppCompatActivity() {
     val quietEnd = e("Quiet end HH:mm (optional)", existing?.quietEnd ?: "")
     val instruction = e("Per-rule reply instruction (optional)", existing?.instruction ?: "")
     val mode = e("Mode: ai/block", existing?.mode ?: "ai")
-    val confidence = e("Confidence threshold 0-100 (uncertain -> draft)", (existing?.confidenceThreshold ?: 75).toString())
-    val rate = e("Rate limit replies/hour per sender", (existing?.rateLimitPerHour ?: 6).toString())
-    val loop = e("Loop protection window minutes", (existing?.loopWindowMin ?: 10).toString())
     val screenOff = Switch(this); screenOff.text = "Only when screen is off"; screenOff.isChecked = existing?.screenOffOnly == true
     val enabled = Switch(this); enabled.text = "Enabled"; enabled.isChecked = existing?.enabled ?: true
-    listOf<View>(name, apps, senders, blocked, vip, mute, chatType, keywords, quietStart, quietEnd, instruction, mode, confidence, rate, loop, screenOff, enabled).forEach { root.addView(it) }
+    listOf<View>(name, apps, senders, blocked, vip, mute, chatType, keywords, quietStart, quietEnd, instruction, mode, screenOff, enabled).forEach { root.addView(it) }
     AlertDialog.Builder(this).setTitle(if (existing == null) "Add Replying Rule" else "Edit Replying Rule").setView(ScrollView(this).apply { addView(root) })
       .setPositiveButton("Save") { _, _ ->
-        val r = ReplyRule(existing?.id ?: 0, name.text.toString(), enabled.isChecked, apps.text.toString(), senders.text.toString(), blocked.text.toString(), chatType.text.toString(), keywords.text.toString(), quietStart.text.toString(), quietEnd.text.toString(), screenOff.isChecked, mode.text.toString(), instruction.text.toString(), System.currentTimeMillis(),
-          confidence.text.toString().toIntOrNull() ?: 75, rate.text.toString().toIntOrNull() ?: 6, loop.text.toString().toIntOrNull() ?: 10, vip.text.toString(), mute.text.toString())
+        val r = ReplyRule(existing?.id ?: 0, name.text.toString(), enabled.isChecked, apps.text.toString(), senders.text.toString(), blocked.text.toString(), chatType.text.toString(), keywords.text.toString(), quietStart.text.toString(), quietEnd.text.toString(), screenOff.isChecked, mode.text.toString(), instruction.text.toString(), System.currentTimeMillis(), vip.text.toString(), mute.text.toString())
         if (existing == null) db.replyRuleAdd(r) else db.replyRuleUpdate(r)
         onDone()
       }
@@ -697,10 +680,8 @@ class MainActivity : AppCompatActivity() {
       append("\nGemini API key: ").append(if (key.isBlank()) "MISSING" else "SET")
     }
     val logs = AiAutoReply.logs()
-    val drafts = try { Db.get(this).replyDrafts(20) } catch (_: Exception) { emptyList() }
-    val draftBody = if (drafts.isEmpty()) "No held drafts." else drafts.joinToString("\n\n") { d -> "[${hhmm(d.ts)}] ${d.sender} (${d.pkg})\nReason: ${d.reason}\nIncoming: ${d.incoming.take(180)}\nDraft: ${d.draft.take(220)}" }
     val body = if (logs.isEmpty()) "No auto-reply activity yet.\n\nTip: enable Notification access, Notification auto-reply, and AI smart auto-reply; set Gemini API key in Settings." else logs.joinToString("\n\n————————————\n\n")
-    val msg = "$status\n\n—— HELD DRAFTS ——\n$draftBody\n\n—— LOGS ——\n$body"
+    val msg = "$status\n\n—— LOGS ——\n$body"
     val sv = ScrollView(this)
     val t = tv(msg, 13f, TXT); t.setPadding(dp(16), dp(12), dp(16), dp(12)); t.setTextIsSelectable(true)
     sv.addView(t)
