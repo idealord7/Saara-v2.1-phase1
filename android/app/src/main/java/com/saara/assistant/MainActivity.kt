@@ -663,7 +663,7 @@ class MainActivity : AppCompatActivity() {
       val dlg = AlertDialog.Builder(this).setTitle("Enroll My Voice").setMessage("Preparing…").setCancelable(false).setNegativeButton("Close", null).show()
       val vs = VoiceService.instance
       if (vs != null) {
-        vs.enrollUserVoice(3, onProgress = { prog ->
+        vs.enrollUserVoice(6, onProgress = { prog ->
           runOnUiThread { if (dlg.isShowing) dlg.setMessage("Step ${prog.step}/${prog.total}: ${prog.message}") }
         }, onDone = { res ->
           runOnUiThread {
@@ -675,7 +675,7 @@ class MainActivity : AppCompatActivity() {
         })
       } else {
         Thread {
-          val res = VoiceEnrollment.enroll(applicationContext, 3) { prog ->
+          val res = VoiceEnrollment.enroll(applicationContext, 6) { prog ->
             runOnUiThread { if (dlg.isShowing) dlg.setMessage("Step ${prog.step}/${prog.total}: ${prog.message}") }
           }
           runOnUiThread {

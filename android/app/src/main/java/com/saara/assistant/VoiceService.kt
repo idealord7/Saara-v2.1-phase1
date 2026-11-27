@@ -177,7 +177,7 @@ class VoiceService : Service() {
     return "Only My Voice: ON · enrolled=${if (enrolled) "yes" else "no"} · last=$pctStr · threshold=${th}% · ${speakerGuard.lastDecision}"
   }
 
-  fun enrollUserVoice(samples: Int = 3, onProgress: (VoiceEnrollment.Progress) -> Unit = {}, onDone: (VoiceEnrollment.Result) -> Unit = {}) {
+  fun enrollUserVoice(samples: Int = 6, onProgress: (VoiceEnrollment.Progress) -> Unit = {}, onDone: (VoiceEnrollment.Result) -> Unit = {}) {
     Thread {
       val wasActive = isSaraActive
       try {

@@ -20,8 +20,8 @@ object VoiceEnrollment {
   data class Progress(val step: Int, val total: Int, val message: String)
   data class Result(val ok: Boolean, val message: String, val sampleCount: Int = 0)
 
-  private const val DEFAULT_SAMPLES = 3
-  private const val SAMPLE_MS = 2800L
+  private const val DEFAULT_SAMPLES = 6
+  private const val SAMPLE_MS = 6000L
   private const val WINDOW = 16
   private val SAMPLE_RATES = intArrayOf(16000, 44100, 22050, 11025)
   private val AUDIO_SOURCES = intArrayOf(
@@ -47,13 +47,13 @@ object VoiceEnrollment {
     if (!OpenWakeWordFeatures.available(c)) {
       return Result(false, "Wake feature models missing. Cannot enroll voice on this device.")
     }
-    val total = samples.coerceIn(2, 5)
+    val total = samples.coerceIn(2, 6)
     val vectors = ArrayList<FloatArray>()
     for (i in 1..total) {
       if (!hasRecordPermission(c)) {
         return Result(false, "Microphone permission denied before sample $i. Allow Microphone permission and try again.", vectors.size)
       }
-      onProgress(Progress(i, total, "Recording sample $i/$total… Speak naturally for ~3 seconds."))
+      onProgress(Progress(i, total, "Recording sample $i/$total… Speak naturally for ~6 seconds."))
       val failure = CaptureFailure("")
       val vec = try {
         recordOneSample(c, failure)
