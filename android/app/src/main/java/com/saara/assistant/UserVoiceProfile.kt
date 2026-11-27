@@ -101,6 +101,18 @@ object UserVoiceProfile {
   fun matchPercent(profile: Profile, vector: FloatArray): Float {
     val dim = min(profile.centroid.size, vector.size)
     if (dim <= 0) return 0f
+    if (profile.centroid.size != vector.size) {
+      // Different feature backend/version; use safe length-normalized cosine on common prefix.
+      var dot = 0.0; var na = 0.0; var nb = 0.0
+      for (i in 0 until dim) {
+        val a = profile.centroid[i].toDouble(); val b = vector[i].toDouble()
+        dot += a * b; na += a * a; nb += b * b
+      }
+      val denom = sqrt(na) * sqrt(nb)
+      if (denom <= 1e-9) return 0f
+      val cos = (dot / denom).coerceIn(-1.0, 1.0)
+      return (((cos + 1.0) / 2.0) * 100.0).toFloat().coerceIn(0f, 100f)
+    }
     var dot = 0.0
     var na = 0.0
     var nb = 0.0

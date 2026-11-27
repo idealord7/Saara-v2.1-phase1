@@ -135,12 +135,8 @@ object VoiceEnrollment {
             }
 
             val builtFeat = try { OpenWakeWordFeatures(c) } catch (t: Throwable) {
-              lastReason = "feature extractor init error: ${t.message ?: t.javaClass.simpleName}"
-              Log.e("VoiceEnrollment", lastReason, t)
-              failure.reason = lastReason
-              runCatching { built.release() }
-              recorder = null
-              return null
+              Log.w("VoiceEnrollment", "OpenWakeWordFeatures unavailable, using fallback: ${t.message}", t)
+              null
             }
             feat = builtFeat
 
@@ -199,7 +195,7 @@ object VoiceEnrollment {
     }
   }
 
-  private fun captureFromRecorder(rec: AudioRecord, features: OpenWakeWordFeatures, sampleRate: Int, source: Int): Pair<FloatArray?, String?> {
+  private fun captureFromRecorder(rec: AudioRecord, features: OpenWakeWordFeatures?, sampleRate: Int, source: Int): Pair<FloatArray?, String?> {
     val chunkSamples = max(1, sampleRate * 80 / 1000) // ~80ms
     val srcBuf = ShortArray(chunkSamples)
     val target = ShortArray(OpenWakeWordFeatures.CHUNK)
@@ -210,6 +206,7 @@ object VoiceEnrollment {
     var readErrors = 0
     var lastReadCode = 0
     var outProducedTotal = 0L
+    val rawPcm = ArrayList<Short>(sampleRate * 3)
     // Warmup read
     val warm = ShortArray(chunkSamples)
     try { rec.read(warm, 0, warm.size) } catch (_: Exception) {}
@@ -224,41 +221,52 @@ object VoiceEnrollment {
       }
       val inStart = totalRead
       totalRead += n.toLong()
-      if (sampleRate == OpenWakeWordFeatures.SAMPLE_RATE) {
-        var i = 0
-        while (i < n) {
-          val take = minOf(n - i, OpenWakeWordFeatures.CHUNK - pending)
-          System.arraycopy(srcBuf, i, target, pending, take)
-          pending += take
-          i += take
-          if (pending >= OpenWakeWordFeatures.CHUNK) {
-            pending = 0
-            val emb = try { features.accept(target) } catch (_: Exception) { null } ?: continue
-            embeddings.add(emb.copyOf())
-            while (embeddings.size > 120) embeddings.removeAt(0)
+      for (i in 0 until n) if (rawPcm.size < sampleRate * 4) rawPcm.add(srcBuf[i])
+      if (features != null) {
+        if (sampleRate == OpenWakeWordFeatures.SAMPLE_RATE) {
+          var i = 0
+          while (i < n) {
+            val take = minOf(n - i, OpenWakeWordFeatures.CHUNK - pending)
+            System.arraycopy(srcBuf, i, target, pending, take)
+            pending += take
+            i += take
+            if (pending >= OpenWakeWordFeatures.CHUNK) {
+              pending = 0
+              val emb = try { features.accept(target) } catch (_: Exception) { null } ?: continue
+              embeddings.add(emb.copyOf())
+              while (embeddings.size > 120) embeddings.removeAt(0)
+            }
           }
-        }
-      } else {
-        // Nearest-neighbor downsample to 16kHz.
-        while (true) {
-          val srcNeeded = ((outProducedTotal * sampleRate.toLong()) / OpenWakeWordFeatures.SAMPLE_RATE.toLong() - inStart).toInt()
-          if (srcNeeded >= n) break
-          val si = srcNeeded.coerceIn(0, n - 1)
-          target[pending++] = srcBuf[si]
-          outProducedTotal++
-          if (pending >= OpenWakeWordFeatures.CHUNK) {
-            pending = 0
-            val emb = try { features.accept(target) } catch (_: Exception) { null } ?: continue
-            embeddings.add(emb.copyOf())
-            while (embeddings.size > 120) embeddings.removeAt(0)
+        } else {
+          // Nearest-neighbor downsample to 16kHz.
+          while (true) {
+            val srcNeeded = ((outProducedTotal * sampleRate.toLong()) / OpenWakeWordFeatures.SAMPLE_RATE.toLong() - inStart).toInt()
+            if (srcNeeded >= n) break
+            val si = srcNeeded.coerceIn(0, n - 1)
+            target[pending++] = srcBuf[si]
+            outProducedTotal++
+            if (pending >= OpenWakeWordFeatures.CHUNK) {
+              pending = 0
+              val emb = try { features.accept(target) } catch (_: Exception) { null } ?: continue
+              embeddings.add(emb.copyOf())
+              while (embeddings.size > 120) embeddings.removeAt(0)
+            }
           }
         }
       }
     }
     if (totalRead <= 0L) return null to "no audio samples captured (${sourceName(source)}, ${sampleRate}Hz, lastRead=$lastReadCode)"
-    if (embeddings.size < WINDOW) return null to "captured audio but not enough speech embeddings (${embeddings.size}/$WINDOW, read=$totalRead, ${sourceName(source)}, ${sampleRate}Hz)"
-    val tail = embeddings.takeLast(WINDOW)
-    return WakeVerifier.pool(tail) to null
+    if (embeddings.size >= WINDOW) {
+      val tail = embeddings.takeLast(WINDOW)
+      return WakeVerifier.pool(tail) to null
+    }
+    // Fallback when TFLite feature model is unavailable on device.
+    val fallback = SimpleVoiceFeatures.extract(rawPcm.toShortArray(), sampleRate)
+    if (fallback != null) {
+      Log.w("VoiceEnrollment", "Using SimpleVoiceFeatures fallback (${sourceName(source)}, ${sampleRate}Hz)")
+      return fallback to null
+    }
+    return null to "captured audio but not enough speech embeddings (${embeddings.size}/$WINDOW, read=$totalRead, ${sourceName(source)}, ${sampleRate}Hz)"
   }
 
   private fun sourceName(source: Int): String = when (source) {
