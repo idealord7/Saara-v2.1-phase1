@@ -76,110 +76,119 @@ object VoiceEnrollment {
 
   private fun recordOneSample(c: Context, failure: CaptureFailure): FloatArray? {
     var lastReason = "no audio source/sample rate combination initialized"
-    if (!hasRecordPermission(c)) {
-      failure.reason = "microphone permission denied"
-      return null
-    }
-    if (!OpenWakeWordFeatures.available(c)) {
-      failure.reason = "wake feature models missing"
-      return null
-    }
-
-    for (rate in SAMPLE_RATES) {
-      val minBuf = AudioRecord.getMinBufferSize(rate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
-      if (minBuf == AudioRecord.ERROR || minBuf == AudioRecord.ERROR_BAD_VALUE) {
-        lastReason = "unsupported audio config at ${rate}Hz"
-        continue
+    try {
+      if (!hasRecordPermission(c)) {
+        failure.reason = "microphone permission denied"
+        return null
       }
-      val bufSize = max(minBuf * 2, rate / 5 * 2) // >=200ms
-      for (source in AUDIO_SOURCES) {
-        if (!hasRecordPermission(c)) {
-          failure.reason = "microphone permission denied"
-          return null
+      if (!OpenWakeWordFeatures.available(c)) {
+        failure.reason = "wake feature models missing"
+        return null
+      }
+
+      for (rate in SAMPLE_RATES) {
+        val minBuf = try {
+          AudioRecord.getMinBufferSize(rate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
+        } catch (e: Exception) {
+          lastReason = "getMinBufferSize failed at ${rate}Hz: ${e.message ?: e.javaClass.simpleName}"
+          continue
         }
-        var recorder: AudioRecord? = null
-        var feat: OpenWakeWordFeatures? = null
-        try {
-          val built = try {
-            AudioRecord.Builder()
-              .setAudioSource(source)
-              .setAudioFormat(
-                AudioFormat.Builder()
-                  .setSampleRate(rate)
-                  .setChannelMask(AudioFormat.CHANNEL_IN_MONO)
-                  .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
-                  .build()
-              )
-              .setBufferSizeInBytes(bufSize)
-              .build()
-          } catch (e: Exception) {
-            lastReason = "AudioRecord init error (${sourceName(source)}, ${rate}Hz): ${e.message ?: e.javaClass.simpleName}"
-            null
-          } ?: continue
-          recorder = built
-
-          if (built.state != AudioRecord.STATE_INITIALIZED) {
-            lastReason = "AudioRecord not initialized (${sourceName(source)}, ${rate}Hz)"
-            runCatching { built.release() }
-            recorder = null
-            continue
-          }
-
-          val builtFeat = try { OpenWakeWordFeatures(c) } catch (e: Exception) {
-            lastReason = "feature extractor init error: ${e.message ?: e.javaClass.simpleName}"
-            failure.reason = lastReason
-            runCatching { built.release() }
-            recorder = null
+        if (minBuf == AudioRecord.ERROR || minBuf == AudioRecord.ERROR_BAD_VALUE) {
+          lastReason = "unsupported audio config at ${rate}Hz (minBuf=$minBuf)"
+          continue
+        }
+        val bufSize = max(minBuf * 2, rate / 5 * 2) // >=200ms
+        for (source in AUDIO_SOURCES) {
+          if (!hasRecordPermission(c)) {
+            failure.reason = "microphone permission denied"
             return null
           }
-          feat = builtFeat
-
+          var recorder: AudioRecord? = null
+          var feat: OpenWakeWordFeatures? = null
           try {
-            built.startRecording()
-          } catch (e: Exception) {
-            lastReason = "startRecording failed (${sourceName(source)}, ${rate}Hz): ${e.message ?: e.javaClass.simpleName}"
-            runCatching { builtFeat.close() }
-            runCatching { built.release() }
-            recorder = null
-            feat = null
-            continue
-          }
-          if (built.recordingState != AudioRecord.RECORDSTATE_RECORDING) {
-            lastReason = "recorder did not enter recording state (${sourceName(source)}, ${rate}Hz)"
+            val built = try {
+              AudioRecord(
+                source,
+                rate,
+                AudioFormat.CHANNEL_IN_MONO,
+                AudioFormat.ENCODING_PCM_16BIT,
+                bufSize
+              )
+            } catch (e: Exception) {
+              lastReason = "AudioRecord init error (${sourceName(source)}, ${rate}Hz): ${e.message ?: e.javaClass.simpleName}"
+              null
+            } ?: continue
+            recorder = built
+
+            if (built.state != AudioRecord.STATE_INITIALIZED) {
+              lastReason = "AudioRecord not initialized (${sourceName(source)}, ${rate}Hz, state=${built.state})"
+              runCatching { built.release() }
+              recorder = null
+              continue
+            }
+
+            val builtFeat = try { OpenWakeWordFeatures(c) } catch (e: Exception) {
+              lastReason = "feature extractor init error: ${e.message ?: e.javaClass.simpleName}"
+              failure.reason = lastReason
+              runCatching { built.release() }
+              recorder = null
+              return null
+            }
+            feat = builtFeat
+
+            try {
+              built.startRecording()
+            } catch (e: Exception) {
+              lastReason = "startRecording failed (${sourceName(source)}, ${rate}Hz): ${e.message ?: e.javaClass.simpleName}"
+              runCatching { builtFeat.close() }
+              runCatching { built.release() }
+              recorder = null
+              feat = null
+              continue
+            }
+            if (built.recordingState != AudioRecord.RECORDSTATE_RECORDING) {
+              lastReason = "recorder did not enter recording state (${sourceName(source)}, ${rate}Hz, state=${built.recordingState})"
+              runCatching { built.stop() }
+              runCatching { built.release() }
+              runCatching { builtFeat.close() }
+              recorder = null
+              feat = null
+              continue
+            }
+
+            val (vec, captureErr) = captureFromRecorder(built, builtFeat, rate, source)
             runCatching { built.stop() }
             runCatching { built.release() }
             runCatching { builtFeat.close() }
             recorder = null
             feat = null
-            continue
+            if (vec != null) return vec
+            lastReason = captureErr?.takeIf { it.isNotBlank() } ?: lastReason
+            Log.w("VoiceEnrollment", "sample attempt failed: $lastReason")
+            SystemClock.sleep(150)
+            // Try next source/rate on empty/timeout/init-like failures.
+          } catch (e: Throwable) {
+            lastReason = "capture error (${sourceName(source)}, ${rate}Hz): ${e.message ?: e.javaClass.simpleName}"
+            Log.w("VoiceEnrollment", "capture throwable", e)
+            runCatching { recorder?.stop() }
+            runCatching { recorder?.release() }
+            runCatching { feat?.close() }
+            recorder = null
+            feat = null
+          } finally {
+            runCatching { recorder?.release() }
+            runCatching { feat?.close() }
           }
-
-          val (vec, captureErr) = captureFromRecorder(built, builtFeat, rate, source)
-          runCatching { built.stop() }
-          runCatching { built.release() }
-          runCatching { builtFeat.close() }
-          recorder = null
-          feat = null
-          if (vec != null) return vec
-          lastReason = captureErr?.takeIf { it.isNotBlank() } ?: lastReason
-          Log.w("VoiceEnrollment", "sample attempt failed: $lastReason")
-          SystemClock.sleep(120)
-          // Try next source/rate on empty/timeout/init-like failures.
-        } catch (e: Exception) {
-          lastReason = "capture error (${sourceName(source)}, ${rate}Hz): ${e.message ?: e.javaClass.simpleName}"
-          runCatching { recorder?.stop() }
-          runCatching { recorder?.release() }
-          runCatching { feat?.close() }
-          recorder = null
-          feat = null
-        } finally {
-          runCatching { recorder?.release() }
-          runCatching { feat?.close() }
         }
       }
+      failure.reason = lastReason.ifBlank { "unknown capture failure (no usable audio source/rate)" }
+      return null
+    } catch (t: Throwable) {
+      val msg = "capture exception: ${t.message ?: t.javaClass.simpleName}"
+      Log.e("VoiceEnrollment", msg, t)
+      failure.reason = msg
+      return null
     }
-    failure.reason = lastReason.ifBlank { "unknown capture failure" }
-    return null
   }
 
   private fun captureFromRecorder(rec: AudioRecord, features: OpenWakeWordFeatures, sampleRate: Int, source: Int): Pair<FloatArray?, String?> {
