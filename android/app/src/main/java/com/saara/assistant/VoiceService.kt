@@ -469,6 +469,48 @@ class VoiceService : Service() {
     refreshBubble()
   }
 
+  fun toggleAssistantFromOverlay() { setAssistantEnabled(!Bus.assistantOn) }
+
+  fun setAssistantEnabled(on: Boolean) {
+    if (on) {
+      if (Bus.assistantOn && ready) { refreshBubble(); Bus.ping(); return }
+      Bus.assistantOn = true
+      retries = 0
+      Bus.setStatus("Connecting…")
+      noteSession(status = "connecting", lastStep = "assistant turned on", lastError = "")
+      Bus.add("system", "Saara turned on.", true)
+      if (running) {
+        if (!has(Manifest.permission.RECORD_AUDIO)) {
+          Bus.assistantOn = false
+          Bus.setStatus("Mic permission missing")
+          Bus.add("system", "Microphone permission is missing. Allow Microphone in Android app permissions.", true)
+          refreshBubble(); Bus.ping(); return
+        }
+        fg()
+        ensureCaptureStarted()
+        connect()
+      }
+    } else {
+      if (!Bus.assistantOn) { refreshBubble(); Bus.ping(); return }
+      Bus.assistantOn = false
+      ready = false
+      isSaraActive = false
+      main.removeCallbacks(sessionTimer)
+      stopIdleWakeEngine()
+      stopCapture()
+      stopSpeaking(); audioQ.clear()
+      try { ws?.close(1000, "assistant_off") } catch (_: Exception) {}
+      ws = null
+      Bus.setStatus("Off")
+      Bus.add("system", "Saara turned off. Bubble stays available — tap ON to resume.", true)
+      noteSession(status = "off", lastStep = "assistant turned off")
+      refreshNotif()
+    }
+    refreshBubble(); updateOverlay(); Bus.ping()
+  }
+
+  fun refreshBubbleCustomization() { chatHead?.applyCustomization() }
+
   fun refreshBubble() {
     val want = Prefs.on(this, "f_bubble", false)
     if (want && !bubbleDismissedByUser && Settings.canDrawOverlays(this)) {
@@ -477,11 +519,13 @@ class VoiceService : Service() {
         override fun onSendText(text: String) { sendText(text) }
         override fun onMicToggle() { toggleMic() }
         override fun onScreenToggle() { toggleScreenShareFromOverlay() }
+        override fun onAssistantToggle() { toggleAssistantFromOverlay() }
         override fun onCloseRequested() { hideChatHeadByUser() }
         override fun isMicOn(): Boolean = this@VoiceService.isMicOn()
         override fun isScreenOn(): Boolean = Bus.screenOn
         override fun isActive(): Boolean = isSaraActive
         override fun isSpeaking(): Boolean = System.currentTimeMillis() < speakingUntil
+        override fun isAssistantOn(): Boolean = Bus.assistantOn
         override fun statusText(): String = Bus.status
         override fun recentMessages(limit: Int): List<Msg> = synchronized(Bus) { Bus.msgs.takeLast(limit).map { Msg(it.id, it.role, it.text, it.ts) } }
         override fun onAnchorChanged() { updateOverlay() }
@@ -995,6 +1039,7 @@ class VoiceService : Service() {
     val open = PendingIntent.getActivity(this, 1, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE)
     val sharing = listOfNotNull(if (Bus.camOn) "camera" else null, if (Bus.screenOn) "screen" else null)
     val state = when {
+      !Bus.assistantOn -> "Saara · off"
       !micEnabled -> "Saara · microphone muted"
       captureRunning && isSaraActive -> "Saara · listening (active)"
       captureRunning -> "Saara · say a wake phrase"
@@ -1055,7 +1100,7 @@ class VoiceService : Service() {
       Bus.add("system", "Microphone permission is missing. Allow Microphone in Android app permissions.", true)
       stopSelf(); return START_NOT_STICKY
     }
-    running = true; instance = this; Bus.running = true
+    running = true; instance = this; Bus.running = true; Bus.assistantOn = true
     micEnabled = Prefs.plain(this).getBoolean("mic_enabled", true)
     wakePatterns = buildWakePatterns(loadWakePhrases(Prefs.plain(this)))
     localWakeUnavailable = false; localWakeWarned = false
@@ -1203,6 +1248,7 @@ class VoiceService : Service() {
 
   private fun connect() {
     if (!running) return
+    if (!Bus.assistantOn) { ready = false; Bus.setStatus("Off"); return }
     ready = false
     val key = Prefs.secure(this).getString("apiKey", "") ?: ""
     if (key.isBlank()) { Bus.add("system", "API key missing. Add it in Settings.", true); stopSelf(); return }
@@ -1225,6 +1271,7 @@ class VoiceService : Service() {
   private fun lost(msg: String) {
     ready = false
     if (!running) return
+    if (!Bus.assistantOn) { Bus.setStatus("Off"); return }
     val transient = ModelRouter.isTransientError(msg)
     val retryEnabled = Prefs.on(this, "f_offline_retry", true)
     val autoSwitch = ModelRouter.autoFallbackEnabled(this)
@@ -1434,7 +1481,7 @@ class VoiceService : Service() {
     chatHead?.hide(); chatHead = null; overlay?.hide()
     try { Db.get(this).sessionStateClear(keepSessionId = true) } catch (_: Exception) {}
     lastTaskNote = ""; pendingCommand = null; pendingWakeNoPhrase = false
-    instance = null; Bus.running = false
+    instance = null; Bus.running = false; Bus.assistantOn = false
     Bus.add("system", "Stopped.", true); Bus.setStatus("Stopped")
     super.onDestroy()
   }

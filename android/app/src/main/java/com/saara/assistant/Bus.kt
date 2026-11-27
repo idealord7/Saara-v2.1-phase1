@@ -8,6 +8,7 @@ import java.util.concurrent.CopyOnWriteArrayList
 object Bus {
   val msgs = ArrayList<Msg>()
   @Volatile var running = false
+  @Volatile var assistantOn = false
   @Volatile private var st = "Stopped"
   val status: String get() = st
   @Volatile var camOn = false

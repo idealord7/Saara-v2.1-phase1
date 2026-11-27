@@ -32,11 +32,13 @@ class ChatHeadOverlay(
     fun onSendText(text: String)
     fun onMicToggle()
     fun onScreenToggle()
+    fun onAssistantToggle()
     fun onCloseRequested() // user dropped on X - hide overlay, keep service/background wake
     fun isMicOn(): Boolean
     fun isScreenOn(): Boolean
     fun isActive(): Boolean
     fun isSpeaking(): Boolean
+    fun isAssistantOn(): Boolean
     fun statusText(): String
     fun recentMessages(limit: Int): List<Msg>
     fun onAnchorChanged() {}
@@ -61,10 +63,22 @@ class ChatHeadOverlay(
   private var closeAnimator: ValueAnimator? = null
   private var snapAnimator: ValueAnimator? = null
 
-  private val bubbleSize = dp(58)
+  private val bubbleSize get() = dp(Prefs.plain(ctx).getInt("bubble_size_dp", 58).coerceIn(44, 76))
   private val closeSize = dp(64)
   private val closeHit = dp(90)
   private val panelMargin = dp(8)
+  private var edgeHidden = false
+  private val edgeHidePeek = dp(18)
+  private val edgeHideRun = Runnable {
+    if (Prefs.on(ctx, "bubble_edge_hide", false) && !dragging && !expanded && !overClose) {
+      val lp = bubbleLp ?: return@Runnable
+      snapToEdge(lp.x, lp.y, hideEdge = true)
+    }
+  }
+  private fun scheduleEdgeHide(delay: Long = 2500L) {
+    main.removeCallbacks(edgeHideRun)
+    if (Prefs.on(ctx, "bubble_edge_hide", false) && !expanded && !dragging) main.postDelayed(edgeHideRun, delay)
+  }
   private val panelWidth get() = min(sw - panelMargin * 2, dp(360))
   private val panelHeight get() = min((sh * 0.52f).toInt(), dp(420))
 
@@ -75,6 +89,8 @@ class ChatHeadOverlay(
   private var statusLabel: TextView? = null
   private var micBtn: TextView? = null
   private var screenBtn: TextView? = null
+  private var assistantBtn: TextView? = null
+  private var customizeView: LinearLayout? = null
   private var bubbleStatusRing: GradientDrawable? = null
   private var bubbleDot: View? = null
 
@@ -91,6 +107,24 @@ class ChatHeadOverlay(
     }
   }
 
+  fun applyCustomization() {
+    main.post {
+      val bv = bubbleView ?: return@post
+      val lp = bubbleLp ?: return@post
+      val size = bubbleSize
+      lp.width = size; lp.height = size
+      lp.x = clamp(lp.x, -(size - edgeHidePeek), sw - edgeHidePeek)
+      lp.y = clamp(lp.y, dp(24), sh - size - dp(24))
+      val img = bv.getChildAt(0)
+      img?.layoutParams = FrameLayout.LayoutParams(size, size)
+      img?.clipToOutline = true
+      val dotSize = dp(14)
+      bv.getChildAt(1)?.layoutParams = FrameLayout.LayoutParams(dotSize, dotSize, Gravity.BOTTOM or Gravity.END).apply { rightMargin = dp(2); bottomMargin = dp(2) }
+      try { wm.updateViewLayout(bv, lp) } catch (_: Exception) {}
+      if (Prefs.on(ctx, "bubble_edge_hide", false)) snapToEdge(lp.x, lp.y, hideEdge = true) else { edgeHidden = false; snapToEdge(lp.x, lp.y, hideEdge = false) }
+    }
+  }
+
   fun anchorForOverlay(): Overlay.Anchor? {
     val lp = bubbleLp ?: return null
     val onRight = lp.x + bubbleSize / 2 >= sw / 2
@@ -99,10 +133,12 @@ class ChatHeadOverlay(
 
   fun hide() {
     main.post {
+      main.removeCallbacks(edgeHideRun)
       removePanel()
       removeClose()
       removeBubble()
       expanded = false
+      edgeHidden = false
     }
   }
 
@@ -116,12 +152,15 @@ class ChatHeadOverlay(
   }
 
   fun refreshStatus() {
+    val assistantOn = try { callbacks.isAssistantOn() } catch (_: Exception) { Bus.assistantOn }
     val speaking = callbacks.isSpeaking()
     val active = callbacks.isActive()
     val micOn = callbacks.isMicOn()
     val screenOn = callbacks.isScreenOn()
-    val st = callbacks.statusText().lowercase()
+    val stRaw = callbacks.statusText()
+    val st = stRaw.lowercase()
     val color = when {
+      !assistantOn -> 0xFF9AA0A6.toInt()
       st.contains("503") || st.contains("retry") -> 0xFFF9AB00.toInt()
       st.contains("execut") -> 0xFF1A73E8.toInt()
       st.contains("thinking") || st.contains("connect") -> 0xFF9334E6.toInt()
@@ -131,13 +170,15 @@ class ChatHeadOverlay(
     }
     bubbleStatusRing?.setStroke(dp(3), color)
     bubbleDot?.background = oval(color)
-    statusLabel?.text = callbacks.statusText()
+    statusLabel?.text = if (assistantOn) stRaw else "Off · tap toggle to start"
     statusDot?.background = oval(color)
     micBtn?.text = if (micOn) "🎤" else "🔇"
-    micBtn?.alpha = if (micOn) 1f else 0.65f
-    screenBtn?.text = if (screenOn) "🖥" else "🖥"
+    micBtn?.alpha = if (micOn && assistantOn) 1f else 0.65f
     screenBtn?.alpha = if (screenOn) 1f else 0.55f
     screenBtn?.background = bg(if (screenOn) 0xFF1A73E8.toInt() else 0xFF2A2C2E.toInt(), 18)
+    assistantBtn?.text = if (assistantOn) "ON" else "OFF"
+    assistantBtn?.setTextColor(Color.WHITE)
+    assistantBtn?.background = bg(if (assistantOn) 0xFF1A73E8.toInt() else 0xFF5F6368.toInt(), 14)
   }
 
   private fun createBubble() {
@@ -174,20 +215,33 @@ class ChatHeadOverlay(
         WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
     }
     attachBubbleTouch(root, lp)
-    try { wm.addView(root, lp); bubbleView = root; bubbleLp = lp } catch (_: Exception) {}
+    try {
+      wm.addView(root, lp); bubbleView = root; bubbleLp = lp
+      if (Prefs.on(ctx, "bubble_edge_hide", false)) snapToEdge(lp.x, lp.y, hideEdge = true) else scheduleEdgeHide()
+    } catch (_: Exception) {}
   }
 
   private fun attachBubbleTouch(v: View, lp: WindowManager.LayoutParams) {
     var downRawX = 0f; var downRawY = 0f
     var startX = 0; var startY = 0
     var moved = false
+    var revealedFromEdge = false
     v.setOnTouchListener { _, e ->
       when (e.actionMasked) {
         MotionEvent.ACTION_DOWN -> {
           downRawX = e.rawX; downRawY = e.rawY
+          main.removeCallbacks(edgeHideRun)
+          snapAnimator?.cancel()
+          revealedFromEdge = false
+          if (edgeHidden) {
+            val onLeft = Prefs.plain(ctx).getBoolean("bubble_docked_left", lp.x < sw / 2)
+            lp.x = if (onLeft) dp(4) else sw - bubbleSize - dp(4)
+            edgeHidden = false
+            updateBubbleLayout()
+            revealedFromEdge = true
+          }
           startX = lp.x; startY = lp.y
           moved = false; dragging = false; overClose = false
-          snapAnimator?.cancel()
           true
         }
         MotionEvent.ACTION_MOVE -> {
@@ -195,6 +249,7 @@ class ChatHeadOverlay(
           val dy = (e.rawY - downRawY).toInt()
           if (!moved && (abs(dx) > dp(6) || abs(dy) > dp(6))) {
             moved = true; dragging = true
+            main.removeCallbacks(edgeHideRun)
             if (expanded) collapsePanel()
             showCloseTarget()
           }
@@ -219,7 +274,12 @@ class ChatHeadOverlay(
             }
           } else {
             hideCloseTarget()
-            togglePanel()
+            if (revealedFromEdge) {
+              scheduleEdgeHide()
+            } else {
+              togglePanel()
+              if (!expanded) scheduleEdgeHide() else main.removeCallbacks(edgeHideRun)
+            }
           }
           true
         }
@@ -236,6 +296,8 @@ class ChatHeadOverlay(
     if (!Settings.canDrawOverlays(ctx)) return
     if (panelView == null) createPanel()
     val p = panelView ?: return
+    main.removeCallbacks(edgeHideRun)
+    if (edgeHidden) revealEdgeIfHidden()
     p.visibility = View.VISIBLE
     expanded = true
     positionPanel()
@@ -253,6 +315,7 @@ class ChatHeadOverlay(
       try { panelView?.let { wm.updateViewLayout(it, lp) } } catch (_: Exception) {}
     }
     expanded = false
+    scheduleEdgeHide()
   }
 
   private fun createPanel() {
@@ -299,11 +362,54 @@ class ChatHeadOverlay(
     titleCol.addView(stRow)
     header.addView(titleCol, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
 
+    val aBtn = TextView(ctx).apply {
+      textSize = 11f; typeface = Typeface.DEFAULT_BOLD; gravity = Gravity.CENTER
+      setPadding(dp(10), dp(6), dp(10), dp(6))
+      setOnClickListener { callbacks.onAssistantToggle(); refreshStatus() }
+    }
+    assistantBtn = aBtn
+    val aLp = LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+    aLp.leftMargin = dp(6)
+    header.addView(aBtn, aLp)
+
+    val gearBtn = headerBtn("⚙") { toggleCustomizePanel() }
     val openBtn = headerBtn("⤢") { callbacks.onOpenApp(); collapsePanel() }
     val minBtn = headerBtn("—") { collapsePanel() }
+    header.addView(gearBtn)
     header.addView(openBtn)
     header.addView(minBtn)
     root.addView(header, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+
+    // Customize panel
+    val cust = LinearLayout(ctx).apply {
+      orientation = LinearLayout.VERTICAL
+      visibility = View.GONE
+      setPadding(dp(12), dp(8), dp(12), dp(8))
+      setBackgroundColor(0xFF252729.toInt())
+    }
+    cust.addView(TextView(ctx).apply { text = "Bubble customization"; setTextColor(0xFFE3E3E3.toInt()); textSize = 13f; typeface = Typeface.DEFAULT_BOLD })
+    val sizeLabel = TextView(ctx).apply { setTextColor(0xFF9AA0A6.toInt()); textSize = 12f }
+    val sizeSeek = SeekBar(ctx).apply { max = 32; progress = (Prefs.plain(ctx).getInt("bubble_size_dp", 58).coerceIn(44, 76) - 44) }
+    fun paintSize() { val v = 44 + sizeSeek.progress; sizeLabel.text = "Bubble size: ${v}dp" }
+    paintSize()
+    sizeSeek.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+      override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
+        if (fromUser) { Prefs.plain(ctx).edit().putInt("bubble_size_dp", 44 + progress).apply(); paintSize(); applyCustomization() }
+      }
+      override fun onStartTrackingTouch(seekBar: SeekBar?) {}
+      override fun onStopTrackingTouch(seekBar: SeekBar?) {}
+    })
+    cust.addView(sizeLabel); cust.addView(sizeSeek)
+    val edgeRow = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+    edgeRow.addView(TextView(ctx).apply { text = "Hide to screen edge"; setTextColor(0xFFE3E3E3.toInt()); textSize = 13f }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+    val edgeSw = Switch(ctx).apply {
+      isChecked = Prefs.on(ctx, "bubble_edge_hide", false)
+      setOnCheckedChangeListener { _, v -> Prefs.plain(ctx).edit().putBoolean("bubble_edge_hide", v).apply(); applyCustomization() }
+    }
+    edgeRow.addView(edgeSw)
+    cust.addView(edgeRow)
+    customizeView = cust
+    root.addView(cust, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
 
     // Chat area
     val scroll = ScrollView(ctx).apply { isFillViewport = true; overScrollMode = View.OVER_SCROLL_IF_CONTENT_SCROLLS }
@@ -377,6 +483,11 @@ class ChatHeadOverlay(
     lp.leftMargin = dp(6)
     layoutParams = lp
     setOnClickListener { onClick() }
+  }
+
+  private fun toggleCustomizePanel() {
+    val v = customizeView ?: return
+    v.visibility = if (v.visibility == View.VISIBLE) View.GONE else View.VISIBLE
   }
 
   private fun sendFromInput() {
@@ -534,10 +645,14 @@ class ChatHeadOverlay(
   }
 
   // ---- helpers ----
-  private fun snapToEdge(curX: Int, curY: Int) {
+  private fun snapToEdge(curX: Int, curY: Int, hideEdge: Boolean = Prefs.on(ctx, "bubble_edge_hide", false)) {
     val lp = bubbleLp ?: return
-    val targetX = if (curX + bubbleSize / 2 < sw / 2) dp(4) else sw - bubbleSize - dp(4)
+    val onLeft = curX + bubbleSize / 2 < sw / 2
+    val revealedX = if (onLeft) dp(4) else sw - bubbleSize - dp(4)
+    val hiddenX = if (onLeft) -(bubbleSize - edgeHidePeek) else sw - edgeHidePeek
+    val targetX = if (hideEdge) hiddenX else revealedX
     val targetY = clamp(curY, dp(24), sh - bubbleSize - dp(24))
+    edgeHidden = hideEdge
     snapAnimator?.cancel()
     snapAnimator = ValueAnimator.ofFloat(0f, 1f).apply {
       duration = 180
@@ -551,12 +666,20 @@ class ChatHeadOverlay(
       }
       addListener(object : android.animation.AnimatorListenerAdapter() {
         override fun onAnimationEnd(animation: android.animation.Animator) {
-          Prefs.plain(ctx).edit().putInt("bubble_x", lp.x).putInt("bubble_y", lp.y).apply()
+          Prefs.plain(ctx).edit().putInt("bubble_x", revealedX).putInt("bubble_y", lp.y).putBoolean("bubble_docked_left", onLeft).apply()
           callbacks.onAnchorChanged()
+          if (!hideEdge) scheduleEdgeHide()
         }
       })
       start()
     }
+  }
+
+  private fun revealEdgeIfHidden() {
+    if (!edgeHidden) return
+    val lp = bubbleLp ?: return
+    val onLeft = Prefs.plain(ctx).getBoolean("bubble_docked_left", lp.x < sw / 2)
+    snapToEdge(if (onLeft) 0 else sw, lp.y, hideEdge = false)
   }
 
   private fun updateBubbleLayout() {
@@ -570,7 +693,7 @@ class ChatHeadOverlay(
     hideKeyboard()
     panelView?.let { try { wm.removeView(it) } catch (_: Exception) {} }
     panelView = null; panelLp = null; chatList = null; chatScroll = null; inputField = null
-    statusDot = null; statusLabel = null; micBtn = null; screenBtn = null; msgViews.clear()
+    statusDot = null; statusLabel = null; micBtn = null; screenBtn = null; assistantBtn = null; customizeView = null; msgViews.clear()
   }
 
   private fun overlayLp(w: Int, h: Int): WindowManager.LayoutParams {

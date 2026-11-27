@@ -779,7 +779,23 @@ class MainActivity : AppCompatActivity() {
         feature(r, "Screen automation (Accessibility)", "Read screen, tap/type/scroll in other apps.", "f_ui", true, { a11yOn() }, "Enable Accessibility", { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) })
         feature(r, "Camera & screen sharing", "Allow live camera/screen frames and one-shot screen capture/OCR.", "f_share", true, { has(Manifest.permission.CAMERA) }, "Allow camera", { requestPermissions(arrayOf(Manifest.permission.CAMERA), 3) })
         feature(r, "Live caption overlay", "Compact status/caption pill over other apps. When bubble is ON, caption stays beside bubble.", "f_overlay", true, { Settings.canDrawOverlays(this) }, "Allow overlay", { startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName"))) })
-        feature(r, "Floating bubble", "Messenger-style chat head. Tap to open panel; drag to X to hide. When ON, Saara shows it on every start/trigger.", "f_bubble", false, { Settings.canDrawOverlays(this) }, "Allow overlay", { startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName"))) })
+        feature(r, "Floating bubble", "Messenger-style chat head. Tap to open panel; drag to X to hide. When ON, Saara shows it on every start/trigger.", "f_bubble", false, { Settings.canDrawOverlays(this) }, "Allow overlay", { startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName"))) }) { c ->
+          c.addView(tv("Bubble size", 12f, SUB))
+          val sizeLabel = tv("", 13f, TXT)
+          val sizeSeek = SeekBar(this); sizeSeek.max = 32; sizeSeek.progress = (Prefs.plain(this).getInt("bubble_size_dp", 58).coerceIn(44, 76) - 44)
+          fun paintSize() { sizeLabel.text = "Size: ${44 + sizeSeek.progress}dp" }
+          paintSize(); c.addView(sizeLabel); c.addView(sizeSeek)
+          sizeSeek.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) { if (fromUser) { Prefs.plain(this@MainActivity).edit().putInt("bubble_size_dp", 44 + progress).apply(); paintSize(); VoiceService.instance?.refreshBubbleCustomization() } }
+            override fun onStartTrackingTouch(seekBar: SeekBar?) {}
+            override fun onStopTrackingTouch(seekBar: SeekBar?) {}
+          })
+          val edgeRow = LinearLayout(this); edgeRow.gravity = Gravity.CENTER_VERTICAL
+          edgeRow.addView(tv("Hide to screen edge & reveal on touch", 14f, TXT), LinearLayout.LayoutParams(0, -2, 1f))
+          val edgeSw = Switch(this); edgeSw.isChecked = Prefs.on(this, "bubble_edge_hide", false)
+          edgeSw.setOnCheckedChangeListener { _, v -> Prefs.plain(this).edit().putBoolean("bubble_edge_hide", v).apply(); VoiceService.instance?.refreshBubbleCustomization() }
+          edgeRow.addView(edgeSw); c.addView(edgeRow)
+        }
         feature(r, "Clipboard copy & paste", "Allow UI automation copy/paste helpers.", "f_clipboard", true, { true }, "", {})
         val scr = card(r)
         scr.addView(tv("ScreenAsk / OCR quick actions", 16f, bold = true))
@@ -1526,7 +1542,15 @@ class MainActivity : AppCompatActivity() {
     lastToggle = now
     startBtn.isEnabled = false
     startBtn.postDelayed({ startBtn.isEnabled = true }, 900L)
-    if (Bus.running) { startService(svc("STOP")); return }
+    val vs = VoiceService.instance
+    if (Bus.assistantOn) {
+      if (vs != null) vs.setAssistantEnabled(false) else startService(svc("STOP"))
+      return
+    }
+    if (Bus.running && vs != null) {
+      vs.setAssistantEnabled(true)
+      return
+    }
     pendingAssistantWake = true
     if (!has(Manifest.permission.RECORD_AUDIO)) {
       pendingStart = true
@@ -1574,8 +1598,8 @@ class MainActivity : AppCompatActivity() {
     if (curTab == 3) rebuildSettings()
     for (u in updaters) try { u() } catch (_: Exception) {}
     statusTv.text = Bus.status + (if (Bus.camOn) "  •  camera live" else "") + (if (Bus.screenOn) "  •  screen live" else "")
-    startBtn.text = if (Bus.running) "Stop" else "Start"
-    startBtn.background = bg(if (Bus.running) 0xFFB3261E.toInt() else ACC2, 20)
+    startBtn.text = if (Bus.assistantOn) "Stop" else "Start"
+    startBtn.background = bg(if (Bus.assistantOn) 0xFFB3261E.toInt() else ACC2, 20)
     val micOn = VoiceService.instance?.isMicOn() ?: false
     muteChip.text = if (micOn) "🎤 Mic: ON" else "🎤 Mic: OFF"
     muteChip.background = bg(if (micOn) ACC2 else SURF2, 18)
