@@ -258,10 +258,10 @@ class VoiceService : Service() {
         val words = t.lowercase(Locale.ROOT).trim().split(Regex("\\s+")).filter { it.isNotEmpty() }
         if (words.isNotEmpty()) {
           val body = words.joinToString("\\s+") { Regex.escape(it) }
-          out.add(Regex("(?i)(?:^|\\b)" + body + "\\b[,!?. ]*(.*)$"))
+          out.add(Regex("""(?i)(?:^|\b)""" + body + """\b[,!?. ]*(.*)$"""))
         }
       } else {
-        out.add(Regex(Regex.escape(t) + "[,!?.\\s]*(.*)$"))
+        out.add(Regex(Regex.escape(t) + """[,!?.\s]*(.*)$"""))
       }
     }
     out.sortByDescending { it.pattern.length }
@@ -269,10 +269,10 @@ class VoiceService : Service() {
   }
 
   private fun normForCompare(s: String): String =
-    s.lowercase(Locale.ROOT).replace(Regex("[^\\p{L}\\p{N}\\s]+"), " ").replace(Regex("\\s+"), " ").trim()
+    s.lowercase(Locale.ROOT).replace(Regex("""[^\p{L}\p{N}\s]+"""), " ").replace(Regex("""\s+"""), " ").trim()
 
   private fun normalizePhrase(s: String): String =
-    s.lowercase(Locale.ROOT).replace(Regex("[,!?।]+"), " ").replace(Regex("\\s+"), " ").trim()
+    s.lowercase(Locale.ROOT).replace(Regex("[,!?।]+"), " ").replace(Regex("""\s+"""), " ").trim()
 
   // ---------- Public API used by the app ----------
   fun isMicOn(): Boolean = micEnabled && captureRunning
@@ -357,10 +357,10 @@ class VoiceService : Service() {
     val n = normForCompare(text)
     if (n.isBlank()) return false
     val patterns = listOf(
-      Regex("\b(close|end|stop|finish|terminate)\s+(this\s+)?(current\s+)?session\b"),
-      Regex("\b(session)\s+(close|closed|end|ended|band|khatam)\b"),
-      Regex("\b(সেশন)\s*(ক্লোজ|বন্ধ|শেষ)\s*(হও|করো|কর|করুন)?\b"),
-      Regex("\b(सेशन|सत्र)\s*(क्लोज|बंद|समाप्त|खत्म)\s*(हो|करो|कर|कीजिए)?\b")
+      Regex("""\b(close|end|stop|finish|terminate)\s+(this\s+)?(current\s+)?session\b"""),
+      Regex("""\b(session)\s+(close|closed|end|ended|band|khatam)\b"""),
+      Regex("""\b(সেশন)\s*(ক্লোজ|বন্ধ|শেষ)\s*(হও|করো|কর|করুন)?\b"""),
+      Regex("""\b(सेशन|सत्र)\s*(क्लोज|बंद|समाप्त|खत्म)\s*(हो|करो|कर|कीजिए)?\b""")
     )
     return patterns.any { it.containsMatchIn(n) || it.containsMatchIn(text) }
   }
@@ -623,11 +623,11 @@ class VoiceService : Service() {
       return m.groupValues.getOrNull(1)?.trim().orEmpty()
     }
     // Fallback tolerant matching for transcription variants (sara/saara/sarah, hey/hi/ok/okay/oye)
-    if (Regex("\\b(hey|hi|hello|ok|okay|oye|are|arre|o)\\s+sa+ra+h?\\b", RegexOption.IGNORE_CASE).containsMatchIn(norm)) {
-      return Regex("(?i)\\b(?:hey|hi|hello|ok|okay|oye|are|arre|o)\\s+sa+ra+h?\\b[,!?. ]*(.*)$").find(norm)?.groupValues?.getOrNull(1)?.trim().orEmpty() ?: ""
+    if (Regex("""\b(hey|hi|hello|ok|okay|oye|are|arre|o)\s+sa+ra+h?\b""", RegexOption.IGNORE_CASE).containsMatchIn(norm)) {
+      return Regex("""(?i)\b(?:hey|hi|hello|ok|okay|oye|are|arre|o)\s+sa+ra+h?\b[,!?. ]*(.*)$""").find(norm)?.groupValues?.getOrNull(1)?.trim().orEmpty() ?: ""
     }
-    if (Regex("\\bsa+ra+h?\\b", RegexOption.IGNORE_CASE).containsMatchIn(norm) && norm.split(" ").size <= 4) {
-      return Regex("(?i)\\bsa+ra+h?\\b[,!?. ]*(.*)$").find(norm)?.groupValues?.getOrNull(1)?.trim().orEmpty() ?: ""
+    if (Regex("""\bsa+ra+h?\b""", RegexOption.IGNORE_CASE).containsMatchIn(norm) && norm.split(" ").size <= 4) {
+      return Regex("""(?i)\bsa+ra+h?\b[,!?. ]*(.*)$""").find(norm)?.groupValues?.getOrNull(1)?.trim().orEmpty() ?: ""
     }
     return null
   }

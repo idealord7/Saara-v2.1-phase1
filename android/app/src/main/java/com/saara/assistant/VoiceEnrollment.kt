@@ -87,10 +87,10 @@ object VoiceEnrollment {
           failure.reason = "microphone permission denied"
           return null
         }
-        var rec: AudioRecord? = null
-        var features: OpenWakeWordFeatures? = null
+        var recorder: AudioRecord? = null
+        var feat: OpenWakeWordFeatures? = null
         try {
-          rec = try {
+          val built = try {
             AudioRecord.Builder()
               .setAudioSource(source)
               .setAudioFormat(
@@ -106,54 +106,60 @@ object VoiceEnrollment {
             lastReason = "AudioRecord init error (${sourceName(source)}, ${rate}Hz): ${e.message ?: e.javaClass.simpleName}"
             null
           } ?: continue
+          recorder = built
 
-          if (rec.state != AudioRecord.STATE_INITIALIZED) {
+          if (built.state != AudioRecord.STATE_INITIALIZED) {
             lastReason = "AudioRecord not initialized (${sourceName(source)}, ${rate}Hz)"
-            runCatching { rec.release() }
-            rec = null
+            runCatching { built.release() }
+            recorder = null
             continue
           }
 
-          features = try { OpenWakeWordFeatures(c) } catch (e: Exception) {
+          val builtFeat = try { OpenWakeWordFeatures(c) } catch (e: Exception) {
             lastReason = "feature extractor init error: ${e.message ?: e.javaClass.simpleName}"
-            runCatching { rec.release() }
+            runCatching { built.release() }
+            recorder = null
             return null
           }
+          feat = builtFeat
 
           try {
-            rec.startRecording()
+            built.startRecording()
           } catch (e: Exception) {
             lastReason = "startRecording failed (${sourceName(source)}, ${rate}Hz): ${e.message ?: e.javaClass.simpleName}"
-            runCatching { features.close() }
-            runCatching { rec.release() }
-            rec = null
-            features = null
+            runCatching { builtFeat.close() }
+            runCatching { built.release() }
+            recorder = null
+            feat = null
             continue
           }
-          if (rec.recordingState != AudioRecord.RECORDSTATE_RECORDING) {
+          if (built.recordingState != AudioRecord.RECORDSTATE_RECORDING) {
             lastReason = "recorder did not enter recording state (${sourceName(source)}, ${rate}Hz)"
-            runCatching { rec.stop() }
-            runCatching { rec.release() }
-            runCatching { features.close() }
-            rec = null
-            features = null
+            runCatching { built.stop() }
+            runCatching { built.release() }
+            runCatching { builtFeat.close() }
+            recorder = null
+            feat = null
             continue
           }
 
-          val res = captureFromRecorder(rec, features, rate, source)
-          runCatching { rec.stop() }
-          runCatching { rec.release() }
-          runCatching { features.close() }
-          rec = null
-          features = null
+          val res = captureFromRecorder(built, builtFeat, rate, source)
+          runCatching { built.stop() }
+          runCatching { built.release() }
+          runCatching { builtFeat.close() }
+          recorder = null
+          feat = null
           if (res.first != null) return res.first
           lastReason = res.second ?: lastReason
           // Try next source/rate on empty/timeout/init-like failures.
         } catch (e: Exception) {
           lastReason = "capture error (${sourceName(source)}, ${rate}Hz): ${e.message ?: e.javaClass.simpleName}"
-          runCatching { rec?.stop() }
-          runCatching { rec?.release() }
-          runCatching { features?.close() }
+          runCatching { recorder?.stop() }
+          runCatching { recorder?.release() }
+          runCatching { feat?.close() }
+        } finally {
+          runCatching { recorder?.release() }
+          runCatching { feat?.close() }
         }
       }
     }
