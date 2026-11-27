@@ -1442,7 +1442,6 @@ class MainActivity : AppCompatActivity() {
     val img = ImageView(this); img.setImageResource(R.drawable.logo_full)
     c5.addView(img, LinearLayout.LayoutParams(dp(120), dp(120)))
     val ab = tv("Saara AI Agent", 14f, SUB); ab.gravity = Gravity.CENTER; c5.addView(ab)
-    return sv
   }
 
   private fun fetchModels(key: String, done: (List<String>) -> Unit) {

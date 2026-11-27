@@ -290,7 +290,7 @@ class VoiceService : Service() {
       val t = ph.trim(); if (t.isEmpty()) continue
       val hasLatin = t.any { it in 'A'..'Z' || it in 'a'..'z' }
       if (hasLatin) {
-        val words = t.lowercase(Locale.ROOT).trim().split(Regex("\\s+")).filter { it.isNotEmpty() }
+        val words = t.lowercase(Locale.ROOT).trim().split(Regex("""\s+""")).filter { it.isNotEmpty() }
         if (words.isNotEmpty()) {
           val body = words.joinToString("\\s+") { Regex.escape(it) }
           out.add(Regex("""(?i)(?:^|\b)""" + body + """\b[,!?. ]*(.*)$"""))
@@ -624,7 +624,7 @@ class VoiceService : Service() {
     processUtterance(heard)
   }
 
-  private fun normCmd(s: String) = s.lowercase(Locale.ROOT).replace(Regex("[^\p{L}\p{N}% ]+"), " ").replace(Regex("\s+"), " ").trim()
+  private fun normCmd(s: String) = s.lowercase(Locale.ROOT).replace(Regex("""[^\p{L}\p{N}% ]+"""), " ").replace(Regex("""\s+"""), " ").trim()
 
   private fun speakLocal(text: String) {
     Bus.add("saara", text, true)
