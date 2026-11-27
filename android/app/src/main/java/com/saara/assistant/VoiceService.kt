@@ -179,6 +179,8 @@ class VoiceService : Service() {
 
   fun enrollUserVoice(samples: Int = 3, onProgress: (VoiceEnrollment.Progress) -> Unit = {}, onDone: (VoiceEnrollment.Result) -> Unit = {}) {
     Thread {
+      val wasMuted = !micEnabled
+      val wasActive = isSaraActive
       try {
         val perm = ContextCompat.checkSelfPermission(applicationContext, Manifest.permission.RECORD_AUDIO)
         if (perm == PackageManager.PERMISSION_DENIED) {
@@ -187,14 +189,18 @@ class VoiceService : Service() {
           main.post { onDone(res) }
           return@Thread
         }
-        main.post { suspendWakeForEnrollment() }
-        // Wait for active capture/wake engine to release mic hardware.
+        main.post {
+          suspendWakeForEnrollment()
+          Bus.add("system", "Preparing microphone for voice enrollment…", false)
+        }
+        // Wait for active capture/wake engine to fully release mic hardware.
         var waited = 0
-        while (waited < 1500 && (captureRunning || audioRecord != null)) {
+        while (waited < 2500 && (captureRunning || audioRecord != null || captureStarting.get())) {
           try { Thread.sleep(80) } catch (_: Exception) {}
           waited += 80
         }
-        try { Thread.sleep(150) } catch (_: Exception) {}
+        try { Thread.sleep(250) } catch (_: Exception) {}
+
         val res = VoiceEnrollment.enroll(applicationContext, samples, onProgress)
         if (res.ok) {
           val th = UserVoiceProfile.threshold(applicationContext)
@@ -208,7 +214,10 @@ class VoiceService : Service() {
         Bus.add("system", "Voice enrollment error: $msg", true)
         main.post { onDone(VoiceEnrollment.Result(false, msg)) }
       } finally {
-        main.post { resumeWakeAfterEnrollment() }
+        main.post {
+          resumeWakeAfterEnrollment()
+          if (wasActive && micEnabled && running) startSession()
+        }
       }
     }.apply { name = "saara-voice-enroll"; isDaemon = true; start() }
   }

@@ -75,6 +75,15 @@ object VoiceEnrollment {
 
   private fun recordOneSample(c: Context, failure: CaptureFailure): FloatArray? {
     var lastReason = "no audio source/sample rate combination initialized"
+    if (!hasRecordPermission(c)) {
+      failure.reason = "microphone permission denied"
+      return null
+    }
+    if (!OpenWakeWordFeatures.available(c)) {
+      failure.reason = "wake feature models missing"
+      return null
+    }
+
     for (rate in SAMPLE_RATES) {
       val minBuf = AudioRecord.getMinBufferSize(rate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
       if (minBuf == AudioRecord.ERROR || minBuf == AudioRecord.ERROR_BAD_VALUE) {
@@ -117,6 +126,7 @@ object VoiceEnrollment {
 
           val builtFeat = try { OpenWakeWordFeatures(c) } catch (e: Exception) {
             lastReason = "feature extractor init error: ${e.message ?: e.javaClass.simpleName}"
+            failure.reason = lastReason
             runCatching { built.release() }
             recorder = null
             return null
@@ -143,27 +153,29 @@ object VoiceEnrollment {
             continue
           }
 
-          val res = captureFromRecorder(built, builtFeat, rate, source)
+          val (vec, captureErr) = captureFromRecorder(built, builtFeat, rate, source)
           runCatching { built.stop() }
           runCatching { built.release() }
           runCatching { builtFeat.close() }
           recorder = null
           feat = null
-          if (res.first != null) return res.first
-          lastReason = res.second ?: lastReason
+          if (vec != null) return vec
+          lastReason = captureErr?.takeIf { it.isNotBlank() } ?: lastReason
           // Try next source/rate on empty/timeout/init-like failures.
         } catch (e: Exception) {
           lastReason = "capture error (${sourceName(source)}, ${rate}Hz): ${e.message ?: e.javaClass.simpleName}"
           runCatching { recorder?.stop() }
           runCatching { recorder?.release() }
           runCatching { feat?.close() }
+          recorder = null
+          feat = null
         } finally {
           runCatching { recorder?.release() }
           runCatching { feat?.close() }
         }
       }
     }
-    failure.reason = lastReason
+    failure.reason = lastReason.ifBlank { "unknown capture failure" }
     return null
   }
 
@@ -176,14 +188,16 @@ object VoiceEnrollment {
     val deadline = SystemClock.elapsedRealtime() + SAMPLE_MS
     var totalRead = 0
     var readErrors = 0
+    var lastReadCode = 0
     // Warmup read
     val warm = ShortArray(chunkSamples)
     try { rec.read(warm, 0, warm.size) } catch (_: Exception) {}
     while (SystemClock.elapsedRealtime() < deadline) {
-      val n = try { rec.read(srcBuf, 0, srcBuf.size) } catch (_: Exception) { -2 }
+      val n = try { rec.read(srcBuf, 0, srcBuf.size) } catch (_: Exception) { Int.MIN_VALUE }
       if (n <= 0) {
+        lastReadCode = n
         if (n < 0) readErrors++
-        if (readErrors > 8) return null to "audio read error (${sourceName(source)}, ${sampleRate}Hz, code=$n)"
+        if (readErrors > 12) return null to "audio read error (${sourceName(source)}, ${sampleRate}Hz, code=$n)"
         SystemClock.sleep(20)
         continue
       }
@@ -221,8 +235,8 @@ object VoiceEnrollment {
         }
       }
     }
-    if (totalRead <= 0) return null to "no audio samples captured (${sourceName(source)}, ${sampleRate}Hz)"
-    if (embeddings.size < WINDOW) return null to "captured audio but not enough speech embeddings (${embeddings.size}/$WINDOW, ${sourceName(source)}, ${sampleRate}Hz)"
+    if (totalRead <= 0) return null to "no audio samples captured (${sourceName(source)}, ${sampleRate}Hz, lastRead=$lastReadCode)"
+    if (embeddings.size < WINDOW) return null to "captured audio but not enough speech embeddings (${embeddings.size}/$WINDOW, read=$totalRead, ${sourceName(source)}, ${sampleRate}Hz)"
     val tail = embeddings.takeLast(WINDOW)
     return WakeVerifier.pool(tail) to null
   }
