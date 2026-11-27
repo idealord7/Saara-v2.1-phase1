@@ -61,7 +61,14 @@ class MainActivity : AppCompatActivity() {
   private lateinit var contactsSearch: EditText
   private var settingsRoot: LinearLayout? = null
   private var settingsScroll: ScrollView? = null
+  private var settingsContent: LinearLayout? = null
+  private var settingsSearchInput: EditText? = null
   private var lastSettingsRebuild = 0L
+  private var settingsSearchQuery = ""
+  private var settingsCategory = "All"
+  private var wakePhrasesCollapsed = true
+  private val settingsCategoryOrder = listOf("All", "Voice & Wake", "AI & Models", "Auto-Reply & Rules", "Screen & Overlay", "Memory & System")
+  private val settingsCategoryChips = LinkedHashMap<String, TextView>()
   private val shown = HashMap<Long, TextView>()
   private var lastId = 0L
   private var firstId = Long.MAX_VALUE
@@ -410,340 +417,483 @@ class MainActivity : AppCompatActivity() {
   }
 
   private fun addFeatures(root: LinearLayout) {
-    heading(root, "Model & Auto-Fallback", "Automatic model switching on 503/busy/rate-limit and task-aware model selection.")
-    val mc = card(root)
-    val autoSw = Switch(this); autoSw.text = "Auto-switch model on error / busy (503, 429, timeout)"; autoSw.isChecked = Prefs.on(this, "f_auto_model_fallback", true)
-    autoSw.setOnCheckedChangeListener { _, v -> Prefs.plain(this).edit().putBoolean("f_auto_model_fallback", v).apply(); toast(if (v) "Auto model fallback ON" else "Auto model fallback OFF") }
-    mc.addView(autoSw)
-    val smartSw = Switch(this); smartSw.text = "Smart task-based model selection"; smartSw.isChecked = Prefs.on(this, "f_smart_model", true)
-    smartSw.setOnCheckedChangeListener { _, v -> Prefs.plain(this).edit().putBoolean("f_smart_model", v).apply(); toast(if (v) "Smart model selection ON" else "Smart model selection OFF") }
-    mc.addView(smartSw)
-    val status = tv("Status: ${ModelRouter.lastStatus(this).ifBlank { "No model fallback event yet." }}", 12f, SUB); status.setPadding(0, dp(8), 0, dp(8)); mc.addView(status)
-    val primary = edit("Preferred primary live model"); primary.setText(ModelRouter.primaryModel(this)); mc.addView(primary)
-    val arModel = edit("Fast auto-reply model (task)"); arModel.setText(Prefs.plain(this).getString("model_auto_reply", ModelRouter.DEFAULT_TEXT_FAST.first()) ?: ""); mc.addView(arModel)
-    val visionModel = edit("Vision/screen analysis model (task)"); visionModel.setText(Prefs.plain(this).getString("model_vision", ModelRouter.DEFAULT_VISION.first()) ?: ""); mc.addView(visionModel)
-    val complexModel = edit("Complex/reasoning model (task)"); complexModel.setText(Prefs.plain(this).getString("model_complex", ModelRouter.DEFAULT_TEXT_CAPABLE.first()) ?: ""); mc.addView(complexModel)
-    mc.addView(tv("Fallback model order (one per line, used on 503/busy/error):", 12f, SUB))
-    val fb = edit("Fallback models, one per line"); fb.minLines = 3; fb.setText(ModelRouter.fallbackModels(this).joinToString("\n")); mc.addView(fb)
-    fun seekInt(title:String, key:String, def:Int, min:Int, max:Int, suffix:String) {
-      val lbl = tv("", 12f, TXT)
-      fun paint() { lbl.text = "$title: ${Prefs.plain(this).getInt(key, def)}$suffix" }
-      paint(); mc.addView(lbl)
-      val sk = SeekBar(this); sk.max = max - min; sk.progress = (Prefs.plain(this).getInt(key, def) - min).coerceIn(0, max-min)
-      sk.setOnSeekBarChangeListener(object: SeekBar.OnSeekBarChangeListener {
-        override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) { if (fromUser) { Prefs.plain(this@MainActivity).edit().putInt(key, min + progress).apply(); paint() } }
-        override fun onStartTrackingTouch(seekBar: SeekBar?) {}
-        override fun onStopTrackingTouch(seekBar: SeekBar?) {}
-      })
-      mc.addView(sk)
+    fun addCategory(cat: String, title: String, sub: String, blocks: List<Pair<Array<String>, (LinearLayout) -> Unit>>) {
+      if (!settingsCatAllowed(cat)) return
+      val matching = blocks.filter { (_, _) -> true }.filter { (kw, _) -> settingsQueryMatch(*kw) }
+      if (matching.isEmpty()) return
+      heading(root, title, sub)
+      for ((_, build) in matching) {
+        val tmp = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        build(tmp)
+        while (tmp.childCount > 0) { val v = tmp.getChildAt(0); tmp.removeViewAt(0); root.addView(v) }
+      }
     }
-    seekInt("Retry count before fallback/fail", "model_retry_count", 2, 0, 5, "")
-    seekInt("Retry delay", "model_retry_delay_ms", 1200, 250, 10000, " ms")
-    val rowBtns = LinearLayout(this); rowBtns.orientation = LinearLayout.HORIZONTAL
-    rowBtns.addView(btn("Save model settings", ACC2) {
-      val p = Prefs.plain(this).edit()
-      p.putString("model_primary", primary.text.toString().trim())
-      p.putString("model", primary.text.toString().trim().ifBlank { ModelRouter.primaryModel(this) })
-      p.putString("model_auto_reply", arModel.text.toString().trim())
-      p.putString("model_vision", visionModel.text.toString().trim())
-      p.putString("model_complex", complexModel.text.toString().trim())
-      p.apply()
-      ModelRouter.saveFallbackModels(this, fb.text.toString().split('\n', ','))
-      toast("Model settings saved. Restart Saara for live model changes.")
-      status.text = "Status: ${ModelRouter.lastStatus(this).ifBlank { "Saved." }}"
-    }, LinearLayout.LayoutParams(0, -2, 1f))
-    rowBtns.addView(btn("Detect supported models", SURF2) {
-      Thread {
-        val models = ModelRouter.fetchSupportedModels(this)
-        runOnUiThread {
-          if (models.isEmpty()) toast("No models detected (check API key/network)")
+
+    // ---- VOICE & WAKE ----
+    addCategory("Voice & Wake", "Voice & Wake", "Wake phrases, speaker focus, language, barge-in, and confirmations.", listOf(
+      arrayOf("wake phrase session timeout listen activation follow-up commands hey saara okay saara", "wake", "phrase", "session", "timeout") to { r ->
+        val cw = card(r)
+        cw.addView(tv("Wake phrases & session timeout", 16f, bold = true))
+        cw.addView(tv("Saara listens continuously but ignores speech until a wake phrase is heard. After activation, follow-up commands work without repeating the wake phrase until the session times out.", 12f, SUB))
+        val wakeList = LinearLayout(this); wakeList.orientation = LinearLayout.VERTICAL
+        val wakeHeader = LinearLayout(this); wakeHeader.gravity = Gravity.CENTER_VERTICAL
+        val wakeCount = tv("", 12f, SUB)
+        val wakeToggle = tv("", 12f, ACC, true); wakeToggle.setPadding(dp(10), dp(6), dp(0), dp(6))
+        fun renderWakePhrases() {
+          wakeList.removeAllViews()
+          val phrases = VoiceService.loadWakePhrases(Prefs.plain(this))
+          wakeCount.text = "${phrases.size} phrase(s)"
+          wakeToggle.text = if (wakePhrasesCollapsed) "Show" else "Hide"
+          val show = if (wakePhrasesCollapsed) phrases.take(4) else phrases
+          for ((idx, ph) in phrases.withIndex()) {
+            if (wakePhrasesCollapsed && idx >= 4) continue
+            val row = LinearLayout(this); row.gravity = Gravity.CENTER_VERTICAL; row.setPadding(0, dp(4), 0, dp(4))
+            row.addView(tv(ph, 14f), LinearLayout.LayoutParams(0, -2, 1f))
+            val del = tv("Remove", 12f, BAD); del.setPadding(dp(10), dp(6), dp(0), dp(6))
+            del.setOnClickListener {
+              val cur = VoiceService.loadWakePhrases(Prefs.plain(this))
+              if (idx in cur.indices) { cur.removeAt(idx); val e = Prefs.plain(this).edit(); VoiceService.saveWakePhrases(e, cur); e.apply(); renderWakePhrases(); VoiceService.instance?.refreshWakeConfig(); toast("Wake phrase removed") }
+            }
+            row.addView(del); wakeList.addView(row)
+          }
+          if (phrases.isEmpty()) wakeList.addView(tv("No wake phrases set (defaults will be used).", 12f, SUB))
+          else if (wakePhrasesCollapsed && phrases.size > 4) wakeList.addView(tv("+ ${phrases.size - 4} more… tap Show to edit all.", 12f, SUB))
+        }
+        wakeToggle.setOnClickListener { wakePhrasesCollapsed = !wakePhrasesCollapsed; renderWakePhrases() }
+        wakeHeader.addView(tv("Configured wake phrases", 13f, TXT, true), LinearLayout.LayoutParams(0, -2, 1f))
+        wakeHeader.addView(wakeCount); wakeHeader.addView(wakeToggle)
+        cw.addView(wakeHeader, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8) })
+        renderWakePhrases()
+        cw.addView(wakeList)
+        val addRow = LinearLayout(this); addRow.gravity = Gravity.CENTER_VERTICAL
+        val addIn = edit("Add wake phrase (e.g. okay saara)"); addIn.setSingleLine(true)
+        val addBtn = btn("Add", ACC2) {
+          val v = addIn.text.toString().trim()
+          if (v.isNotEmpty()) { val cur = VoiceService.loadWakePhrases(Prefs.plain(this)); if (cur.none { it.equals(v, true) }) cur.add(v); val e = Prefs.plain(this).edit(); VoiceService.saveWakePhrases(e, cur); e.apply(); addIn.text.clear(); renderWakePhrases(); VoiceService.instance?.refreshWakeConfig(); toast("Wake phrase added") }
+        }
+        addRow.addView(addIn, LinearLayout.LayoutParams(0, -2, 1f))
+        addRow.addView(addBtn, LinearLayout.LayoutParams(-2, -2))
+        cw.addView(addRow)
+        cw.addView(btn("Reset default wake phrases", SURF2) {
+          val e = Prefs.plain(this).edit(); VoiceService.saveWakePhrases(e, VoiceService.DEFAULT_WAKE_PHRASES); e.apply(); renderWakePhrases(); VoiceService.instance?.refreshWakeConfig(); toast("Defaults restored")
+        }, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8) })
+
+        val timeoutTitle = tv("", 14f, TXT)
+        val timeoutSeek = SeekBar(this); timeoutSeek.max = 999
+        timeoutSeek.progress = Prefs.plain(this).getInt(VoiceService.PREF_SESSION_TIMEOUT_SEC, VoiceService.DEFAULT_SESSION_TIMEOUT_SEC).coerceIn(0, 999)
+        val timeoutBtn = tv("", 13f, Color.WHITE, true)
+        fun paintTimeout() {
+          val on = Prefs.plain(this).getBoolean(VoiceService.PREF_SESSION_TIMEOUT_ENABLED, true)
+          val sec = timeoutSeek.progress
+          val effectiveOff = !on || sec <= 0
+          timeoutBtn.text = if (effectiveOff) "Turn ON session timeout" else "Turn OFF session timeout"
+          timeoutBtn.background = bg(if (!effectiveOff) ACC2 else SURF2, 18)
+          timeoutBtn.setPadding(dp(14), dp(8), dp(14), dp(8))
+          timeoutSeek.alpha = if (!effectiveOff) 1f else 0.45f
+          timeoutTitle.text = if (effectiveOff) "Session timeout: OFF (0–999s). Active session stays on until you stop/mute Saara." else "Session timeout: ${sec}s (0–999). After this silence, wake phrase is required again."
+        }
+        paintTimeout()
+        timeoutBtn.setOnClickListener {
+          val curOn = Prefs.plain(this).getBoolean(VoiceService.PREF_SESSION_TIMEOUT_ENABLED, true) && timeoutSeek.progress > 0
+          if (curOn) { Prefs.plain(this).edit().putBoolean(VoiceService.PREF_SESSION_TIMEOUT_ENABLED, false).apply(); toast("Session timeout OFF") }
           else {
-            ModelRouter.saveSupportedCache(this, models)
-            val cur = fb.text.toString().split('\n').map { it.trim() }.filter { it.isNotBlank() }.toMutableSet()
-            models.filter { it.contains("flash", true) || it.contains("pro", true) }.take(8).forEach { cur.add(it) }
-            fb.setText(cur.joinToString("\n"))
-            toast("Detected ${models.size} models; supported cache updated")
+            val sec = if (timeoutSeek.progress <= 0) VoiceService.DEFAULT_SESSION_TIMEOUT_SEC else timeoutSeek.progress
+            timeoutSeek.progress = sec
+            Prefs.plain(this).edit().putBoolean(VoiceService.PREF_SESSION_TIMEOUT_ENABLED, true).putInt(VoiceService.PREF_SESSION_TIMEOUT_SEC, sec).apply()
+            toast("Session timeout ON")
           }
+          paintTimeout(); VoiceService.instance?.refreshWakeConfig()
         }
-      }.start()
-    }, LinearLayout.LayoutParams(0, -2, 1f))
-    mc.addView(rowBtns, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8) })
-
-    heading(root, "Permissions & System Readiness", "Live status and one-tap shortcuts for required system access.")
-    val ready = card(root)
-    fun statusRow(label: String, ok: Boolean, actionLabel: String, action: () -> Unit): View {
-      val row = LinearLayout(this); row.gravity = Gravity.CENTER_VERTICAL; row.setPadding(0, dp(6), 0, dp(6))
-      val col = LinearLayout(this); col.orientation = LinearLayout.VERTICAL
-      col.addView(tv(label, 14f, TXT, true))
-      col.addView(tv(if (ok) "Ready" else "Action needed", 12f, if (ok) GOOD else WARN))
-      row.addView(col, LinearLayout.LayoutParams(0, -2, 1f))
-      if (!ok) row.addView(btn(actionLabel, SURF2, action), LinearLayout.LayoutParams(-2, -2))
-      return row
-    }
-    var readyBuilt = false
-    addSettingsUpdater {
-      try {
-        if (!readyBuilt || ready.childCount == 0) {
-          ready.removeAllViews()
-          ready.addView(tv("System status", 16f, bold = true))
-          ready.addView(statusRow("Notification Listener", notifOn(), "Open") { startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)) })
-          ready.addView(statusRow("Accessibility Service", a11yOn(), "Open") { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) })
-          ready.addView(statusRow("Overlay permission", Settings.canDrawOverlays(this), "Open") { startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName"))) })
-          val pm = getSystemService(PowerManager::class.java)
-          val battOk = try { pm?.isIgnoringBatteryOptimizations(packageName) == true } catch (_: Exception) { false }
-          ready.addView(statusRow("Battery optimization exemption", battOk, "Open") {
-            try { startActivity(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:$packageName"))) } catch (_: Exception) { try { startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)) } catch (_: Exception) {} }
-          })
-          ready.addView(statusRow("Phone/SMS/Contacts/Call log", has(Manifest.permission.CALL_PHONE) && has(Manifest.permission.SEND_SMS) && has(Manifest.permission.READ_SMS) && has(Manifest.permission.READ_CONTACTS) && has(Manifest.permission.READ_CALL_LOG), "Grant") {
-            requestPermissions(arrayOf(Manifest.permission.CALL_PHONE, Manifest.permission.SEND_SMS, Manifest.permission.READ_SMS, Manifest.permission.READ_CONTACTS, Manifest.permission.ANSWER_PHONE_CALLS, Manifest.permission.READ_CALL_LOG, Manifest.permission.READ_PHONE_STATE), 2)
-          })
-          readyBuilt = true
-        }
-      } catch (_: Exception) {}
-    }
-
-    heading(root, "Auto-Reply & Messaging Rules", "Control when and how Saara replies to messaging notifications.")
-    feature(root, "Notification auto-reply master", "Read incoming notifications and auto-reply with rules/AI. Works with Notification Access.", "f_notif", false, { notifOn() },
-      "Enable Notification access", { startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)) }) { c ->
-      val aiRow = LinearLayout(this); aiRow.gravity = Gravity.CENTER_VERTICAL
-      val aiLbl = tv("AI smart auto-reply (Gemini)", 14f, TXT)
-      val aiSw = Switch(this); aiSw.isChecked = Prefs.on(this, "f_ai_reply", false)
-      aiSw.setOnCheckedChangeListener { _, v -> Prefs.plain(this).edit().putBoolean("f_ai_reply", v).apply() }
-      aiRow.addView(aiLbl, LinearLayout.LayoutParams(0, -2, 1f)); aiRow.addView(aiSw); c.addView(aiRow)
-
-      val grpRow = LinearLayout(this); grpRow.gravity = Gravity.CENTER_VERTICAL
-      val grpLbl = tv("Reply in group chats (fallback)", 14f, TXT)
-      val grpSw = Switch(this); grpSw.isChecked = Prefs.on(this, "reply_groups", false)
-      grpSw.setOnCheckedChangeListener { _, v -> Prefs.plain(this).edit().putBoolean("reply_groups", v).apply() }
-      grpRow.addView(grpLbl, LinearLayout.LayoutParams(0, -2, 1f)); grpRow.addView(grpSw); c.addView(grpRow)
-
-      c.addView(tv("Fallback sender names (CSV, when no rules match)", 12f, SUB))
-      val names = edit("e.g. Mom, +9198..., WhatsApp"); names.setText(Prefs.plain(this).getString("reply_names", ""))
-      names.doAfterTextChanged { Prefs.plain(this).edit().putString("reply_names", it.toString()).apply() }; c.addView(names)
-
-      c.addView(tv("AI system instructions", 12f, SUB))
-      val prompt = edit("Custom instructions for auto-replies"); prompt.minLines = 3
-      prompt.setText(Prefs.plain(this).getString("ai_reply_prompt", null) ?: AiAutoReply.defaultPrompt())
-      prompt.doAfterTextChanged { Prefs.plain(this).edit().putString("ai_reply_prompt", it.toString()).apply() }; c.addView(prompt)
-
-      val rrBtn = btn("Manage Replying Rules (per-app/sender/quiet/chat/keywords)", SURF2) { showReplyRulesDialog() }
-      c.addView(rrBtn, LinearLayout.LayoutParams(-1,-2).apply{topMargin=dp(8)})
-      c.addView(btn("View auto-reply logs", SURF2) { showAutoReplyLogs() }, LinearLayout.LayoutParams(-1,-2).apply{topMargin=dp(6)})
-    }
-
-    heading(root, "Automation & Triggers", "Condition + Trigger + Action rules and task verification.")
-    feature(root, "Post-task verification loop", "After UI/tool actions, verify screen/result and suggest retry path on failure.", "f_post_verify", true, { true }, "", {})
-    feature(root, "Task self-learning / lessons", "Remember what worked/failed and store guardrail lessons from repeated mistakes.", "learn_tasks", true, { true }, "", {})
-    feature(root, "Mistake-to-rule self-correction", "Convert repeated failures into actionable guardrail lessons/rules.", "f_mistake_lessons", true, { true }, "", {})
-    val autoBtnCard = card(root)
-    autoBtnCard.addView(tv("Automation rules", 16f, bold = true))
-    autoBtnCard.addView(tv("Triggers: time, screen_on, screen_off, battery, notification, missed_call, active_app. Conditions: battery<20, screen off, notification contains otp, etc.", 12f, SUB))
-    autoBtnCard.addView(btn("Open Automation Manager", ACC2) { select(2) }, LinearLayout.LayoutParams(-1,-2).apply{topMargin=dp(8)})
-
-    heading(root, "Screen, Vision & Overlay", "Control screen sharing, capture/OCR, and overlay behavior.")
-    feature(root, "Screen automation (Accessibility)", "Read screen, tap/type/scroll in other apps.", "f_ui", true, { a11yOn() }, "Enable Accessibility", { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) })
-    feature(root, "Camera & screen sharing", "Allow live camera/screen frames and one-shot screen capture/OCR.", "f_share", true, { has(Manifest.permission.CAMERA) }, "Allow camera", { requestPermissions(arrayOf(Manifest.permission.CAMERA), 3) })
-    feature(root, "Live caption overlay", "Compact status/caption pill over other apps. When bubble is ON, caption stays beside bubble.", "f_overlay", true, { Settings.canDrawOverlays(this) }, "Allow overlay", { startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName"))) })
-    feature(root, "Floating bubble", "Messenger-style chat head. Tap to open panel; drag to X to hide. When ON, Saara shows it on every start/trigger.", "f_bubble", false, { Settings.canDrawOverlays(this) }, "Allow overlay", { startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName"))) })
-    feature(root, "Clipboard copy & paste", "Allow UI automation copy/paste helpers.", "f_clipboard", true, { true }, "", {})
-    val scr = card(root)
-    scr.addView(tv("ScreenAsk / OCR quick actions", 16f, bold = true))
-    scr.addView(tv("Use when you want Saara to summarize or extract structured fields from the current screen.", 12f, SUB))
-    val rowScr = LinearLayout(this); rowScr.orientation = LinearLayout.HORIZONTAL
-    rowScr.addView(btn("Summarize screen", SURF2) { if (Bus.running) startActivity(Intent(this, ScreenAskActivity::class.java).putExtra("mode","capture").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) else toast("Start Saara first") }, LinearLayout.LayoutParams(0,-2,1f))
-    rowScr.addView(btn("OCR / Autofill extract", SURF2) { if (Bus.running) startActivity(Intent(this, ScreenAskActivity::class.java).putExtra("mode","ocr").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) else toast("Start Saara first") }, LinearLayout.LayoutParams(0,-2,1f))
-    scr.addView(rowScr)
-
-    heading(root, "Memory, Knowledge & Cloud Sync", "Inspect/edit memory, retention, and sync readiness.")
-    feature(root, "Memory pruning (3D+ low-use)", "Auto-prune old unused, unpinned facts.", "f_mem_prune", true, { true }, "", {})
-    val memCard = card(root)
-    memCard.addView(tv("Memory retention & ledger", 16f, bold = true))
-    fun seekSetting(title:String, key:String, def:Int, min:Int, max:Int, suffix:String) {
-      val label = tv("", 13f, TXT)
-      fun paint(){ label.text = "$title: ${Prefs.plain(this).getInt(key,def)}$suffix" }
-      paint(); memCard.addView(label)
-      val sk = SeekBar(this); sk.max=max-min; sk.progress=(Prefs.plain(this).getInt(key,def)-min).coerceIn(0,max-min)
-      sk.setOnSeekBarChangeListener(object: SeekBar.OnSeekBarChangeListener{
-        override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) { if(fromUser){ Prefs.plain(this@MainActivity).edit().putInt(key,min+progress).apply(); paint() } }
-        override fun onStartTrackingTouch(seekBar: SeekBar?) {}
-        override fun onStopTrackingTouch(seekBar: SeekBar?) {}
-      }); memCard.addView(sk)
-    }
-    seekSetting("Fact prune days", "mem_prune_days", 3, 1, 30, " days")
-    seekSetting("Ledger recent rows", "ledger_recent_n", 10, 5, 50, " rows")
-    memCard.addView(btn("Open Memory Inspector", SURF2) { select(1) }, LinearLayout.LayoutParams(-1,-2).apply{topMargin=dp(8)})
-    val cloud = card(root)
-    cloud.addView(tv("Cloud sync (Firebase/Firestore)", 16f, bold = true))
-    cloud.addView(tv("Current build: no Firebase/Firestore dependency detected in this repo. Memory remains local-first. Add Firebase config/dependencies to enable cloud sync controls.", 12f, SUB))
-    cloud.addView(tv("Status: Not configured", 13f, WARN))
-
-    heading(root, "Voice, Wake-Word & Safety", "Wake behavior, interruption, confirmations, and fallback.")
-    feature(root, "Barge-in interruption", "Stop Saara speech when user speaks a new command.", "f_barge_in", true, { true }, "", {})
-
-    val uv = card(root)
-    uv.addView(tv("User-Only Voice / Speaker Focus", 16f, bold = true))
-    uv.addView(tv("When enabled, Saara accepts wake/commands only when voice matches your enrolled local voice sample. All matching stays on-device.", 12f, SUB))
-    val uvStatus = tv(UserVoiceProfile.statusSummary(this), 12f, SUB)
-    uv.addView(uvStatus)
-    val uvLive = tv("", 12f, SUB)
-    uv.addView(uvLive)
-
-    val onlyRow = LinearLayout(this); onlyRow.gravity = Gravity.CENTER_VERTICAL
-    onlyRow.addView(tv("Only Catch My Voice", 14f, TXT), LinearLayout.LayoutParams(0, -2, 1f))
-    val onlySw = Switch(this); onlySw.isChecked = UserVoiceProfile.onlyUserVoiceEnabled(this)
-    onlySw.setOnCheckedChangeListener { _, v ->
-      Prefs.plain(this).edit().putBoolean("f_only_user_voice", v).apply()
-      VoiceService.instance?.refreshSpeakerGuardConfig()
-      uvStatus.text = UserVoiceProfile.statusSummary(this)
-      toast(if (v) "Only My Voice ON" else "Only My Voice OFF")
-    }
-    onlyRow.addView(onlySw); uv.addView(onlyRow)
-
-    val allRow = LinearLayout(this); allRow.gravity = Gravity.CENTER_VERTICAL
-    allRow.addView(tv("Verify every voice input & command (Always-On)", 14f, TXT), LinearLayout.LayoutParams(0, -2, 1f))
-    val allSw = Switch(this); allSw.isChecked = UserVoiceProfile.verifyAllInputsEnabled(this)
-    allSw.setOnCheckedChangeListener { _, v ->
-      Prefs.plain(this).edit().putBoolean("f_voice_verify_all", v).apply()
-      VoiceService.instance?.refreshSpeakerGuardConfig()
-      uvStatus.text = UserVoiceProfile.statusSummary(this)
-      toast(if (v) "Always-On voice verification ON" else "Wake-only verification")
-    }
-    allRow.addView(allSw); uv.addView(allRow)
-
-    val bypassRow = LinearLayout(this); bypassRow.gravity = Gravity.CENTER_VERTICAL
-    bypassRow.addView(tv("Bypass on manual tap / unmute", 14f, TXT), LinearLayout.LayoutParams(0, -2, 1f))
-    val bypassSw = Switch(this); bypassSw.isChecked = UserVoiceProfile.bypassOnManual(this)
-    bypassSw.setOnCheckedChangeListener { _, v ->
-      Prefs.plain(this).edit().putBoolean("f_voice_match_bypass_manual", v).apply()
-      VoiceService.instance?.refreshSpeakerGuardConfig()
-    }
-    bypassRow.addView(bypassSw); uv.addView(bypassRow)
-
-    val mediaRow = LinearLayout(this); mediaRow.gravity = Gravity.CENTER_VERTICAL
-    mediaRow.addView(tv("Ignore media/TV/background playback noise", 14f, TXT), LinearLayout.LayoutParams(0, -2, 1f))
-    val mediaSw = Switch(this); mediaSw.isChecked = UserVoiceProfile.rejectMediaNoise(this)
-    mediaSw.setOnCheckedChangeListener { _, v ->
-      Prefs.plain(this).edit().putBoolean("f_voice_reject_media", v).apply()
-      VoiceService.instance?.refreshSpeakerGuardConfig()
-    }
-    mediaRow.addView(mediaSw); uv.addView(mediaRow)
-
-    uv.addView(tv("Voice Match Strictness preset", 13f, SUB))
-    val strictRow = LinearLayout(this)
-    fun paintStrict() {
-      val cur = UserVoiceProfile.strictnessPreset(this)
-      for (i in 0 until strictRow.childCount) {
-        val c = strictRow.getChildAt(i) as? TextView ?: continue
-        val tag = c.tag as? String ?: continue
-        val sel = tag == cur
-        c.background = bg(if (sel) ACC2 else SURF2, 18)
-        c.setTextColor(if (sel) Color.WHITE else TXT)
-      }
-    }
-    listOf("relaxed" to "Relaxed", "balanced" to "Balanced", "strict" to "Strict").forEach { (k, label) ->
-      val ch = chip(label) {
-        val v = UserVoiceProfile.applyStrictnessPreset(this, k)
-        paintStrict(); uvStatus.text = UserVoiceProfile.statusSummary(this)
-        VoiceService.instance?.refreshSpeakerGuardConfig()
-        toast("$label strictness: ${v}%")
-        refresh()
-      }
-      ch.tag = k
-      val lp = LinearLayout.LayoutParams(-2, -2); lp.rightMargin = dp(8)
-      strictRow.addView(ch, lp)
-    }
-    uv.addView(strictRow); paintStrict()
-
-    val thLabel = tv("", 14f, TXT)
-    val thSeek = SeekBar(this); thSeek.max = 100; thSeek.progress = UserVoiceProfile.threshold(this)
-    fun paintTh() {
-      val v = thSeek.progress.coerceIn(0, 100)
-      thLabel.text = "Minimum Voice Match: ${v}%"
-      uvStatus.text = UserVoiceProfile.statusSummary(this)
-    }
-    paintTh()
-    thSeek.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-      override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
-        if (fromUser) {
-          val v = progress.coerceIn(0, 100)
-          UserVoiceProfile.setThreshold(this@MainActivity, v)
-          Prefs.plain(this@MainActivity).edit().putString("voice_match_strictness", "custom").apply()
-          paintTh(); paintStrict()
-          VoiceService.instance?.refreshSpeakerGuardConfig()
-        }
-      }
-      override fun onStartTrackingTouch(seekBar: SeekBar?) {}
-      override fun onStopTrackingTouch(seekBar: SeekBar?) { toast("Voice match threshold saved: ${thSeek.progress}%") }
-    })
-    uv.addView(thLabel)
-    uv.addView(tv("Voice is accepted only when match confidence is at or above this percentage. 50% means matchScore >= 50. Strict preset is 80%; you can still drag to 100% manually.", 11f, SUB))
-    uv.addView(thSeek)
-
-    val enrollRow = LinearLayout(this); enrollRow.orientation = LinearLayout.HORIZONTAL
-    enrollRow.addView(btn("Enroll / Re-enroll", ACC2) {
-      val dlg = AlertDialog.Builder(this).setTitle("Enroll My Voice").setMessage("Preparing…").setCancelable(false).setNegativeButton("Close", null).show()
-      val vs = VoiceService.instance
-      if (vs != null) {
-        vs.enrollUserVoice(6, onProgress = { prog ->
-          runOnUiThread { if (dlg.isShowing) dlg.setMessage("Step ${prog.step}/${prog.total}: ${prog.message}") }
-        }, onDone = { res ->
-          runOnUiThread {
-            if (dlg.isShowing) dlg.setMessage(if (res.ok) res.message else "Failed: ${res.message}")
-            dlg.setCancelable(true)
-            uvStatus.text = UserVoiceProfile.statusSummary(this)
-            paintTh(); paintStrict(); refresh()
+        timeoutSeek.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+          override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
+            if (fromUser) { val enabled = progress > 0; Prefs.plain(this@MainActivity).edit().putInt(VoiceService.PREF_SESSION_TIMEOUT_SEC, progress).putBoolean(VoiceService.PREF_SESSION_TIMEOUT_ENABLED, enabled).apply(); paintTimeout(); VoiceService.instance?.refreshWakeConfig() }
           }
+          override fun onStartTrackingTouch(seekBar: SeekBar?) {}
+          override fun onStopTrackingTouch(seekBar: SeekBar?) { toast("Session timeout saved") }
         })
-      } else {
-        Thread {
-          val res = VoiceEnrollment.enroll(applicationContext, 6) { prog ->
-            runOnUiThread { if (dlg.isShowing) dlg.setMessage("Step ${prog.step}/${prog.total}: ${prog.message}") }
-          }
-          runOnUiThread {
-            if (dlg.isShowing) dlg.setMessage(if (res.ok) res.message else "Failed: ${res.message}")
-            dlg.setCancelable(true)
-            uvStatus.text = UserVoiceProfile.statusSummary(this)
-            paintTh(); paintStrict(); refresh()
-          }
-        }.start()
-      }
-    }, LinearLayout.LayoutParams(0, -2, 1f))
-    enrollRow.addView(btn("Clear Sample", SURF2) {
-      AlertDialog.Builder(this).setMessage("Clear enrolled voice sample?").setPositiveButton("Clear") { _, _ ->
-        UserVoiceProfile.clear(this); uvStatus.text = UserVoiceProfile.statusSummary(this)
-        VoiceService.instance?.clearUserVoiceEnrollment(); toast("Voice sample cleared")
-      }.setNegativeButton("Cancel", null).show()
-    }, LinearLayout.LayoutParams(0, -2, 1f))
-    uv.addView(enrollRow, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8) })
+        val tlp = LinearLayout.LayoutParams(-1, -2); tlp.topMargin = dp(12)
+        cw.addView(timeoutTitle, tlp); cw.addView(timeoutBtn, LinearLayout.LayoutParams(-2, -2).apply { topMargin = dp(8) }); cw.addView(timeoutSeek)
+      },
 
-    uv.addView(btn("Test voice match now", SURF2) {
-      if (!UserVoiceProfile.exists(this)) { toast("Enroll your voice first"); return@btn }
-      val perm = ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
-      if (perm == PackageManager.PERMISSION_DENIED) { toast("Microphone permission denied"); return@btn }
-      val dlg = AlertDialog.Builder(this).setTitle("Voice Match Test").setMessage("Recording ~3s… speak now.").setCancelable(false).setNegativeButton("Close", null).show()
-      val vs = VoiceService.instance
-      Thread {
-        try { vs?.suspendWakeForEnrollment(); Thread.sleep(450) } catch (_: Exception) {}
-        val (pct, err) = VoiceEnrollment.quickCheck(applicationContext)
-        try { vs?.resumeWakeAfterEnrollment() } catch (_: Exception) {}
-        runOnUiThread {
-          val th = UserVoiceProfile.threshold(this)
-          val msg = if (pct == null) "Could not capture/check voice: ${err ?: "unknown error"}"
-          else "Match: ${"%.1f".format(pct)}% · Threshold: ${th}% · " + if (pct >= th) "ACCEPT" else "REJECT"
-          if (dlg.isShowing) { dlg.setMessage(msg); dlg.setCancelable(true) }
-          Bus.add("system", "Voice match test: $msg", true)
+      arrayOf("user only voice speaker focus match enroll re-enroll clear sample test voice match now strictness threshold always on verify bypass manual tap ignore media noise", "voice", "speaker", "enroll", "match", "microphone") to { r ->
+        val uv = card(r)
+        uv.addView(tv("User-Only Voice / Speaker Focus", 16f, bold = true))
+        uv.addView(tv("When enabled, Saara accepts wake/commands only when voice matches your enrolled local voice sample. All matching stays on-device.", 12f, SUB))
+        val uvStatus = tv(UserVoiceProfile.statusSummary(this), 12f, SUB); uv.addView(uvStatus)
+        val uvLive = tv("", 12f, SUB); uv.addView(uvLive)
+
+        fun swRow(title: String, checked: Boolean, onChange: (Boolean) -> Unit): Switch {
+          val row = LinearLayout(this); row.gravity = Gravity.CENTER_VERTICAL
+          row.addView(tv(title, 14f, TXT), LinearLayout.LayoutParams(0, -2, 1f))
+          val sw = Switch(this); sw.isChecked = checked; sw.setOnCheckedChangeListener { _, v -> onChange(v) }
+          row.addView(sw); uv.addView(row); return sw
         }
-      }.start()
-    }, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8) })
+        swRow("Only Catch My Voice", UserVoiceProfile.onlyUserVoiceEnabled(this)) { v ->
+          Prefs.plain(this).edit().putBoolean("f_only_user_voice", v).apply(); VoiceService.instance?.refreshSpeakerGuardConfig(); uvStatus.text = UserVoiceProfile.statusSummary(this); toast(if (v) "Only My Voice ON" else "Only My Voice OFF")
+        }
+        swRow("Verify every voice input & command (Always-On)", UserVoiceProfile.verifyAllInputsEnabled(this)) { v ->
+          Prefs.plain(this).edit().putBoolean("f_voice_verify_all", v).apply(); VoiceService.instance?.refreshSpeakerGuardConfig(); uvStatus.text = UserVoiceProfile.statusSummary(this); toast(if (v) "Always-On voice verification ON" else "Wake-only verification")
+        }
+        swRow("Bypass on manual tap / unmute", UserVoiceProfile.bypassOnManual(this)) { v ->
+          Prefs.plain(this).edit().putBoolean("f_voice_match_bypass_manual", v).apply(); VoiceService.instance?.refreshSpeakerGuardConfig()
+        }
+        swRow("Ignore media/TV/background playback noise", UserVoiceProfile.rejectMediaNoise(this)) { v ->
+          Prefs.plain(this).edit().putBoolean("f_voice_reject_media", v).apply(); VoiceService.instance?.refreshSpeakerGuardConfig()
+        }
 
-    addSettingsUpdater {
-      if (Bus.running) uvLive.text = VoiceService.instance?.speakerStatus() ?: "Service not running"
-      else uvLive.text = "Start Saara to see live speaker-match diagnostics."
+        uv.addView(tv("Voice Match Strictness preset", 13f, SUB))
+        val strictRow = LinearLayout(this)
+        fun paintStrict() {
+          val cur = UserVoiceProfile.strictnessPreset(this)
+          for (i in 0 until strictRow.childCount) { val c = strictRow.getChildAt(i) as? TextView ?: continue; val tag = c.tag as? String ?: continue; val sel = tag == cur; c.background = bg(if (sel) ACC2 else SURF2, 18); c.setTextColor(if (sel) Color.WHITE else TXT) }
+        }
+        listOf("relaxed" to "Relaxed", "balanced" to "Balanced", "strict" to "Strict").forEach { (k, label) ->
+          val ch = chip(label) { val v = UserVoiceProfile.applyStrictnessPreset(this, k); paintStrict(); uvStatus.text = UserVoiceProfile.statusSummary(this); VoiceService.instance?.refreshSpeakerGuardConfig(); toast("$label strictness: ${v}%"); refresh() }
+          ch.tag = k; val lp = LinearLayout.LayoutParams(-2, -2); lp.rightMargin = dp(8); strictRow.addView(ch, lp)
+        }
+        uv.addView(strictRow); paintStrict()
+
+        val thLabel = tv("", 14f, TXT); val thSeek = SeekBar(this); thSeek.max = 100; thSeek.progress = UserVoiceProfile.threshold(this)
+        fun paintTh() { val v = thSeek.progress.coerceIn(0, 100); thLabel.text = "Minimum Voice Match: ${v}%"; uvStatus.text = UserVoiceProfile.statusSummary(this) }
+        paintTh()
+        thSeek.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+          override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) { if (fromUser) { val v = progress.coerceIn(0, 100); UserVoiceProfile.setThreshold(this@MainActivity, v); Prefs.plain(this@MainActivity).edit().putString("voice_match_strictness", "custom").apply(); paintTh(); paintStrict(); VoiceService.instance?.refreshSpeakerGuardConfig() } }
+          override fun onStartTrackingTouch(seekBar: SeekBar?) {}
+          override fun onStopTrackingTouch(seekBar: SeekBar?) { toast("Voice match threshold saved: ${thSeek.progress}%") }
+        })
+        uv.addView(thLabel)
+        uv.addView(tv("Voice is accepted only when match confidence is at or above this percentage. 50% means matchScore >= 50. Strict preset is 80%; you can still drag to 100% manually.", 11f, SUB))
+        uv.addView(thSeek)
+
+        val enrollRow = LinearLayout(this); enrollRow.orientation = LinearLayout.HORIZONTAL
+        enrollRow.addView(btn("Enroll / Re-enroll", ACC2) {
+          val dlg = AlertDialog.Builder(this).setTitle("Enroll My Voice").setMessage("Preparing…").setCancelable(false).setNegativeButton("Close", null).show()
+          val vs = VoiceService.instance
+          if (vs != null) {
+            vs.enrollUserVoice(6, onProgress = { prog -> runOnUiThread { if (dlg.isShowing) dlg.setMessage("Step ${prog.step}/${prog.total}: ${prog.message}") } }, onDone = { res -> runOnUiThread { if (dlg.isShowing) dlg.setMessage(if (res.ok) res.message else "Failed: ${res.message}"); dlg.setCancelable(true); uvStatus.text = UserVoiceProfile.statusSummary(this); paintTh(); paintStrict(); refresh() } })
+          } else {
+            Thread { val res = VoiceEnrollment.enroll(applicationContext, 6) { prog -> runOnUiThread { if (dlg.isShowing) dlg.setMessage("Step ${prog.step}/${prog.total}: ${prog.message}") } }; runOnUiThread { if (dlg.isShowing) dlg.setMessage(if (res.ok) res.message else "Failed: ${res.message}"); dlg.setCancelable(true); uvStatus.text = UserVoiceProfile.statusSummary(this); paintTh(); paintStrict(); refresh() } }.start()
+          }
+        }, LinearLayout.LayoutParams(0, -2, 1f))
+        enrollRow.addView(btn("Clear Sample", SURF2) {
+          AlertDialog.Builder(this).setMessage("Clear enrolled voice sample?").setPositiveButton("Clear") { _, _ -> UserVoiceProfile.clear(this); uvStatus.text = UserVoiceProfile.statusSummary(this); VoiceService.instance?.clearUserVoiceEnrollment(); toast("Voice sample cleared") }.setNegativeButton("Cancel", null).show()
+        }, LinearLayout.LayoutParams(0, -2, 1f))
+        uv.addView(enrollRow, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8) })
+
+        uv.addView(btn("Test voice match now", SURF2) {
+          if (!UserVoiceProfile.exists(this)) { toast("Enroll your voice first"); return@btn }
+          val perm = ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
+          if (perm == PackageManager.PERMISSION_DENIED) { toast("Microphone permission denied"); return@btn }
+          val dlg = AlertDialog.Builder(this).setTitle("Voice Match Test").setMessage("Recording ~3s… speak now.").setCancelable(false).setNegativeButton("Close", null).show()
+          val vs = VoiceService.instance
+          Thread {
+            try { vs?.suspendWakeForEnrollment(); Thread.sleep(450) } catch (_: Exception) {}
+            val (pct, err) = VoiceEnrollment.quickCheck(applicationContext)
+            try { vs?.resumeWakeAfterEnrollment() } catch (_: Exception) {}
+            runOnUiThread {
+              val th = UserVoiceProfile.threshold(this)
+              val msg = if (pct == null) "Could not capture/check voice: ${err ?: "unknown error"}" else "Match: ${"%.1f".format(pct)}% · Threshold: ${th}% · " + if (pct >= th) "ACCEPT" else "REJECT"
+              if (dlg.isShowing) { dlg.setMessage(msg); dlg.setCancelable(true) }
+              Bus.add("system", "Voice match test: $msg", true)
+            }
+          }.start()
+        }, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8) })
+        addSettingsUpdater { uvLive.text = if (Bus.running) VoiceService.instance?.speakerStatus() ?: "Service not running" else "Start Saara to see live speaker-match diagnostics." }
+      },
+
+      arrayOf("language priority bengali hindi english hinglish auto speak", "language", "bangla") to { r ->
+        val cl = card(r)
+        cl.addView(tv("Language priority", 16f, bold = true))
+        cl.addView(tv("First-priority languages: Bengali, Hindi, English. Pick how Saara should speak by default.", 12f, SUB))
+        val opts = listOf("auto" to "Auto", "bn" to "বাংলা", "hi" to "हिन्दी", "en" to "English", "hinglish" to "Hinglish")
+        val chips = HashMap<String, TextView>()
+        val paint = { val cur = Prefs.plain(this).getString("lang", "auto"); for ((k, v) in chips) { v.background = bg(if (k == cur) ACC2 else SURF2, 18); v.setTextColor(if (k == cur) Color.WHITE else TXT) } }
+        val row = LinearLayout(this); row.setPadding(0, dp(10), 0, 0)
+        for ((k, l) in opts) { val ch = chip(l) { Prefs.plain(this).edit().putString("lang", k).apply(); paint(); toast("Saved. Stop and Start Saara to apply.") }; chips[k] = ch; val lp = LinearLayout.LayoutParams(-2, -2); lp.rightMargin = dp(6); row.addView(ch, lp) }
+        val hs = HorizontalScrollView(this); hs.isHorizontalScrollBarEnabled = false; hs.addView(row); cl.addView(hs); paint()
+      },
+
+      arrayOf("barge in interruption stop speech", "barge", "interrupt") to { r ->
+        feature(r, "Barge-in interruption", "Stop Saara speech when user speaks a new command.", "f_barge_in", true, { true }, "", {})
+      },
+
+      arrayOf("confirm calls sms messages whatsapp telegram reply before sending", "confirm", "confirmation", "call", "sms", "message") to { r ->
+        feature(r, "Confirm before calls", "Ask before placing calls.", "confirm_calls", true, { true }, "", {})
+        feature(r, "Confirm before SMS/messages", "Ask before sending SMS/WhatsApp/Telegram/replies.", "confirm_messages", true, { true }, "", {})
+      }
+    ))
+
+    // ---- AI & MODELS ----
+    addCategory("AI & Models", "AI & Models", "Gemini connection, model selection, fallback, and retry behavior.", listOf(
+      arrayOf("model auto fallback live primary fast lite task smart vision complex retry delay 503 429 timeout detect supported models save", "model", "fallback", "retry", "503", "gemini model") to { r ->
+        val mc = card(r)
+        mc.addView(tv("Model & Auto-Fallback", 16f, bold = true))
+        mc.addView(tv("Automatic model switching on 503/busy/rate-limit and task-aware model selection.", 12f, SUB))
+        val autoSw = Switch(this); autoSw.text = "Auto-switch model on error / busy (503, 429, timeout)"; autoSw.isChecked = Prefs.on(this, "f_auto_model_fallback", true)
+        autoSw.setOnCheckedChangeListener { _, v -> Prefs.plain(this).edit().putBoolean("f_auto_model_fallback", v).apply(); toast(if (v) "Auto model fallback ON" else "Auto model fallback OFF") }
+        mc.addView(autoSw)
+        val smartSw = Switch(this); smartSw.text = "Smart task-based model selection"; smartSw.isChecked = Prefs.on(this, "f_smart_model", true)
+        smartSw.setOnCheckedChangeListener { _, v -> Prefs.plain(this).edit().putBoolean("f_smart_model", v).apply(); toast(if (v) "Smart model selection ON" else "Smart model selection OFF") }
+        mc.addView(smartSw)
+        val status = tv("Status: ${ModelRouter.lastStatus(this).ifBlank { "No model fallback event yet." }}", 12f, SUB); status.setPadding(0, dp(8), 0, dp(8)); mc.addView(status)
+
+        fun labeledEdit(label: String, hint: String, value: String): EditText {
+          mc.addView(tv(label, 12f, SUB))
+          val e = edit(hint); e.setText(value); mc.addView(e, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(8) }); return e
+        }
+        val primary = labeledEdit("Live / Primary model", "e.g. gemini-3.1-flash-live-preview", ModelRouter.primaryModel(this))
+        val arModel = labeledEdit("Fast / Lite auto-reply model (task)", "e.g. gemini-3.5-flash-lite", Prefs.plain(this).getString("model_auto_reply", ModelRouter.DEFAULT_TEXT_FAST.first()) ?: "")
+        val visionModel = labeledEdit("Vision / screen analysis model (task)", "e.g. gemini-3.5-flash-lite", Prefs.plain(this).getString("model_vision", ModelRouter.DEFAULT_VISION.first()) ?: "")
+        val complexModel = labeledEdit("Task / Smart complex reasoning model", "e.g. gemini-3.8-flash", Prefs.plain(this).getString("model_complex", ModelRouter.DEFAULT_TEXT_CAPABLE.first()) ?: "")
+        mc.addView(tv("Fallback model order (one per line, used on 503/busy/error)", 12f, SUB))
+        val fb = edit("One model per line"); fb.minLines = 3; fb.setText(ModelRouter.fallbackModels(this).joinToString("\n")); mc.addView(fb)
+
+        fun seekInt(title:String, key:String, def:Int, min:Int, max:Int, suffix:String) {
+          val lbl = tv("", 12f, TXT)
+          fun paint() { lbl.text = "$title: ${Prefs.plain(this).getInt(key, def)}$suffix" }
+          paint(); mc.addView(lbl)
+          val sk = SeekBar(this); sk.max = max - min; sk.progress = (Prefs.plain(this).getInt(key, def) - min).coerceIn(0, max-min)
+          sk.setOnSeekBarChangeListener(object: SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) { if (fromUser) { Prefs.plain(this@MainActivity).edit().putInt(key, min + progress).apply(); paint() } }
+            override fun onStartTrackingTouch(seekBar: SeekBar?) {}
+            override fun onStopTrackingTouch(seekBar: SeekBar?) {}
+          })
+          mc.addView(sk)
+        }
+        seekInt("Retry count before fallback/fail", "model_retry_count", 2, 0, 5, "")
+        seekInt("Retry delay", "model_retry_delay_ms", 1200, 250, 10000, " ms")
+
+        val rowBtns = LinearLayout(this); rowBtns.orientation = LinearLayout.HORIZONTAL
+        rowBtns.addView(btn("Save model settings", ACC2) {
+          val p = Prefs.plain(this).edit()
+          p.putString("model_primary", primary.text.toString().trim())
+          p.putString("model", primary.text.toString().trim().ifBlank { ModelRouter.primaryModel(this) })
+          p.putString("model_auto_reply", arModel.text.toString().trim())
+          p.putString("model_vision", visionModel.text.toString().trim())
+          p.putString("model_complex", complexModel.text.toString().trim())
+          p.apply()
+          ModelRouter.saveFallbackModels(this, fb.text.toString().split('\n', ','))
+          toast("Model settings saved. Restart Saara for live model changes.")
+          status.text = "Status: ${ModelRouter.lastStatus(this).ifBlank { "Saved." }}"
+        }, LinearLayout.LayoutParams(0, -2, 1f).apply { rightMargin = dp(8) })
+        rowBtns.addView(btn("Detect supported models", SURF2) {
+          Thread {
+            val models = ModelRouter.fetchSupportedModels(this)
+            runOnUiThread {
+              if (models.isEmpty()) toast("No models detected (check API key/network)")
+              else {
+                ModelRouter.saveSupportedCache(this, models)
+                val cur = fb.text.toString().split('\n').map { it.trim() }.filter { it.isNotBlank() }.toMutableSet()
+                models.filter { it.contains("flash", true) || it.contains("pro", true) }.take(8).forEach { cur.add(it) }
+                fb.setText(cur.joinToString("\n"))
+                toast("Detected ${models.size} models; supported cache updated")
+              }
+            }
+          }.start()
+        }, LinearLayout.LayoutParams(0, -2, 1f))
+        mc.addView(rowBtns, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8) })
+      },
+
+      arrayOf("gemini connection api key live model voice save settings fetch models pick model get free api key", "api", "key", "gemini", "connection", "voice") to { r ->
+        val c3 = card(r)
+        c3.addView(tv("Gemini connection", 16f, bold = true))
+        c3.addView(tv("Connect your Gemini API key, choose a live model, and select Saara's voice.", 12f, SUB))
+        val saved = !(Prefs.secure(this).getString("apiKey", "") ?: "").isBlank()
+        val key = edit(if (saved) "API key saved ✓ (type a new one to replace)" else "Paste Gemini API key", true)
+        c3.addView(tv("Gemini API key", 12f, SUB)); c3.addView(key)
+        val model = edit("Live model"); model.setText(Prefs.plain(this).getString("model", "gemini-3.1-flash-live-preview"))
+        var voiceName = Prefs.plain(this).getString("voice", "Aoede") ?: "Aoede"
+        c3.addView(tv("Live / Primary model", 12f, SUB)); c3.addView(model)
+        val pick = btn("Pick model from list", SURF2) {
+          val all = (MODELS + fetchedModels).distinct()
+          AlertDialog.Builder(this).setTitle("Live models").setItems(all.toTypedArray()) { _, w -> model.setText(all[w]) }.show()
+        }
+        val fetch = btn("Fetch live models for my key", SURF2) {
+          val k = key.text.toString().trim().ifBlank { Prefs.secure(this).getString("apiKey", "") ?: "" }
+          if (k.isBlank()) toast("Add your API key first") else fetchModels(k) { list -> if (list.isEmpty()) toast("No live models found (or key invalid)") else { fetchedModels.clear(); fetchedModels.addAll(list); toast("${list.size} model(s) found. Tap 'Pick model from list'.") } }
+        }
+        val lp1 = LinearLayout.LayoutParams(-1, -2); lp1.topMargin = dp(8)
+        c3.addView(pick, lp1); c3.addView(fetch, lp1)
+        val voiceBtn = btn("Voice: $voiceName  ▾", SURF2) {}
+        voiceBtn.setOnClickListener { AlertDialog.Builder(this).setTitle("Voice").setItems(VOICES.toTypedArray()) { _, w -> voiceName = VOICES[w]; voiceBtn.text = "Voice: $voiceName  ▾" }.show() }
+        c3.addView(voiceBtn, lp1)
+        val sb = btn("Save settings") {
+          Prefs.plain(this).edit().putString("model", model.text.toString().trim()).putString("voice", voiceName).apply()
+          if (key.text.isNotBlank()) { Prefs.secure(this).edit().putString("apiKey", key.text.toString().trim()).apply(); key.text.clear(); key.hint = "API key saved ✓ (type a new one to replace)" }
+          toast("Saved. Stop and Start Saara to apply.")
+        }
+        c3.addView(sb, lp1)
+        c3.addView(btn("Get free Gemini API key", SURF2) { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://aistudio.google.com/app/apikey"))) }, lp1)
+      },
+
+      arrayOf("offline 503 fallback retry network backoff queue pending tasks", "offline", "503", "retry", "network") to { r ->
+        feature(r, "Offline/503 fallback retry", "Auto-retry transient network/503 errors with backoff and queue pending tasks.", "f_offline_retry", true, { true }, "", {})
+      }
+    ))
+
+    // ---- AUTO-REPLY & RULES ----
+    addCategory("Auto-Reply & Rules", "Auto-Reply & Rules", "Notification replies, rules, automation, and logs.", listOf(
+      arrayOf("notification auto reply master ai smart auto reply gemini group fallback sender names system instructions replying rules logs manage view", "auto-reply", "reply", "notification", "rules", "logs", "sender") to { r ->
+        feature(r, "Notification auto-reply master", "Read incoming notifications and auto-reply with rules/AI. Works with Notification Access.", "f_notif", false, { notifOn() },
+          "Enable Notification access", { startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)) }) { c ->
+          val aiRow = LinearLayout(this); aiRow.gravity = Gravity.CENTER_VERTICAL
+          aiRow.addView(tv("AI smart auto-reply (Gemini)", 14f, TXT), LinearLayout.LayoutParams(0, -2, 1f))
+          val aiSw = Switch(this); aiSw.isChecked = Prefs.on(this, "f_ai_reply", false)
+          aiSw.setOnCheckedChangeListener { _, v -> Prefs.plain(this).edit().putBoolean("f_ai_reply", v).apply() }
+          aiRow.addView(aiSw); c.addView(aiRow)
+
+          val grpRow = LinearLayout(this); grpRow.gravity = Gravity.CENTER_VERTICAL
+          grpRow.addView(tv("Reply in group chats (fallback)", 14f, TXT), LinearLayout.LayoutParams(0, -2, 1f))
+          val grpSw = Switch(this); grpSw.isChecked = Prefs.on(this, "reply_groups", false)
+          grpSw.setOnCheckedChangeListener { _, v -> Prefs.plain(this).edit().putBoolean("reply_groups", v).apply() }
+          grpRow.addView(grpSw); c.addView(grpRow)
+
+          c.addView(tv("Fallback sender names (CSV, when no rules match)", 12f, SUB))
+          val names = edit("e.g. Mom, +9198..., WhatsApp"); names.setText(Prefs.plain(this).getString("reply_names", ""))
+          names.doAfterTextChanged { Prefs.plain(this).edit().putString("reply_names", it.toString()).apply() }; c.addView(names)
+
+          c.addView(tv("AI system instructions", 12f, SUB))
+          val prompt = edit("Custom instructions for auto-replies"); prompt.minLines = 3
+          prompt.setText(Prefs.plain(this).getString("ai_reply_prompt", null) ?: AiAutoReply.defaultPrompt())
+          prompt.doAfterTextChanged { Prefs.plain(this).edit().putString("ai_reply_prompt", it.toString()).apply() }; c.addView(prompt)
+
+          c.addView(btn("Manage Replying Rules (per-app/sender/quiet/chat/keywords)", SURF2) { showReplyRulesDialog() }, LinearLayout.LayoutParams(-1,-2).apply{topMargin=dp(8)})
+          c.addView(btn("View auto-reply logs", SURF2) { showAutoReplyLogs() }, LinearLayout.LayoutParams(-1,-2).apply{topMargin=dp(6)})
+        }
+      },
+
+      arrayOf("automation triggers rules post-task verification self-learning lessons mistake-to-rule open automation manager condition action", "automation", "trigger", "task", "verification", "lesson") to { r ->
+        feature(r, "Post-task verification loop", "After UI/tool actions, verify screen/result and suggest retry path on failure.", "f_post_verify", true, { true }, "", {})
+        feature(r, "Task self-learning / lessons", "Remember what worked/failed and store guardrail lessons from repeated mistakes.", "learn_tasks", true, { true }, "", {})
+        feature(r, "Mistake-to-rule self-correction", "Convert repeated failures into actionable guardrail lessons/rules.", "f_mistake_lessons", true, { true }, "", {})
+        val autoBtnCard = card(r)
+        autoBtnCard.addView(tv("Automation rules & triggers", 16f, bold = true))
+        autoBtnCard.addView(tv("Triggers: time, screen_on, screen_off, battery, notification, missed_call, active_app. Conditions: battery<20, screen off, notification contains otp, etc.", 12f, SUB))
+        autoBtnCard.addView(btn("Open Automation Manager", ACC2) { select(2) }, LinearLayout.LayoutParams(-1,-2).apply{topMargin=dp(8)})
+      }
+    ))
+
+    // ---- SCREEN & OVERLAY ----
+    addCategory("Screen & Overlay", "Screen & Overlay", "Screen automation, sharing, overlay, clipboard, and OCR actions.", listOf(
+      arrayOf("screen automation accessibility camera screen sharing live caption overlay floating bubble clipboard copy paste screenask ocr summarize autofill extract", "screen", "overlay", "bubble", "clipboard", "ocr", "accessibility", "camera", "share") to { r ->
+        feature(r, "Screen automation (Accessibility)", "Read screen, tap/type/scroll in other apps.", "f_ui", true, { a11yOn() }, "Enable Accessibility", { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) })
+        feature(r, "Camera & screen sharing", "Allow live camera/screen frames and one-shot screen capture/OCR.", "f_share", true, { has(Manifest.permission.CAMERA) }, "Allow camera", { requestPermissions(arrayOf(Manifest.permission.CAMERA), 3) })
+        feature(r, "Live caption overlay", "Compact status/caption pill over other apps. When bubble is ON, caption stays beside bubble.", "f_overlay", true, { Settings.canDrawOverlays(this) }, "Allow overlay", { startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName"))) })
+        feature(r, "Floating bubble", "Messenger-style chat head. Tap to open panel; drag to X to hide. When ON, Saara shows it on every start/trigger.", "f_bubble", false, { Settings.canDrawOverlays(this) }, "Allow overlay", { startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName"))) })
+        feature(r, "Clipboard copy & paste", "Allow UI automation copy/paste helpers.", "f_clipboard", true, { true }, "", {})
+        val scr = card(r)
+        scr.addView(tv("ScreenAsk / OCR quick actions", 16f, bold = true))
+        scr.addView(tv("Use when you want Saara to summarize or extract structured fields from the current screen.", 12f, SUB))
+        val rowScr = LinearLayout(this); rowScr.orientation = LinearLayout.HORIZONTAL
+        rowScr.addView(btn("Summarize screen", SURF2) { if (Bus.running) startActivity(Intent(this, ScreenAskActivity::class.java).putExtra("mode","capture").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) else toast("Start Saara first") }, LinearLayout.LayoutParams(0,-2,1f).apply { rightMargin = dp(8) })
+        rowScr.addView(btn("OCR / Autofill extract", SURF2) { if (Bus.running) startActivity(Intent(this, ScreenAskActivity::class.java).putExtra("mode","ocr").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) else toast("Start Saara first") }, LinearLayout.LayoutParams(0,-2,1f))
+        scr.addView(rowScr)
+      }
+    ))
+
+    // ---- MEMORY & SYSTEM ----
+    addCategory("Memory & System", "Memory & System", "Permissions, memory, cloud sync, and chat/session data.", listOf(
+      arrayOf("permissions system readiness notification listener accessibility overlay battery optimization phone sms contacts call log", "permission", "ready", "battery", "accessibility", "overlay") to { r ->
+        val ready = card(r)
+        fun statusRow(label: String, ok: Boolean, actionLabel: String, action: () -> Unit): View {
+          val row = LinearLayout(this); row.gravity = Gravity.CENTER_VERTICAL; row.setPadding(0, dp(6), 0, dp(6))
+          val col = LinearLayout(this); col.orientation = LinearLayout.VERTICAL
+          col.addView(tv(label, 14f, TXT, true))
+          col.addView(tv(if (ok) "Ready" else "Action needed", 12f, if (ok) GOOD else WARN))
+          row.addView(col, LinearLayout.LayoutParams(0, -2, 1f))
+          if (!ok) row.addView(btn(actionLabel, SURF2, action), LinearLayout.LayoutParams(-2, -2))
+          return row
+        }
+        var readyBuilt = false
+        addSettingsUpdater {
+          try {
+            if (!readyBuilt || ready.childCount == 0) {
+              ready.removeAllViews()
+              ready.addView(tv("Permissions & System Readiness", 16f, bold = true))
+              ready.addView(tv("Live status and one-tap shortcuts for required system access.", 12f, SUB))
+              ready.addView(statusRow("Notification Listener", notifOn(), "Open") { startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)) })
+              ready.addView(statusRow("Accessibility Service", a11yOn(), "Open") { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) })
+              ready.addView(statusRow("Overlay permission", Settings.canDrawOverlays(this), "Open") { startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName"))) })
+              val pm = getSystemService(PowerManager::class.java)
+              val battOk = try { pm?.isIgnoringBatteryOptimizations(packageName) == true } catch (_: Exception) { false }
+              ready.addView(statusRow("Battery optimization exemption", battOk, "Open") {
+                try { startActivity(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:$packageName"))) } catch (_: Exception) { try { startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)) } catch (_: Exception) {} }
+              })
+              ready.addView(statusRow("Phone/SMS/Contacts/Call log", has(Manifest.permission.CALL_PHONE) && has(Manifest.permission.SEND_SMS) && has(Manifest.permission.READ_SMS) && has(Manifest.permission.READ_CONTACTS) && has(Manifest.permission.READ_CALL_LOG), "Grant") {
+                requestPermissions(arrayOf(Manifest.permission.CALL_PHONE, Manifest.permission.SEND_SMS, Manifest.permission.READ_SMS, Manifest.permission.READ_CONTACTS, Manifest.permission.ANSWER_PHONE_CALLS, Manifest.permission.READ_CALL_LOG, Manifest.permission.READ_PHONE_STATE), 2)
+              })
+              readyBuilt = true
+            }
+          } catch (_: Exception) {}
+        }
+      },
+
+      arrayOf("memory pruning retention ledger open memory inspector fact prune days ledger rows cloud sync firebase firestore", "memory", "prune", "ledger", "cloud", "sync", "inspector") to { r ->
+        feature(r, "Memory pruning (3D+ low-use)", "Auto-prune old unused, unpinned facts.", "f_mem_prune", true, { true }, "", {})
+        val memCard = card(r)
+        memCard.addView(tv("Memory retention & ledger", 16f, bold = true))
+        fun seekSetting(title:String, key:String, def:Int, min:Int, max:Int, suffix:String) {
+          val label = tv("", 13f, TXT)
+          fun paint(){ label.text = "$title: ${Prefs.plain(this).getInt(key,def)}$suffix" }
+          paint(); memCard.addView(label)
+          val sk = SeekBar(this); sk.max=max-min; sk.progress=(Prefs.plain(this).getInt(key,def)-min).coerceIn(0,max-min)
+          sk.setOnSeekBarChangeListener(object: SeekBar.OnSeekBarChangeListener{
+            override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) { if(fromUser){ Prefs.plain(this@MainActivity).edit().putInt(key,min+progress).apply(); paint() } }
+            override fun onStartTrackingTouch(seekBar: SeekBar?) {}
+            override fun onStopTrackingTouch(seekBar: SeekBar?) {}
+          }); memCard.addView(sk)
+        }
+        seekSetting("Fact prune days", "mem_prune_days", 3, 1, 30, " days")
+        seekSetting("Ledger recent rows", "ledger_recent_n", 10, 5, 50, " rows")
+        memCard.addView(btn("Open Memory Inspector", SURF2) { select(1) }, LinearLayout.LayoutParams(-1,-2).apply{topMargin=dp(8)})
+        val cloud = card(r)
+        cloud.addView(tv("Cloud sync (Firebase/Firestore)", 16f, bold = true))
+        cloud.addView(tv("Current build: no Firebase/Firestore dependency detected in this repo. Memory remains local-first. Add Firebase config/dependencies to enable cloud sync controls.", 12f, SUB))
+        cloud.addView(tv("Status: Not configured", 13f, WARN))
+      },
+
+      arrayOf("chat history session continuity resume recent session task clear chat history clear recent session state", "chat", "history", "session", "continuity", "clear") to { r ->
+        val c4 = card(r)
+        c4.addView(tv("Chat history & session continuity", 16f, bold = true))
+        c4.addView(tv("Old chats stay on-device and load as you scroll up. Recent session context can resume after reconnect/restart.", 12f, SUB))
+        val contRow = LinearLayout(this); contRow.gravity = Gravity.CENTER_VERTICAL
+        contRow.addView(tv("Resume recent session/task", 14f, TXT), LinearLayout.LayoutParams(0, -2, 1f))
+        val contSw = Switch(this); contSw.isChecked = Prefs.on(this, "f_session_continuity", true)
+        contSw.setOnCheckedChangeListener { _, v -> Prefs.plain(this).edit().putBoolean("f_session_continuity", v).apply(); toast(if (v) "Session continuity ON" else "Session continuity OFF") }
+        contRow.addView(contSw); c4.addView(contRow)
+        val st = try { Db.get(this).sessionState() } catch (_: Exception) { null }
+        val recent = try { Db.get(this).chatRecent(8) } catch (_: Exception) { emptyList() }
+        val summary = buildString {
+          append("Saved turns: ").append(recent.size).append(" recent loaded")
+          if (st != null && st.updatedTs > 0) {
+            append("\nStatus: ").append(st.status)
+            if (st.activeGoal.isNotBlank()) append("\nActive goal: ").append(st.activeGoal.take(120))
+            if (st.pending.isNotBlank()) append("\nPending: ").append(st.pending.take(120))
+            if (st.lastError.isNotBlank()) append("\nLast issue: ").append(st.lastError.take(120))
+          }
+        }
+        c4.addView(tv(summary, 12f, SUB))
+        val lp1 = LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8) }
+        c4.addView(btn("Clear chat history", SURF2) {
+          AlertDialog.Builder(this).setMessage("Delete all saved chats? Learned memory and shop data stay.").setPositiveButton("Delete") { _, _ -> Bus.clear(); Bus.add("system", "Chat history cleared.", true); refresh() }.setNegativeButton("Cancel", null).show()
+        }, lp1)
+        c4.addView(btn("Clear recent session state", SURF2) {
+          AlertDialog.Builder(this).setMessage("Clear recent session state? This removes active/pending session continuity but keeps chat history.").setPositiveButton("Clear") { _, _ ->
+            try { Db.get(this).sessionStateClear(true) } catch (_: Exception) {}
+            Bus.add("system", "Recent session state cleared.", true); toast("Recent session state cleared"); refresh()
+          }.setNegativeButton("Cancel", null).show()
+        }, lp1)
+      }
+    ))
+
+    // Footer
+    if (settingsSearchQuery.isBlank() && settingsCategory == "All") {
+      val c5 = card(root); c5.gravity = Gravity.CENTER_HORIZONTAL; c5.background = bg(SURF, 20)
+      val img = ImageView(this); img.setImageResource(R.drawable.logo_full)
+      c5.addView(img, LinearLayout.LayoutParams(dp(120), dp(120)))
+      c5.addView(tv("Saara AI Agent", 16f, TXT, true).apply { gravity = Gravity.CENTER })
+      c5.addView(tv("Your on-device assistant settings, organized and ready.", 12f, SUB).apply { gravity = Gravity.CENTER })
     }
-
-    feature(root, "Confirm before calls", "Ask before placing calls.", "confirm_calls", true, { true }, "", {})
-    feature(root, "Confirm before SMS/messages", "Ask before sending SMS/WhatsApp/Telegram/replies.", "confirm_messages", true, { true }, "", {})
-    feature(root, "Offline/503 fallback retry", "Auto-retry transient network/503 errors with backoff and queue pending tasks.", "f_offline_retry", true, { true }, "", {})
   }
 
   private fun buildAutomation(): View {
@@ -1252,197 +1402,104 @@ class MainActivity : AppCompatActivity() {
 
   private fun addSettingsUpdater(u: () -> Unit) { settingsUpdaters.add(u); updaters.add(u) }
 
-  private fun rebuildSettings(force: Boolean = false) {
+  private fun settingsCatAllowed(cat: String): Boolean = settingsCategory == "All" || settingsCategory == cat
+
+  private fun settingsQueryMatch(vararg parts: String?): Boolean {
+    val q = settingsSearchQuery.trim().lowercase(Locale.getDefault())
+    if (q.isBlank()) return true
+    return parts.any { it?.lowercase(Locale.getDefault())?.contains(q) == true }
+  }
+
+  private fun rebuildSettings(force: Boolean = false, keepScroll: Boolean = true) {
     val now = SystemClock.elapsedRealtime()
     if (!force && now - lastSettingsRebuild < 1200L) return
-    val root = settingsRoot ?: return
+    val content = settingsContent ?: return
     lastSettingsRebuild = now
     val y = settingsScroll?.scrollY ?: 0
     updaters.removeAll { settingsUpdaters.contains(it) }
     settingsUpdaters.clear()
-    root.removeAllViews()
-    heading(root, "Settings")
-    addFeatures(root)
-    addSettingsSections(root)
-    settingsScroll?.post { settingsScroll?.scrollTo(0, y) }
+    content.removeAllViews()
+    addFeatures(content)
+    if (settingsSearchQuery.isNotBlank() || settingsCategory != "All") {
+      var hasVisible = false
+      for (i in 0 until content.childCount) if (content.getChildAt(i).visibility == View.VISIBLE) { hasVisible = true; break }
+      if (!hasVisible) {
+        val c = card(content)
+        c.addView(tv("No settings found", 16f, bold = true))
+        c.addView(tv("Try a different search or category filter.", 13f, SUB))
+      }
+    }
+    settingsScroll?.post { settingsScroll?.scrollTo(0, if (keepScroll) y else 0) }
   }
 
   private fun buildSettings(): View {
     val (sv, root) = page()
     settingsScroll = sv
     settingsRoot = root
-    rebuildSettings()
+    heading(root, "Settings")
+    root.addView(tv("Search and filter all settings instantly.", 13f, SUB))
+
+    val searchCard = card(root)
+    val search = edit("Search settings (wake, model, reply, clipboard, memory...)")
+    search.setSingleLine(true)
+    search.imeOptions = EditorInfo.IME_ACTION_DONE
+    search.setText(settingsSearchQuery)
+    search.setSelection(search.text?.length ?: 0)
+    search.doAfterTextChanged {
+      val q = it?.toString() ?: ""
+      if (q != settingsSearchQuery) {
+        settingsSearchQuery = q
+        rebuildSettings(force = true, keepScroll = false)
+      }
+    }
+    settingsSearchInput = search
+    searchCard.addView(search)
+
+    val chipsRow = LinearLayout(this); chipsRow.orientation = LinearLayout.HORIZONTAL
+    settingsCategoryChips.clear()
+    for (cat in settingsCategoryOrder) {
+      val ch = chip(cat) {
+        if (settingsCategory != cat) {
+          settingsCategory = cat
+          paintSettingsCategoryChips()
+          rebuildSettings(force = true, keepScroll = false)
+        }
+      }
+      val lp = LinearLayout.LayoutParams(-2, -2); lp.rightMargin = dp(8); lp.bottomMargin = dp(4)
+      chipsRow.addView(ch, lp)
+      settingsCategoryChips[cat] = ch
+    }
+    val hs = HorizontalScrollView(this); hs.isHorizontalScrollBarEnabled = false
+    hs.addView(chipsRow)
+    val hslp = LinearLayout.LayoutParams(-1, -2); hslp.topMargin = dp(10)
+    searchCard.addView(hs, hslp)
+    paintSettingsCategoryChips()
+
+    settingsContent = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+    root.addView(settingsContent, LinearLayout.LayoutParams(-1, -2))
+    rebuildSettings(force = true)
     return sv
   }
 
-  private fun addSettingsSections(root: LinearLayout) {
-
-    // wake phrases & session timeout
-    val cw = card(root)
-    cw.addView(tv("Wake phrases & session", 16f, bold = true))
-    cw.addView(tv("Saara listens continuously but ignores speech until a wake phrase is heard. After activation, follow-up commands work without repeating the wake phrase until the session times out.", 12f, SUB))
-    val pset = Prefs.plain(this)
-    val wakeList = LinearLayout(this); wakeList.orientation = LinearLayout.VERTICAL
-    fun renderWakePhrases() {
-      wakeList.removeAllViews()
-      val phrases = VoiceService.loadWakePhrases(Prefs.plain(this))
-      for ((idx, ph) in phrases.withIndex()) {
-        val row = LinearLayout(this); row.gravity = Gravity.CENTER_VERTICAL
-        row.addView(tv(ph, 14f), LinearLayout.LayoutParams(0, -2, 1f))
-        val del = tv("Remove", 12f, BAD); del.setPadding(dp(10), dp(6), dp(0), dp(6))
-        del.setOnClickListener {
-          val cur = VoiceService.loadWakePhrases(Prefs.plain(this))
-          if (idx in cur.indices) { cur.removeAt(idx); val e = Prefs.plain(this).edit(); VoiceService.saveWakePhrases(e, cur); e.apply(); renderWakePhrases(); VoiceService.instance?.refreshWakeConfig(); toast("Wake phrase removed") }
-        }
-        row.addView(del)
-        wakeList.addView(row)
-      }
-      if (phrases.isEmpty()) wakeList.addView(tv("No wake phrases set (defaults will be used).", 12f, SUB))
+  private fun paintSettingsCategoryChips() {
+    for ((cat, v) in settingsCategoryChips) {
+      val sel = cat == settingsCategory
+      v.background = bg(if (sel) ACC2 else SURF2, 18)
+      v.setTextColor(if (sel) Color.WHITE else TXT)
     }
-    renderWakePhrases()
-    cw.addView(wakeList)
-    val addRow = LinearLayout(this); addRow.gravity = Gravity.CENTER_VERTICAL
-    val addIn = edit("Add wake phrase (e.g. okay saara)"); addIn.setSingleLine(true)
-    val addBtn = btn("Add", ACC2) {
-      val v = addIn.text.toString().trim()
-      if (v.isNotEmpty()) { val cur = VoiceService.loadWakePhrases(Prefs.plain(this)); if (cur.none { it.equals(v, true) }) cur.add(v); val e = Prefs.plain(this).edit(); VoiceService.saveWakePhrases(e, cur); e.apply(); addIn.text.clear(); renderWakePhrases(); VoiceService.instance?.refreshWakeConfig(); toast("Wake phrase added") }
-    }
-    addRow.addView(addIn, LinearLayout.LayoutParams(0, -2, 1f))
-    addRow.addView(addBtn, LinearLayout.LayoutParams(-2, -2))
-    cw.addView(addRow)
-    cw.addView(btn("Reset default wake phrases", SURF2) {
-      val e = Prefs.plain(this).edit(); VoiceService.saveWakePhrases(e, VoiceService.DEFAULT_WAKE_PHRASES); e.apply(); renderWakePhrases(); VoiceService.instance?.refreshWakeConfig(); toast("Defaults restored")
-    }, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8) })
-    val timeoutTitle = tv("", 14f, TXT)
-    val timeoutSeek = SeekBar(this); timeoutSeek.max = 999 // 0-999 seconds (0 = off)
-    timeoutSeek.progress = Prefs.plain(this).getInt(VoiceService.PREF_SESSION_TIMEOUT_SEC, VoiceService.DEFAULT_SESSION_TIMEOUT_SEC).coerceIn(0, 999)
-    val timeoutBtn = tv("", 13f, Color.WHITE, true)
-    fun paintTimeout() {
-      val on = Prefs.plain(this).getBoolean(VoiceService.PREF_SESSION_TIMEOUT_ENABLED, true)
-      val sec = timeoutSeek.progress
-      val effectiveOff = !on || sec <= 0
-      timeoutBtn.text = if (effectiveOff) "Turn ON session timeout" else "Turn OFF session timeout"
-      timeoutBtn.background = bg(if (!effectiveOff) ACC2 else SURF2, 18)
-      timeoutBtn.setPadding(dp(14), dp(8), dp(14), dp(8))
-      timeoutSeek.alpha = if (!effectiveOff) 1f else 0.45f
-      timeoutTitle.text = if (effectiveOff) "Session timeout: OFF (0–999s). Active session stays on until you stop/mute Saara." else "Session timeout: ${sec}s (0–999). After this silence, wake phrase is required again."
-    }
-    paintTimeout()
-    timeoutBtn.setOnClickListener {
-      val curOn = Prefs.plain(this).getBoolean(VoiceService.PREF_SESSION_TIMEOUT_ENABLED, true) && timeoutSeek.progress > 0
-      if (curOn) {
-        Prefs.plain(this).edit().putBoolean(VoiceService.PREF_SESSION_TIMEOUT_ENABLED, false).apply()
-        toast("Session timeout OFF")
-      } else {
-        val sec = if (timeoutSeek.progress <= 0) VoiceService.DEFAULT_SESSION_TIMEOUT_SEC else timeoutSeek.progress
-        timeoutSeek.progress = sec
-        Prefs.plain(this).edit().putBoolean(VoiceService.PREF_SESSION_TIMEOUT_ENABLED, true).putInt(VoiceService.PREF_SESSION_TIMEOUT_SEC, sec).apply()
-        toast("Session timeout ON")
-      }
-      paintTimeout(); VoiceService.instance?.refreshWakeConfig()
-    }
-    timeoutSeek.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-      override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
-        if (fromUser) {
-          val enabled = progress > 0
-          Prefs.plain(this@MainActivity).edit().putInt(VoiceService.PREF_SESSION_TIMEOUT_SEC, progress).putBoolean(VoiceService.PREF_SESSION_TIMEOUT_ENABLED, enabled).apply()
-          paintTimeout(); VoiceService.instance?.refreshWakeConfig()
-        }
-      }
-      override fun onStartTrackingTouch(seekBar: SeekBar?) {}
-      override fun onStopTrackingTouch(seekBar: SeekBar?) { toast("Session timeout saved") }
-    })
-    val tlp = LinearLayout.LayoutParams(-1, -2); tlp.topMargin = dp(12)
-    cw.addView(timeoutTitle, tlp); cw.addView(timeoutBtn, LinearLayout.LayoutParams(-2, -2).apply { topMargin = dp(8) }); cw.addView(timeoutSeek)
-
-    // language priority
-    val cl = card(root)
-    cl.addView(tv("Language priority", 16f, bold = true))
-    cl.addView(tv("First-priority languages: Bengali, Hindi, English. Pick how Saara should speak by default.", 12f, SUB))
-    val opts = listOf("auto" to "Auto", "bn" to "বাংলা", "hi" to "हिन्दी", "en" to "English", "hinglish" to "Hinglish")
-    val chips = HashMap<String, TextView>()
-    val paint = {
-      val cur = Prefs.plain(this).getString("lang", "auto")
-      for ((k, v) in chips) { v.background = bg(if (k == cur) ACC2 else SURF2, 18); v.setTextColor(if (k == cur) Color.WHITE else TXT) }
-    }
-    val row = LinearLayout(this); row.setPadding(0, dp(10), 0, 0)
-    for ((k, l) in opts) {
-      val ch = chip(l) { Prefs.plain(this).edit().putString("lang", k).apply(); paint(); toast("Saved. Stop and Start Saara to apply.") }
-      chips[k] = ch; val lp = LinearLayout.LayoutParams(-2, -2); lp.rightMargin = dp(6); row.addView(ch, lp)
-    }
-    val hs = HorizontalScrollView(this); hs.isHorizontalScrollBarEnabled = false; hs.addView(row); cl.addView(hs); paint()
-
-    // gemini
-    val c3 = card(root)
-    c3.addView(tv("Gemini connection", 16f, bold = true))
-    val saved = !(Prefs.secure(this).getString("apiKey", "") ?: "").isBlank()
-    val key = edit(if (saved) "API key saved ✓ (type a new one to replace)" else "Paste Gemini API key", true)
-    val model = edit("Model"); model.setText(Prefs.plain(this).getString("model", "gemini-3.1-flash-live-preview"))
-    var voiceName = Prefs.plain(this).getString("voice", "Aoede") ?: "Aoede"
-    c3.addView(key); c3.addView(tv("Live model", 12f, SUB)); c3.addView(model)
-    val pick = btn("Pick model from list", SURF2) {
-      val all = (MODELS + fetchedModels).distinct()
-      AlertDialog.Builder(this).setTitle("Live models").setItems(all.toTypedArray()) { _, w -> model.setText(all[w]) }.show()
-    }
-    val fetch = btn("🔄  Fetch live models for my key", SURF2) {
-      val k = key.text.toString().trim().ifBlank { Prefs.secure(this).getString("apiKey", "") ?: "" }
-      if (k.isBlank()) toast("Add your API key first") else fetchModels(k) { list -> if (list.isEmpty()) toast("No live models found (or key invalid)") else { fetchedModels.clear(); fetchedModels.addAll(list); toast("${list.size} model(s) found. Tap 'Pick model from list'.") } }
-    }
-    val lp1 = LinearLayout.LayoutParams(-1, -2); lp1.topMargin = dp(8)
-    c3.addView(pick, lp1); c3.addView(fetch, lp1)
-    val voiceBtn = btn("Voice: $voiceName  ▾", SURF2) {}
-    voiceBtn.setOnClickListener { AlertDialog.Builder(this).setTitle("Voice").setItems(VOICES.toTypedArray()) { _, w -> voiceName = VOICES[w]; voiceBtn.text = "Voice: $voiceName  ▾" }.show() }
-    c3.addView(voiceBtn, lp1)
-    val sb = btn("Save settings") {
-      Prefs.plain(this).edit().putString("model", model.text.toString().trim()).putString("voice", voiceName).apply()
-      if (key.text.isNotBlank()) { Prefs.secure(this).edit().putString("apiKey", key.text.toString().trim()).apply(); key.text.clear(); key.hint = "API key saved ✓ (type a new one to replace)" }
-      toast("Saved. Stop and Start Saara to apply.")
-    }
-    c3.addView(sb, lp1)
-    val kb = btn("Get Free API Key / Muft API Key Prapt Karein", SURF2) { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://aistudio.google.com/app/apikey"))) }
-    c3.addView(kb, lp1)
-
-    // data
-    val c4 = card(root)
-    c4.addView(tv("Chat history & session continuity", 16f, bold = true))
-    c4.addView(tv("Old chats stay on-device and load as you scroll up. Recent session context can resume after reconnect/restart.", 12f, SUB))
-    val contRow = LinearLayout(this); contRow.gravity = Gravity.CENTER_VERTICAL
-    contRow.addView(tv("Resume recent session/task", 14f, TXT), LinearLayout.LayoutParams(0, -2, 1f))
-    val contSw = Switch(this); contSw.isChecked = Prefs.on(this, "f_session_continuity", true)
-    contSw.setOnCheckedChangeListener { _, v -> Prefs.plain(this).edit().putBoolean("f_session_continuity", v).apply(); toast(if (v) "Session continuity ON" else "Session continuity OFF") }
-    contRow.addView(contSw); c4.addView(contRow)
-    val st = try { Db.get(this).sessionState() } catch (_: Exception) { null }
-    val recent = try { Db.get(this).chatRecent(8) } catch (_: Exception) { emptyList() }
-    val summary = buildString {
-      append("Saved turns: ").append(recent.size).append(" recent loaded")
-      if (st != null && st.updatedTs > 0) {
-        append("\nStatus: ").append(st.status)
-        if (st.activeGoal.isNotBlank()) append("\nActive goal: ").append(st.activeGoal.take(120))
-        if (st.pending.isNotBlank()) append("\nPending: ").append(st.pending.take(120))
-        if (st.lastError.isNotBlank()) append("\nLast issue: ").append(st.lastError.take(120))
-      }
-    }
-    c4.addView(tv(summary, 12f, SUB))
-    val clr = btn("Clear chat history", SURF2) {
-      AlertDialog.Builder(this).setMessage("Delete all saved chats? Learned memory and shop data stay.").setPositiveButton("Delete") { _, _ -> Bus.clear(); Bus.add("system", "Chat history cleared.", true); refresh() }.setNegativeButton("Cancel", null).show()
-    }
-    c4.addView(clr, lp1)
-    val clrSession = btn("Clear recent session state", SURF2) {
-      AlertDialog.Builder(this).setMessage("Clear recent session state? This removes active/pending session continuity but keeps chat history.").setPositiveButton("Clear") { _, _ ->
-        try { Db.get(this).sessionStateClear(true) } catch (_: Exception) {}
-        Bus.add("system", "Recent session state cleared.", true)
-        toast("Recent session state cleared")
-        refresh()
-      }.setNegativeButton("Cancel", null).show()
-    }
-    c4.addView(clrSession, lp1)
-
-    // about
-    val c5 = card(root); c5.gravity = Gravity.CENTER_HORIZONTAL
-    val img = ImageView(this); img.setImageResource(R.drawable.logo_full)
-    c5.addView(img, LinearLayout.LayoutParams(dp(120), dp(120)))
-    val ab = tv("Saara AI Agent", 14f, SUB); ab.gravity = Gravity.CENTER; c5.addView(ab)
   }
+
+  private fun filteredSection(parent: LinearLayout, cat: String, vararg keywords: String, build: (LinearLayout) -> Unit) {
+    if (!settingsCatAllowed(cat)) return
+    if (!settingsQueryMatch(*keywords)) return
+    val tmp = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+    build(tmp)
+    while (tmp.childCount > 0) {
+      val v = tmp.getChildAt(0); tmp.removeViewAt(0); parent.addView(v)
+    }
+  }
+
+
 
   private fun fetchModels(key: String, done: (List<String>) -> Unit) {
     Thread {
