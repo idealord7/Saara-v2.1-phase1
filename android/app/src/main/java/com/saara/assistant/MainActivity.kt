@@ -697,12 +697,17 @@ class MainActivity : AppCompatActivity() {
 
     uv.addView(btn("Test voice match now", SURF2) {
       if (!UserVoiceProfile.exists(this)) { toast("Enroll your voice first"); return@btn }
+      val perm = ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
+      if (perm == PackageManager.PERMISSION_DENIED) { toast("Microphone permission denied"); return@btn }
       val dlg = AlertDialog.Builder(this).setTitle("Voice Match Test").setMessage("Recording ~3s… speak now.").setCancelable(false).setNegativeButton("Close", null).show()
+      val vs = VoiceService.instance
       Thread {
-        val pct = VoiceEnrollment.quickCheck(applicationContext)
+        try { vs?.suspendWakeForEnrollment(); Thread.sleep(450) } catch (_: Exception) {}
+        val (pct, err) = VoiceEnrollment.quickCheck(applicationContext)
+        try { vs?.resumeWakeAfterEnrollment() } catch (_: Exception) {}
         runOnUiThread {
           val th = UserVoiceProfile.threshold(this)
-          val msg = if (pct == null) "Could not capture/check voice. Check mic permission."
+          val msg = if (pct == null) "Could not capture/check voice: ${err ?: "unknown error"}"
           else "Match: ${"%.1f".format(pct)}% · Threshold: ${th}% · " + if (pct >= th) "ACCEPT" else "REJECT"
           if (dlg.isShowing) { dlg.setMessage(msg); dlg.setCancelable(true) }
           Bus.add("system", "Voice match test: $msg", true)

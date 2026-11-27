@@ -179,8 +179,22 @@ class VoiceService : Service() {
 
   fun enrollUserVoice(samples: Int = 3, onProgress: (VoiceEnrollment.Progress) -> Unit = {}, onDone: (VoiceEnrollment.Result) -> Unit = {}) {
     Thread {
-      suspendWakeForEnrollment()
       try {
+        val perm = ContextCompat.checkSelfPermission(applicationContext, Manifest.permission.RECORD_AUDIO)
+        if (perm == PackageManager.PERMISSION_DENIED) {
+          val res = VoiceEnrollment.Result(false, "Microphone permission denied. Allow Microphone permission and try again.")
+          Bus.add("system", "Voice enrollment failed: ${res.message}", true)
+          main.post { onDone(res) }
+          return@Thread
+        }
+        main.post { suspendWakeForEnrollment() }
+        // Wait for active capture/wake engine to release mic hardware.
+        var waited = 0
+        while (waited < 1500 && (captureRunning || audioRecord != null)) {
+          try { Thread.sleep(80) } catch (_: Exception) {}
+          waited += 80
+        }
+        try { Thread.sleep(150) } catch (_: Exception) {}
         val res = VoiceEnrollment.enroll(applicationContext, samples, onProgress)
         if (res.ok) {
           val th = UserVoiceProfile.threshold(applicationContext)
@@ -190,10 +204,11 @@ class VoiceService : Service() {
         }
         main.post { onDone(res) }
       } catch (e: Exception) {
-        Bus.add("system", "Voice enrollment error: ${e.message}", true)
-        main.post { onDone(VoiceEnrollment.Result(false, e.message ?: "Enrollment failed")) }
+        val msg = e.message ?: e.javaClass.simpleName
+        Bus.add("system", "Voice enrollment error: $msg", true)
+        main.post { onDone(VoiceEnrollment.Result(false, msg)) }
       } finally {
-        resumeWakeAfterEnrollment()
+        main.post { resumeWakeAfterEnrollment() }
       }
     }.apply { name = "saara-voice-enroll"; isDaemon = true; start() }
   }
@@ -286,12 +301,10 @@ class VoiceService : Service() {
         }
         refreshBubble()
       } else {
-        isSaraActive = false
-        pendingWakeNoPhrase = false
-        main.removeCallbacks(sessionTimer)
-        stopIdleWakeEngine()
+        // Mute/unmute must not close session; keep session context continuous.
+        pauseSession(announce = false)
         stopCapture()
-        Bus.add("system", "Microphone muted.", true)
+        Bus.add("system", "Microphone muted. Session context preserved.", true)
       }
       refreshNotif(); Bus.ping()
     }
@@ -316,32 +329,74 @@ class VoiceService : Service() {
     if (isSaraActive) resetSessionTimer()
   }
 
-  fun endSession() {
+  /** Deactivates active listening but keeps session context/memory continuous. */
+  fun pauseSession(announce: Boolean = false) {
     if (!isSaraActive) return
     isSaraActive = false
     main.removeCallbacks(sessionTimer)
-    noteSession(status = "waiting_wake", pending = lastTaskNote.ifBlank { "Resume previous conversation if user returns." })
-    Bus.add("system", "Session ended. Say a wake phrase to start again.", true)
+    noteSession(status = "paused", pending = lastTaskNote.ifBlank { "Resume previous conversation when active again." })
+    if (announce) Bus.add("system", "Session paused. Say a wake phrase to continue.", true)
     maybeStartIdleWakeEngine()
   }
 
+  /** Explicit session close/reset. Only call for explicit UI stop/off or explicit voice close command. */
+  fun closeSession(reason: String = "explicit", announce: Boolean = true) {
+    isSaraActive = false
+    pendingWakeNoPhrase = false
+    pendingCommand = null
+    lastTaskNote = ""
+    main.removeCallbacks(sessionTimer)
+    stopSpeaking()
+    try { Db.get(this).sessionStateClear(keepSessionId = true) } catch (_: Exception) {}
+    noteSession(status = "closed", activeGoal = "", lastStep = "session closed ($reason)", pending = "", lastError = "")
+    if (announce) Bus.add("system", "Session closed.", true)
+    if (running && !callActive && micEnabled) maybeStartIdleWakeEngine()
+  }
+
+  private fun isExplicitCloseCommand(text: String): Boolean {
+    val n = normForCompare(text)
+    if (n.isBlank()) return false
+    val patterns = listOf(
+      Regex("\b(close|end|stop|finish|terminate)\s+(this\s+)?(current\s+)?session\b"),
+      Regex("\b(session)\s+(close|closed|end|ended|band|khatam)\b"),
+      Regex("\b(সেশন)\s*(ক্লোজ|বন্ধ|শেষ)\s*(হও|করো|কর|করুন)?\b"),
+      Regex("\b(सेशन|सत्र)\s*(क्लोज|बंद|समाप्त|खत्म)\s*(हो|करो|कर|कीजिए)?\b")
+    )
+    return patterns.any { it.containsMatchIn(n) || it.containsMatchIn(text) }
+  }
+
+  fun endSession() { pauseSession(announce = false) }
+
   private fun onSessionTimeout() {
     if (!running || !isSaraActive) return
+    // Do not close/wipe session on timeout; keep context continuous and only pause listening.
     isSaraActive = false
-    noteSession(status = "timeout", lastError = "session timeout", pending = lastTaskNote.ifBlank { "Resume previous conversation on next wake." })
-    Bus.add("system", "Session ended. Say a wake phrase to start again.", true)
+    main.removeCallbacks(sessionTimer)
+    noteSession(status = "timeout_paused", pending = lastTaskNote.ifBlank { "Resume previous conversation on next wake." })
+    Bus.add("system", "Listening paused after timeout. Say a wake phrase to continue the same session.", true)
     maybeStartIdleWakeEngine()
   }
 
   fun suspendWakeForEnrollment() {
-    main.post { enrolling = true; stopIdleWakeEngine(); stopCapture(); if (running) Bus.add("system", "Voice capture paused for enrollment.", true) }
+    if (Looper.myLooper() == Looper.getMainLooper()) {
+      enrolling = true
+      stopIdleWakeEngine()
+      stopCapture()
+      if (running) Bus.add("system", "Voice capture paused for enrollment.", true)
+    } else {
+      main.post { suspendWakeForEnrollment() }
+    }
   }
 
   fun resumeWakeAfterEnrollment() {
-    main.post {
+    val r = Runnable {
       enrolling = false
-      if (running && ready && !callActive && micEnabled) { ensureCaptureStarted(); maybeStartIdleWakeEngine() }
+      if (running && ready && !callActive && micEnabled) {
+        ensureCaptureStarted()
+        if (!isSaraActive) maybeStartIdleWakeEngine() else Bus.setStatus("Listening")
+      }
     }
+    if (Looper.myLooper() == Looper.getMainLooper()) r.run() else main.post(r)
   }
 
   fun refreshCalls() {
@@ -532,11 +587,17 @@ class VoiceService : Service() {
     val cleaned = extractWakeCommand(text)?.takeIf { it.isNotBlank() } ?: text.trim()
     if (cleaned.isBlank()) { resetSessionTimer(); return }
     armScreenAuto(300_000L)
+    if (isExplicitCloseCommand(cleaned)) {
+      Bus.add("you", cleaned, true)
+      TaskControl.clear(); stopSpeaking()
+      closeSession(reason = "voice_command", announce = true)
+      return
+    }
     Bus.add("you", cleaned, true)
     if (TaskControl.isStop(cleaned)) {
       TaskControl.clear(); stopSpeaking()
-      noteSession(status = "stopped", lastStep = "user requested stop", pending = "", lastError = "")
-      Bus.add("system", "Stopped the current task.", true)
+      noteSession(status = "stopped_task", lastStep = "user requested stop", pending = lastTaskNote.ifBlank { "" }, lastError = "")
+      Bus.add("system", "Stopped the current task. Session is still active.", true)
       resetSessionTimer(); return
     }
     lastTaskNote = cleaned.take(220)
@@ -792,7 +853,7 @@ class VoiceService : Service() {
     val explicitTrigger = wakeNoPhrase || cmd != null
     if (i?.action != "STOP") bubbleDismissedByUser = false
     when (i?.action) {
-      "STOP" -> { stopSelf(); return START_NOT_STICKY }
+      "STOP" -> { closeSession(reason = "service_stop", announce = false); stopSelf(); return START_NOT_STICKY }
       ACTION_WAKE -> { if (running && ready && micEnabled && !callActive) { ensureCaptureStarted(); startSession(); Bus.add("system", "Woke up from device button.", true) }; if (!running) { /* fall through to start then wake */ } else { refreshBubble(); return START_STICKY } }
       "CAM_START", "CAM_STOP", "SCREEN_START", "SCREEN_CAPTURE", "SCREEN_STOP" -> { if (!running) { stopSelf(); return START_NOT_STICKY }; share(i!!); return START_STICKY }
     }
@@ -986,8 +1047,10 @@ class VoiceService : Service() {
     val transient = ModelRouter.isTransientError(msg)
     val retryEnabled = Prefs.on(this, "f_offline_retry", true)
     val autoSwitch = ModelRouter.autoFallbackEnabled(this)
+    // Keep session context continuous across disconnect/reconnect; do not speak stale content.
     noteSession(status = if (transient) "reconnecting" else "disconnected", lastError = msg.take(240), pending = lastTaskNote.ifBlank { "Resume recent conversation when reconnected." })
     Bus.add("system", if (transient && (retryEnabled || autoSwitch)) "$msg — retrying with model fallback." else msg, true)
+    stopSpeaking(); audioQ.clear()
     if (transient && autoSwitch && liveCandidates.isNotEmpty() && liveModelIndex < liveCandidates.lastIndex) {
       val failed = liveModel
       liveModelIndex++
@@ -1060,9 +1123,10 @@ class VoiceService : Service() {
     val m = try { JSONObject(s) } catch (_: Exception) { return }
     if (m.has("setupComplete")) {
       ready = true; retries = 0
+      stopSpeaking(); audioQ.clear() // never replay old audio on connect/reconnect
       Prefs.plain(this).edit().putString("model_last_used", liveModel).putString("model_last_status", "Live model connected: $liveModel").putLong("model_last_status_ts", System.currentTimeMillis()).apply()
       val resumed = try { Db.get(this).sessionState().updatedTs > 0 && System.currentTimeMillis() - Db.get(this).sessionState().updatedTs < 6L * 60 * 60 * 1000 } catch (_: Exception) { false }
-      noteSession(status = if (isSaraActive) "active" else "listening_for_wake", lastError = "")
+      noteSession(status = if (isSaraActive) "active" else "ready", lastError = "")
       val wakeNow = pendingWakeNoPhrase; pendingWakeNoPhrase = false
       val cmd = pendingCommand?.takeIf { it.isNotBlank() }; pendingCommand = null
       if (cmd != null) {
@@ -1071,10 +1135,9 @@ class VoiceService : Service() {
       } else if (wakeNow && micEnabled) {
         startSession()
         Bus.add("system", "Woke up — listening (no wake phrase needed).", true)
-        maybeResumeContext("wake")
       } else {
-        Bus.setStatus("Listening for wake phrase · $liveModel")
-        if (resumed) maybeResumeContext("reconnect")
+        // Silent continuity on connect/reconnect/mute-state transitions; no old-session speech replay.
+        Bus.setStatus(if (isSaraActive) "Listening · $liveModel" else "Listening for wake phrase · $liveModel")
       }
       if (micEnabled) { ensureCaptureStarted(); if (!isSaraActive) maybeStartIdleWakeEngine() } else Bus.add("system", "Gemini connected ($liveModel). Microphone is muted.", true)
     }
@@ -1178,12 +1241,14 @@ class VoiceService : Service() {
     automationReceiver = null
     calls?.stop(); calls = null; callActive = false
     TaskControl.clear(); audioQ.clear()
+    stopSpeaking()
     cam?.stop(); cam = null; Bus.camOn = false
     screen?.stop(); screen = null; Bus.screenOn = false
     ws?.close(1000, null)
     try { track?.release() } catch (_: Exception) {}
     chatHead?.hide(); chatHead = null; overlay?.hide()
-    noteSession(status = "stopped", pending = lastTaskNote.ifBlank { "Resume recent chat on next start." })
+    try { Db.get(this).sessionStateClear(keepSessionId = true) } catch (_: Exception) {}
+    lastTaskNote = ""; pendingCommand = null; pendingWakeNoPhrase = false
     instance = null; Bus.running = false
     Bus.add("system", "Stopped.", true); Bus.setStatus("Stopped")
     super.onDestroy()
