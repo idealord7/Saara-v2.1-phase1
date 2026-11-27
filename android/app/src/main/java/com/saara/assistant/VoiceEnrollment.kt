@@ -30,7 +30,7 @@ object VoiceEnrollment {
     MediaRecorder.AudioSource.DEFAULT,
   )
 
-  private class CaptureFailure(val reason: String)
+  private class CaptureFailure(var reason: String)
 
   fun hasRecordPermission(c: Context): Boolean =
     ContextCompat.checkSelfPermission(c, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
