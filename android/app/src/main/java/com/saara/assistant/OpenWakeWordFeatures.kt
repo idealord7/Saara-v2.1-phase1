@@ -89,33 +89,42 @@ class OpenWakeWordFeatures(private val c: Context) {
   }
 
   private fun createInterpreter(asset: String, expected: IntArray): Interpreter {
-    val opts = Interpreter.Options().setNumThreads(1)
-    // First try: load and allocate as-is.
+    val baseOpts = { Interpreter.Options().setNumThreads(1).apply { try { setUseXNNPACK(false) } catch (_: Exception) {} } }
+    var last: Throwable? = null
+    // Attempt 1: as-is
     try {
-      val i = Interpreter(loadModel(c, asset), opts)
+      val i = Interpreter(loadModel(c, asset), baseOpts())
       try {
         val shape = i.getInputTensor(0).shape()
-        if (!shapeMatches(shape, expected)) {
-          i.resizeInput(0, expected.copyOf())
-        }
+        if (!shapeMatches(shape, expected)) i.resizeInput(0, expected.copyOf())
         i.allocateTensors()
         return i
-      } catch (e: Exception) {
-        runCatching { i.close() }
-        throw e
+      } catch (t: Throwable) {
+        last = t; runCatching { i.close() }
       }
-    } catch (first: Exception) {
-      // Second try: fresh interpreter, resize before allocate.
-      val i = Interpreter(loadModel(c, asset), opts)
+    } catch (t: Throwable) { last = t }
+    // Attempt 2: resize before allocate on fresh interpreter
+    try {
+      val i = Interpreter(loadModel(c, asset), baseOpts())
       try {
         i.resizeInput(0, expected.copyOf())
         i.allocateTensors()
         return i
-      } catch (second: Exception) {
-        runCatching { i.close() }
-        throw RuntimeException("${asset.substringAfterLast('/')}: ${second.message ?: first.message}", second)
+      } catch (t: Throwable) {
+        last = t; runCatching { i.close() }
       }
-    }
+    } catch (t: Throwable) { last = t }
+    // Attempt 3: default options without explicit resize (some models dislike resize)
+    try {
+      val i = Interpreter(loadModel(c, asset), Interpreter.Options().setNumThreads(1))
+      try {
+        i.allocateTensors()
+        return i
+      } catch (t: Throwable) {
+        last = t; runCatching { i.close() }
+      }
+    } catch (t: Throwable) { last = t }
+    throw RuntimeException("${asset.substringAfterLast('/')}: ${last?.message ?: "interpreter init failed"}", last)
   }
 
   /** Feed exactly [CHUNK] samples. Returns a fresh 96-dim embedding once 76 mel frames exist. */
