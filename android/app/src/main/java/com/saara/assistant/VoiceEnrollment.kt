@@ -7,6 +7,7 @@ import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
 import android.os.SystemClock
+import android.util.Log
 import androidx.core.content.ContextCompat
 import kotlin.math.max
 
@@ -161,6 +162,8 @@ object VoiceEnrollment {
           feat = null
           if (vec != null) return vec
           lastReason = captureErr?.takeIf { it.isNotBlank() } ?: lastReason
+          Log.w("VoiceEnrollment", "sample attempt failed: $lastReason")
+          SystemClock.sleep(120)
           // Try next source/rate on empty/timeout/init-like failures.
         } catch (e: Exception) {
           lastReason = "capture error (${sourceName(source)}, ${rate}Hz): ${e.message ?: e.javaClass.simpleName}"
