@@ -82,48 +82,39 @@ class OpenWakeWordFeatures(private val c: Context) {
     mel = createInterpreter(MEL_ASSET, intArrayOf(1, CHUNK + PRE_ROLL))
     try {
       emb = createInterpreter(EMB_ASSET, intArrayOf(1, MEL_WINDOW, MEL_BINS, 1))
-    } catch (e: Exception) {
+    } catch (t: Throwable) {
       runCatching { mel.close() }
-      throw e
+      throw t
     }
   }
 
   private fun createInterpreter(asset: String, expected: IntArray): Interpreter {
-    val baseOpts = { Interpreter.Options().setNumThreads(1).apply { try { setUseXNNPACK(false) } catch (_: Exception) {} } }
     var last: Throwable? = null
-    // Attempt 1: as-is
-    try {
-      val i = Interpreter(loadModel(c, asset), baseOpts())
+
+    fun tryAlloc(opts: Interpreter.Options, resizeBefore: Boolean, resizeAfterMismatch: Boolean): Interpreter? {
+      val i = try { Interpreter(loadModel(c, asset), opts) } catch (t: Throwable) { last = t; return null }
       try {
-        val shape = i.getInputTensor(0).shape()
-        if (!shapeMatches(shape, expected)) i.resizeInput(0, expected.copyOf())
+        if (resizeBefore) i.resizeInput(0, expected.copyOf())
+        val shape = runCatching { i.getInputTensor(0).shape() }.getOrNull()
+        if (!resizeBefore && resizeAfterMismatch && shape != null && !shapeMatches(shape, expected)) {
+          i.resizeInput(0, expected.copyOf())
+        }
         i.allocateTensors()
         return i
       } catch (t: Throwable) {
-        last = t; runCatching { i.close() }
+        last = t
+        runCatching { i.close() }
+        return null
       }
-    } catch (t: Throwable) { last = t }
-    // Attempt 2: resize before allocate on fresh interpreter
-    try {
-      val i = Interpreter(loadModel(c, asset), baseOpts())
-      try {
-        i.resizeInput(0, expected.copyOf())
-        i.allocateTensors()
-        return i
-      } catch (t: Throwable) {
-        last = t; runCatching { i.close() }
-      }
-    } catch (t: Throwable) { last = t }
-    // Attempt 3: default options without explicit resize (some models dislike resize)
-    try {
-      val i = Interpreter(loadModel(c, asset), Interpreter.Options().setNumThreads(1))
-      try {
-        i.allocateTensors()
-        return i
-      } catch (t: Throwable) {
-        last = t; runCatching { i.close() }
-      }
-    } catch (t: Throwable) { last = t }
+    }
+
+    // Safest first: no resize. Resizing some openWakeWord melspectrogram graphs can overflow TF Lite tensor sizing.
+    tryAlloc(Interpreter.Options().setNumThreads(1), resizeBefore = false, resizeAfterMismatch = false)?.let { return it }
+    tryAlloc(Interpreter.Options().setNumThreads(1).apply { try { setUseXNNPACK(false) } catch (_: Exception) {} }, resizeBefore = false, resizeAfterMismatch = false)?.let { return it }
+    // Fallbacks for models that truly need fixed input size.
+    tryAlloc(Interpreter.Options().setNumThreads(1), resizeBefore = false, resizeAfterMismatch = true)?.let { return it }
+    tryAlloc(Interpreter.Options().setNumThreads(1), resizeBefore = true, resizeAfterMismatch = false)?.let { return it }
+
     throw RuntimeException("${asset.substringAfterLast('/')}: ${last?.message ?: "interpreter init failed"}", last)
   }
 
