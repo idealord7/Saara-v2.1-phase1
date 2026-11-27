@@ -115,11 +115,11 @@ class ChatHeadOverlay(
       lp.width = size; lp.height = size
       lp.x = clamp(lp.x, -(size - edgeHidePeek), sw - edgeHidePeek)
       lp.y = clamp(lp.y, dp(24), sh - size - dp(24))
-      val img = bv.getChildAt(0)
-      img?.layoutParams = FrameLayout.LayoutParams(size, size)
-      img?.clipToOutline = true
+      val bg = bv as? ViewGroup
+      bg?.getChildAt(0)?.layoutParams = FrameLayout.LayoutParams(size, size)
+      (bg?.getChildAt(0) as? ImageView)?.clipToOutline = true
       val dotSize = dp(14)
-      bv.getChildAt(1)?.layoutParams = FrameLayout.LayoutParams(dotSize, dotSize, Gravity.BOTTOM or Gravity.END).apply { rightMargin = dp(2); bottomMargin = dp(2) }
+      bg?.getChildAt(1)?.layoutParams = FrameLayout.LayoutParams(dotSize, dotSize, Gravity.BOTTOM or Gravity.END).apply { rightMargin = dp(2); bottomMargin = dp(2) }
       try { wm.updateViewLayout(bv, lp) } catch (_: Exception) {}
       if (Prefs.on(ctx, "bubble_edge_hide", false)) snapToEdge(lp.x, lp.y, hideEdge = true) else { edgeHidden = false; snapToEdge(lp.x, lp.y, hideEdge = false) }
     }
