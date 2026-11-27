@@ -186,9 +186,10 @@ object VoiceEnrollment {
     var pending = 0
     val embeddings = ArrayList<FloatArray>()
     val deadline = SystemClock.elapsedRealtime() + SAMPLE_MS
-    var totalRead = 0
+    var totalRead = 0L
     var readErrors = 0
     var lastReadCode = 0
+    var outProducedTotal = 0L
     // Warmup read
     val warm = ShortArray(chunkSamples)
     try { rec.read(warm, 0, warm.size) } catch (_: Exception) {}
@@ -201,7 +202,8 @@ object VoiceEnrollment {
         SystemClock.sleep(20)
         continue
       }
-      totalRead += n
+      val inStart = totalRead
+      totalRead += n.toLong()
       if (sampleRate == OpenWakeWordFeatures.SAMPLE_RATE) {
         var i = 0
         while (i < n) {
@@ -217,15 +219,13 @@ object VoiceEnrollment {
           }
         }
       } else {
-        var i = 0
-        while (i < n) {
-          // Simple downsample/resample by nearest sample to 16kHz.
-          val srcPos = i.toLong()
-          val dstIndex = ((srcPos * OpenWakeWordFeatures.SAMPLE_RATE) / sampleRate).toInt()
-          // Fill sequentially; approximate by stepping source.
-          target[pending++] = srcBuf[i]
-          val step = max(1, sampleRate / OpenWakeWordFeatures.SAMPLE_RATE)
-          i += step
+        // Nearest-neighbor downsample to 16kHz.
+        while (true) {
+          val srcNeeded = ((outProducedTotal * sampleRate.toLong()) / OpenWakeWordFeatures.SAMPLE_RATE.toLong() - inStart).toInt()
+          if (srcNeeded >= n) break
+          val si = srcNeeded.coerceIn(0, n - 1)
+          target[pending++] = srcBuf[si]
+          outProducedTotal++
           if (pending >= OpenWakeWordFeatures.CHUNK) {
             pending = 0
             val emb = try { features.accept(target) } catch (_: Exception) { null } ?: continue
@@ -235,7 +235,7 @@ object VoiceEnrollment {
         }
       }
     }
-    if (totalRead <= 0) return null to "no audio samples captured (${sourceName(source)}, ${sampleRate}Hz, lastRead=$lastReadCode)"
+    if (totalRead <= 0L) return null to "no audio samples captured (${sourceName(source)}, ${sampleRate}Hz, lastRead=$lastReadCode)"
     if (embeddings.size < WINDOW) return null to "captured audio but not enough speech embeddings (${embeddings.size}/$WINDOW, read=$totalRead, ${sourceName(source)}, ${sampleRate}Hz)"
     val tail = embeddings.takeLast(WINDOW)
     return WakeVerifier.pool(tail) to null
