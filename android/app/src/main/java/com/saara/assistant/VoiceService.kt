@@ -796,6 +796,14 @@ class VoiceService : Service() {
     if (hasAny("detect supported models","detect models","refresh models")) { speakLocal(localControl(JSONObject().put("action","detect_supported_models"))); return true }
     if (hasAny("save model settings")) { speakLocal(localControl(JSONObject().put("action","save_model_settings"))); return true }
 
+    if (hasAny("clean duplicates","remove duplicates","merge duplicates")) { speakLocal(localControl(JSONObject().put("action","clean_duplicates").put("confirmed", TaskControl.isApproved()))); return true }
+    if (hasAny("follow my steps","record my actions","record my steps","start recording steps","start recording behavior","start behavior recording")) { speakLocal(localControl(JSONObject().put("action","start_behavior_recording"))); return true }
+    if (hasAny("stop recording steps","stop recording behavior","stop behavior recording","stop recording my steps")) { speakLocal(localControl(JSONObject().put("action","stop_behavior_recording"))); return true }
+    Regex("""\b(run|replay|repeat)\b.*\b(behavior|steps?)\b(?:\s+(?:for|named|called))?\s*(.+)?""", RegexOption.IGNORE_CASE).find(raw)?.let { m ->
+      val name = m.groupValues[3].trim().trim('"','\'','.')
+      if (name.isNotBlank()) { speakLocal(localControl(JSONObject().put("action","replay_behavior").put("name", name))); return true }
+    }
+
     return false
   }
 

@@ -18,7 +18,7 @@ import kotlin.math.abs
 class SaaraAccessibility : AccessibilityService() {
   companion object { @Volatile var instance: SaaraAccessibility? = null }
   override fun onServiceConnected() { instance = this }
-  override fun onAccessibilityEvent(e: AccessibilityEvent?) {}
+  override fun onAccessibilityEvent(e: AccessibilityEvent?) { try { BehaviorRecorder.onAccessibilityEvent(e) } catch (_: Exception) {} }
   override fun onInterrupt() {}
   override fun onUnbind(intent: android.content.Intent?): Boolean { instance = null; return super.onUnbind(intent) }
 

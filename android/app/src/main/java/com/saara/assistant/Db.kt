@@ -15,9 +15,10 @@ data class ReplyRule(val id: Long, val name: String, val enabled: Boolean, val a
 data class AutoRule(val id: Long, val name: String, val enabled: Boolean, val trigger: String, val condition: String, val action: String, val cooldownMs: Long, val lastFiredMs: Long, val ts: Long)
 data class MemoryFact(val id: Long, val cat: String, val text: String, val ts: Long, val lastUsed: Long = 0L, val pinned: Boolean = false, val source: String = "")
 data class SessionState(val sessionId: String, val status: String, val activeGoal: String, val lastStep: String, val pending: String, val lastError: String, val updatedTs: Long)
+data class Behavior(val id: Long, val name: String, val stepsJson: String, val ts: Long, val updatedTs: Long)
 
 /** Local SQLite store: chat history, learned facts, shop ledger, usage stats, scheduled tasks, task steps. */
-class Db private constructor(c: Context) : SQLiteOpenHelper(c.applicationContext, "saara.db", null, 12) {
+class Db private constructor(c: Context) : SQLiteOpenHelper(c.applicationContext, "saara.db", null, 13) {
   private val appCtx = c.applicationContext
   companion object {
     @Volatile private var inst: Db? = null
@@ -33,6 +34,7 @@ class Db private constructor(c: Context) : SQLiteOpenHelper(c.applicationContext
     d.execSQL("CREATE TABLE tasks(id INTEGER PRIMARY KEY AUTOINCREMENT, whenms INTEGER, text TEXT, repeatms INTEGER)")
     createTaskSteps(d)
     createSessionTables(d)
+    createBehaviorTables(d)
   }
   override fun onUpgrade(d: SQLiteDatabase, o: Int, n: Int) {
     if (o < 2) {
@@ -75,6 +77,11 @@ class Db private constructor(c: Context) : SQLiteOpenHelper(c.applicationContext
     if (o < 12) {
       try { d.execSQL("ALTER TABLE reply_rules ADD COLUMN reply_data TEXT DEFAULT ''") } catch (_: Exception) {}
     }
+    if (o < 13) createBehaviorTables(d)
+  }
+
+  private fun createBehaviorTables(d: SQLiteDatabase) {
+    d.execSQL("CREATE TABLE IF NOT EXISTS behaviors(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, steps_json TEXT, ts INTEGER, updated_ts INTEGER)")
   }
   private fun createTaskSteps(d: SQLiteDatabase) {
     d.execSQL("CREATE TABLE IF NOT EXISTS task_steps(id INTEGER PRIMARY KEY AUTOINCREMENT, goal TEXT, tool TEXT, args TEXT, result TEXT, ok INTEGER, ts INTEGER)")
@@ -191,7 +198,7 @@ class Db private constructor(c: Context) : SQLiteOpenHelper(c.applicationContext
     val now = System.currentTimeMillis()
     val d = writableDatabase
     categoryAdd(category)
-    val existing = facts().firstOrNull { it.cat == category && (it.text.equals(t, true) || factHead(it.text) == factHead(t)) }
+    val existing = facts().firstOrNull { it.cat == category && (it.text.equals(t, true) || factHead(it.text) == factHead(t) || isNearDuplicate(it.text, t)) }
     if (existing != null) {
       val newer = now >= existing.ts
       val merged = if (newer || existing.text.length < 24) t else existing.text
@@ -353,6 +360,12 @@ class Db private constructor(c: Context) : SQLiteOpenHelper(c.applicationContext
   }
   fun ruleAdd(text: String): Long {
     val t = text.trim().take(500); if (t.isEmpty()) return -1L
+    val existing = rules().firstOrNull { isNearDuplicate(it.text, t) }
+    if (existing != null) {
+      val merged = if (t.length >= existing.text.length) t else existing.text
+      writableDatabase.update("rules", ContentValues().apply { put("text", merged); put("enabled", if (existing.enabled) 1 else 0); put("ts", System.currentTimeMillis()) }, "id=?", arrayOf(existing.id.toString()))
+      return existing.id
+    }
     val ts = System.currentTimeMillis()
     return writableDatabase.insert("rules", null, ContentValues().apply { put("text", t); put("enabled", 1); put("ts", ts) })
   }
@@ -466,6 +479,106 @@ class Db private constructor(c: Context) : SQLiteOpenHelper(c.applicationContext
       while (it.moveToNext()) out.add(ActionVerification(it.getLong(0), it.getString(1) ?: "", it.getString(2) ?: "", it.getString(3) ?: "", it.getString(4) ?: "", it.getInt(5) == 1, it.getInt(6) == 1, it.getInt(7), it.getString(8) ?: "", it.getLong(9)))
     }
     return out
+  }
+
+  // ---------- duplicate detection / cleanup ----------
+  fun normalizeDedup(text: String): String = text.lowercase()
+    .replace(Regex("[^\\p{L}\\p{N}\\s]"), " ")
+    .replace(Regex("\\s+"), " ")
+    .trim()
+
+  fun isNearDuplicate(a: String, b: String): Boolean {
+    val na = normalizeDedup(a); val nb = normalizeDedup(b)
+    if (na.isEmpty() || nb.isEmpty()) return false
+    if (na == nb) return true
+    if (na.length >= 12 && (na.contains(nb) || nb.contains(na))) return true
+    val ta = na.split(' ').filter { it.length > 2 }.toSet()
+    val tb = nb.split(' ').filter { it.length > 2 }.toSet()
+    if (ta.isEmpty() || tb.isEmpty()) return false
+    val inter = ta.intersect(tb).size
+    val union = ta.union(tb).size
+    return union > 0 && (inter.toDouble() / union.toDouble()) >= 0.85
+  }
+
+  fun findDuplicateFacts(): List<List<Fact>> {
+    val all = facts().sortedByDescending { it.ts }
+    val used = HashSet<Long>()
+    val groups = ArrayList<List<Fact>>()
+    for (i in all.indices) {
+      val a = all[i]; if (used.contains(a.id)) continue
+      val g = ArrayList<Fact>(); g.add(a)
+      for (j in i + 1 until all.size) {
+        val b = all[j]; if (used.contains(b.id)) continue
+        if (normalizeCat(a.cat) == normalizeCat(b.cat) && isNearDuplicate(a.text, b.text)) g.add(b)
+      }
+      if (g.size > 1) { g.forEach { used.add(it.id) }; groups.add(g) }
+    }
+    return groups
+  }
+
+  fun cleanDuplicateFacts(): Int {
+    val groups = findDuplicateFacts()
+    var removed = 0
+    for (g in groups) {
+      val keep = g.maxByOrNull { (if (it.pinned) 1_000_000_000_000L else 0L) + it.ts } ?: continue
+      for (f in g) if (f.id != keep.id) { factDelete(f.id); removed++ }
+    }
+    return removed
+  }
+
+  fun findDuplicateRules(): List<List<Rule>> {
+    val all = rules().sortedByDescending { it.ts }
+    val used = HashSet<Long>()
+    val groups = ArrayList<List<Rule>>()
+    for (i in all.indices) {
+      val a = all[i]; if (used.contains(a.id)) continue
+      val g = ArrayList<Rule>(); g.add(a)
+      for (j in i + 1 until all.size) {
+        val b = all[j]; if (used.contains(b.id)) continue
+        if (isNearDuplicate(a.text, b.text)) g.add(b)
+      }
+      if (g.size > 1) { g.forEach { used.add(it.id) }; groups.add(g) }
+    }
+    return groups
+  }
+
+  fun cleanDuplicateRules(): Int {
+    val groups = findDuplicateRules()
+    var removed = 0
+    for (g in groups) {
+      val keep = g.maxByOrNull { (if (it.enabled) 1_000_000_000_000L else 0L) + it.ts } ?: continue
+      for (r in g) if (r.id != keep.id) { ruleDelete(r.id); removed++ }
+    }
+    return removed
+  }
+
+  // ---------- behaviors / recorded steps ----------
+  fun behaviors(): List<Behavior> {
+    val out = ArrayList<Behavior>()
+    readableDatabase.rawQuery("SELECT id,name,steps_json,ts,updated_ts FROM behaviors ORDER BY updated_ts DESC, id DESC", null).use {
+      while (it.moveToNext()) out.add(Behavior(it.getLong(0), it.getString(1) ?: "", it.getString(2) ?: "[]", it.getLong(3), it.getLong(4)))
+    }
+    return out
+  }
+
+  fun behaviorAdd(name: String, stepsJson: String): Long = writableDatabase.insert("behaviors", null, ContentValues().apply {
+    val now = System.currentTimeMillis()
+    put("name", name.trim().take(120).ifBlank { "Recorded behavior" }); put("steps_json", stepsJson); put("ts", now); put("updated_ts", now)
+  })
+
+  fun behaviorUpdate(id: Long, name: String? = null, stepsJson: String? = null) {
+    val cur = behaviors().firstOrNull { it.id == id } ?: return
+    writableDatabase.update("behaviors", ContentValues().apply {
+      put("name", (name ?: cur.name).trim().take(120)); put("steps_json", stepsJson ?: cur.stepsJson); put("updated_ts", System.currentTimeMillis())
+    }, "id=?", arrayOf(id.toString()))
+  }
+
+  fun behaviorDelete(id: Long) { writableDatabase.delete("behaviors", "id=?", arrayOf(id.toString())) }
+
+  fun behaviorByName(name: String): Behavior? {
+    val n = name.trim().lowercase()
+    return behaviors().firstOrNull { it.name.trim().lowercase() == n }
+      ?: behaviors().firstOrNull { it.name.trim().lowercase().contains(n) || n.contains(it.name.trim().lowercase()) }
   }
 }
 

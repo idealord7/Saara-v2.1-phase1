@@ -56,6 +56,13 @@ class MainActivity : AppCompatActivity() {
   private lateinit var screenChip: TextView
   private lateinit var learnBox: LinearLayout
   private lateinit var shopBox: LinearLayout
+  private var learnSearchQuery = ""
+  private var learnFilter = "All"
+  private val learnSelectedFactIds = linkedSetOf<Long>()
+  private val learnSelectedRuleIds = linkedSetOf<Long>()
+  private val learnSelectedBehaviorIds = linkedSetOf<Long>()
+  private val learnCollapsed = hashSetOf<String>()
+  private val learnFilterChips = linkedMapOf<String, TextView>()
   private lateinit var taskBox: LinearLayout
   private lateinit var contactsBox: LinearLayout
   private lateinit var contactsSearch: EditText
@@ -240,7 +247,7 @@ class MainActivity : AppCompatActivity() {
     curTab = i
     pages.forEachIndexed { k, p -> p.visibility = if (k == i) View.VISIBLE else View.GONE }
     navItems.forEachIndexed { k, (ic, lb) -> lb.setTextColor(if (k == i) ACC else SUB); ic.alpha = if (k == i) 1f else 0.6f }
-    when (i) { 1 -> { rebuildLearning(); rebuildShop() }; 2 -> rebuildTasks(); 3 -> { rebuildSettings(force = true); refresh() } }
+    when (i) { 1 -> { rebuildLearning() }; 2 -> rebuildTasks(); 3 -> { rebuildSettings(force = true); refresh() } }
   }
 
   // ---------- CHAT ----------
@@ -1068,153 +1075,220 @@ class MainActivity : AppCompatActivity() {
   // ---------- LEARNING ----------
   private fun buildLearning(): View {
     val (sv, root) = page()
-    heading(root, "What Saara learned", "Preferences, habits and corrections she keeps in memory to serve you better.")
-    learnBox = LinearLayout(this); learnBox.orientation = LinearLayout.VERTICAL
-    root.addView(learnBox)
-    shopBox = LinearLayout(this); shopBox.orientation = LinearLayout.VERTICAL
-    root.addView(shopBox)
+    heading(root, "Memory & Knowledge", "Search, clean duplicates, manage rules/lessons, and record/replay behaviors.")
+    val search = edit("Search memory, rules, lessons, behaviors...")
+    search.setSingleLine(true); search.setText(learnSearchQuery); search.setSelection(search.text?.length ?: 0)
+    search.doAfterTextChanged { val q = it?.toString() ?: ""; if (q != learnSearchQuery) { learnSearchQuery = q; rebuildLearning() } }
+    root.addView(search, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8) })
+    val chipsRow = LinearLayout(this); chipsRow.orientation = LinearLayout.HORIZONTAL
+    learnFilterChips.clear()
+    val filters = listOf("All", "Knowledge/Memory", "Rules", "Lessons", "Behaviors")
+    for (f in filters) {
+      val c = chip(f) { if (learnFilter != f) { learnFilter = f; paintLearnFilterChips(); rebuildLearning() } }
+      learnFilterChips[f] = c
+      val lp = LinearLayout.LayoutParams(-2, -2); lp.rightMargin = dp(8); lp.topMargin = dp(8); chipsRow.addView(c, lp)
+    }
+    val hs = HorizontalScrollView(this); hs.isHorizontalScrollBarEnabled = false; hs.addView(chipsRow); root.addView(hs)
+    paintLearnFilterChips()
+    learnBox = LinearLayout(this); learnBox.orientation = LinearLayout.VERTICAL; root.addView(learnBox)
+    shopBox = LinearLayout(this); shopBox.orientation = LinearLayout.VERTICAL; root.addView(shopBox)
+    rebuildLearning()
     return sv
   }
 
   private fun hour12(h: Int) = (if (h % 12 == 0) 12 else h % 12).toString() + (if (h < 12) " AM" else " PM")
 
+  private fun learnMatches(text: String): Boolean {
+    val q = learnSearchQuery.trim().lowercase(Locale.getDefault())
+    return q.isBlank() || text.lowercase(Locale.getDefault()).contains(q)
+  }
+
+  private fun paintLearnFilterChips() {
+    for ((f, v) in learnFilterChips) {
+      val sel = f == learnFilter
+      v.background = bg(if (sel) ACC2 else SURF2, 18)
+      v.setTextColor(if (sel) Color.WHITE else TXT)
+    }
+  }
+
   private fun rebuildLearning() {
+    if (!::learnBox.isInitialized) return
     learnBox.removeAllViews()
+    if (::shopBox.isInitialized) shopBox.removeAllViews()
     val db = Db.get(this)
-    val facts = db.facts(); val apps = db.topUsage("app", 5); val acts = db.topUsage("action", 6); val hours = db.usageHours()
+    val factsAll = try { db.facts() } catch (_: Exception) { emptyList() }
+    val rulesAll = try { db.rules() } catch (_: Exception) { emptyList() }
+    val behaviorsAll = try { db.behaviors() } catch (_: Exception) { emptyList() }
+    val lessons = factsAll.filter { it.cat.equals("mistakes_and_lessons", true) }
+    val knowledge = factsAll.filter { !it.cat.equals("mistakes_and_lessons", true) }
+    val dupFacts = try { db.findDuplicateFacts().sumOf { (it.size - 1).coerceAtLeast(0) } } catch (_: Exception) { 0 }
+    val dupRules = try { db.findDuplicateRules().sumOf { (it.size - 1).coerceAtLeast(0) } } catch (_: Exception) { 0 }
+    val dupCount = dupFacts + dupRules
+
     val sum = card(learnBox)
     sum.addView(tv("Summary", 16f, bold = true))
-    val sb = StringBuilder()
-    if (facts.isEmpty() && apps.isEmpty() && acts.isEmpty()) sb.append("Nothing learned yet. Just talk to Saara — she notes your preferences, habits and corrections on her own.")
-    else {
-      sb.append("I remember ${facts.size} thing(s) about you")
-      val cats = facts.groupBy { it.cat }.map { "${it.key} ${it.value.size}" }
-      if (cats.isNotEmpty()) sb.append(" (").append(cats.joinToString(", ")).append(")")
-      sb.append(".")
-      if (apps.isNotEmpty()) sb.append("\nApps you ask for most: ").append(apps.joinToString(", ") { "${it.first} ×${it.second}" })
-      if (acts.isNotEmpty()) sb.append("\nFrequent actions: ").append(acts.joinToString(", ") { "${it.first.replace('_', ' ')} ×${it.second}" })
-      val peak = hours.indices.maxByOrNull { hours[it] } ?: 0
-      if (hours[peak] > 0) sb.append("\nYou talk to me most around ").append(hour12(peak)).append(".")
-    }
-    val st = tv(sb.toString(), 14f); st.setPadding(0, dp(6), 0, 0); sum.addView(st)
-    val ask = btn("🗣  Ask Saara to explain") {
-      val factsNow = Db.get(this).facts().take(12)
-      val localSummary = if (factsNow.isEmpty()) "No saved learning facts yet." else factsNow.joinToString("\n") { "• ${it.cat}: ${it.text}" }
-      Bus.add("you", "Show my saved learning", true)
-      Bus.add("saara", "Your saved learning (read locally):\n$localSummary", true)
-      select(0)
-    }
-    val alp = LinearLayout.LayoutParams(-1, -2); alp.topMargin = dp(10); sum.addView(ask, alp)
-
-    val steps = db.taskSteps(20)
-    if (steps.isNotEmpty()) {
-      val tc = card(learnBox)
-      tc.addView(tv("Task methods (${steps.size})", 16f, bold = true))
-      tc.addView(tv("Which on-device steps worked or failed during screen tasks. Stored only on this phone.", 12f, SUB))
-      for (s in steps.take(10)) {
-        val line = (if (s.ok) "✓ " else "✗ ") + s.goal.take(90) + "  ·  " + s.tool
-        tc.addView(tv(line, 13f, if (s.ok) GOOD else WARN))
+    sum.addView(tv("Knowledge ${knowledge.size} · Rules ${rulesAll.size} · Lessons ${lessons.size} · Behaviors ${behaviorsAll.size}", 13f, TXT))
+    sum.addView(tv("Duplicates detected: $dupCount ${if (dupCount > 0) "(facts $dupFacts, rules $dupRules)" else ""}", 12f, if (dupCount > 0) WARN else GOOD))
+    val sumRow = LinearLayout(this); sumRow.orientation = LinearLayout.HORIZONTAL
+    sumRow.addView(btn("Clean Duplicates", if (dupCount > 0) ACC2 else SURF2) {
+      val fDup = db.findDuplicateFacts(); val rDup = db.findDuplicateRules()
+      val total = fDup.sumOf { it.size - 1 } + rDup.sumOf { it.size - 1 }
+      if (total == 0) { toast("No duplicates found"); return@btn }
+      val preview = buildString {
+        append("Remove/merge $total duplicate entries?\n\n")
+        fDup.take(3).forEach { g -> append("• Fact: ").append(g.first().text.take(70)).append(" (+${g.size - 1})\n") }
+        rDup.take(3).forEach { g -> append("• Rule: ").append(g.first().text.take(70)).append(" (+${g.size - 1})\n") }
       }
-      tc.addView(btn("Clear task learning", SURF2) { Db.get(this).taskStepsClear(); rebuildLearning() })
+      AlertDialog.Builder(this).setTitle("Clean Duplicates").setMessage(preview)
+        .setPositiveButton("Clean") { _, _ -> val rf = db.cleanDuplicateFacts(); val rr = db.cleanDuplicateRules(); toast("Cleaned ${rf + rr} duplicates"); rebuildLearning() }
+        .setNegativeButton("Cancel", null).show()
+    }, LinearLayout.LayoutParams(0, -2, 1f).apply { rightMargin = dp(8) })
+    sumRow.addView(btn("Batch Delete", SURF2) {
+      val fc = learnSelectedFactIds.size; val rc = learnSelectedRuleIds.size; val bc = learnSelectedBehaviorIds.size
+      val total = fc + rc + bc
+      if (total == 0) { toast("Select items to delete"); return@btn }
+      AlertDialog.Builder(this).setMessage("Delete $total selected item(s)?").setPositiveButton("Delete") { _, _ ->
+        learnSelectedFactIds.forEach { db.factDelete(it) }; learnSelectedRuleIds.forEach { db.ruleDelete(it) }; learnSelectedBehaviorIds.forEach { db.behaviorDelete(it) }
+        learnSelectedFactIds.clear(); learnSelectedRuleIds.clear(); learnSelectedBehaviorIds.clear(); rebuildLearning()
+      }.setNegativeButton("Cancel", null).show()
+    }, LinearLayout.LayoutParams(0, -2, 1f))
+    sum.addView(sumRow, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8) })
+
+    fun sectionCard(key: String, title: String, subtitle: String, count: Int, body: (LinearLayout) -> Unit) {
+      val c = card(learnBox)
+      val header = LinearLayout(this); header.gravity = Gravity.CENTER_VERTICAL
+      header.addView(tv("$title ($count)", 16f, TXT, true), LinearLayout.LayoutParams(0, -2, 1f))
+      val toggle = tv(if (learnCollapsed.contains(key)) "Show" else "Hide", 12f, ACC, true); toggle.setPadding(dp(8), dp(4), dp(0), dp(4))
+      header.addView(toggle); c.addView(header)
+      c.addView(tv(subtitle, 12f, SUB))
+      val bodyBox = LinearLayout(this); bodyBox.orientation = LinearLayout.VERTICAL
+      if (!learnCollapsed.contains(key)) body(bodyBox) else bodyBox.addView(tv("Collapsed", 12f, SUB))
+      c.addView(bodyBox)
+      toggle.setOnClickListener { if (learnCollapsed.contains(key)) learnCollapsed.remove(key) else learnCollapsed.add(key); rebuildLearning() }
     }
 
-    val categoryCard = card(learnBox)
-    categoryCard.addView(tv("Manage categories", 16f, bold = true))
-    val newCat = edit("New category name")
-    categoryCard.addView(newCat)
-    categoryCard.addView(btn("Add category") { db.categoryAdd(newCat.text.toString()); rebuildLearning() })
-    val renameCat = edit("Existing category to rename")
-    val renamed = edit("New category name")
-    categoryCard.addView(renameCat); categoryCard.addView(renamed)
-    categoryCard.addView(btn("Rename category") { db.categoryRename(renameCat.text.toString(), renamed.text.toString()); rebuildLearning() })
+    val showKnowledge = learnFilter == "All" || learnFilter == "Knowledge/Memory"
+    val showRules = learnFilter == "All" || learnFilter == "Rules"
+    val showLessons = learnFilter == "All" || learnFilter == "Lessons"
+    val showBehaviors = learnFilter == "All" || learnFilter == "Behaviors"
 
-    val teach = card(learnBox)
-    teach.addView(tv("Teach Saara", 16f, bold = true))
-    val ti = edit("e.g. I prefer replies in Bengali after 9 PM"); teach.addView(ti)
-    val tb = btn("Add to memory") {
-      val t = ti.text.toString().trim()
-      if (t.isNotEmpty()) { db.factAdd("preference", t); rebuildLearning() }
-    }
-    val tlp = LinearLayout.LayoutParams(-1, -2); tlp.topMargin = dp(6); teach.addView(tb, tlp)
-
-    val rulesCard = card(learnBox)
-    rulesCard.addView(tv("Rules (applied before actions)", 16f, bold = true))
-    rulesCard.addView(tv("Saara must follow enabled rules before taking any action, using tools, or replying. Edit/add/delete as needed.", 12f, SUB))
-    val ri = edit("Add a rule, e.g. Ask before sending SMS"); rulesCard.addView(ri)
-    val rb = btn("Add rule") {
-      val t = ri.text.toString().trim()
-      if (t.isNotEmpty()) { db.ruleAdd(t); rebuildLearning() }
-    }
-    val rlp = LinearLayout.LayoutParams(-1, -2); rlp.topMargin = dp(6); rulesCard.addView(rb, rlp)
-    val rules = db.rules()
-    if (rules.isEmpty()) rulesCard.addView(tv("No rules yet.", 13f, SUB))
-    for (r in rules) {
-      val row = LinearLayout(this); row.orientation = LinearLayout.VERTICAL; row.setPadding(0, dp(8), 0, dp(8))
-      val sw = Switch(this)
-      sw.text = if (r.enabled) "ON" else "OFF"
-      sw.isChecked = r.enabled
-      sw.setOnCheckedChangeListener { _, v -> db.ruleSetEnabled(r.id, v); rebuildLearning() }
-      row.addView(sw)
-      row.addView(tv(r.text, 14f))
-      val acts = LinearLayout(this); acts.orientation = LinearLayout.HORIZONTAL
-      val editB = btn("Edit", SURF2) {
-        val input = edit("Rule"); input.setText(r.text)
-        AlertDialog.Builder(this).setTitle("Edit rule").setView(input)
-          .setPositiveButton("Save") { _, _ -> db.ruleUpdate(r.id, input.text.toString()); rebuildLearning() }
-          .setNegativeButton("Cancel", null).show()
+    if (showKnowledge) {
+      val list = knowledge.filter { learnMatches(it.text + " " + it.cat) }
+      sectionCard("knowledge", "Knowledge / Memory", "Facts and preferences. Select items for batch delete.", list.size) { box ->
+        val teach = LinearLayout(this); teach.orientation = LinearLayout.VERTICAL
+        val ti = edit("Teach Saara (e.g. I prefer Bengali after 9 PM)")
+        val add = btn("Add to memory") { val t = ti.text.toString().trim(); if (t.isNotEmpty()) { db.factAdd("preference", t); rebuildLearning() } }
+        teach.addView(ti); teach.addView(add, LinearLayout.LayoutParams(-1,-2).apply { topMargin = dp(6) }); box.addView(teach)
+        for (f in list.take(60)) {
+          val row = LinearLayout(this); row.orientation = LinearLayout.VERTICAL; row.setPadding(0, dp(8), 0, dp(8)); row.background = bg(SURF2, 12)
+          val top = LinearLayout(this); top.gravity = Gravity.CENTER_VERTICAL
+          val cb = CheckBox(this); cb.isChecked = learnSelectedFactIds.contains(f.id); cb.setOnCheckedChangeListener { _, v -> if (v) learnSelectedFactIds.add(f.id) else learnSelectedFactIds.remove(f.id) }
+          top.addView(cb)
+          top.addView(tv((if (f.pinned) "📌 " else "") + f.text.take(140), 14f, TXT), LinearLayout.LayoutParams(0, -2, 1f))
+          row.addView(top)
+          row.addView(tv("${f.cat} · ${hhmm(f.ts)}${if (f.source.isNotBlank()) " · ${f.source}" else ""}", 11f, SUB))
+          val acts = LinearLayout(this); acts.orientation = LinearLayout.HORIZONTAL
+          acts.addView(btn("Edit", SURF) { val input = edit("Edit memory"); input.setText(f.text); AlertDialog.Builder(this).setTitle("Edit memory").setView(input).setPositiveButton("Save") { _, _ -> db.factUpdate(f.id, f.cat, input.text.toString()); rebuildLearning() }.setNegativeButton("Cancel", null).show() }, LinearLayout.LayoutParams(0,-2,1f))
+          acts.addView(btn(if (f.pinned) "Unpin" else "Pin", SURF) { db.factSetPinned(f.id, !f.pinned); rebuildLearning() }, LinearLayout.LayoutParams(0,-2,1f))
+          acts.addView(btn("Delete", SURF) { db.factDelete(f.id); rebuildLearning() }, LinearLayout.LayoutParams(0,-2,1f))
+          row.addView(acts)
+          box.addView(row, LinearLayout.LayoutParams(-1,-2).apply { topMargin = dp(8) })
+        }
+        if (list.size > 60) box.addView(tv("Showing 60 of ${list.size}. Use search to narrow.", 12f, SUB))
       }
-      val delB = btn("Delete", SURF2) { db.ruleDelete(r.id); rebuildLearning() }
-      acts.addView(editB, LinearLayout.LayoutParams(0, -2, 1f))
-      val sp = Space(this); acts.addView(sp, LinearLayout.LayoutParams(dp(8), 1))
-      acts.addView(delB, LinearLayout.LayoutParams(0, -2, 1f))
-      row.addView(acts)
-      rulesCard.addView(row)
     }
 
-    val conflicts = try { db.factConflicts() } catch (_: Exception) { emptyList() }
-    if (conflicts.isNotEmpty()) {
-      val cc = card(learnBox)
-      cc.addView(tv("Conflicts detected (${conflicts.size})", 15f, WARN, true))
-      cc.addView(tv("Keep newest or pick the correct fact. Newer facts get priority.", 12f, SUB))
-      for (grp in conflicts.take(6)) {
-        grp.forEachIndexed { idx, f ->
-          val row = LinearLayout(this); row.orientation = LinearLayout.VERTICAL; row.setPadding(0, dp(6), 0, dp(6))
-          row.addView(tv((if (idx==0) "NEWEST: " else "STALE: ") + "[${f.cat}] ${f.text}", 13f, if (idx==0) GOOD else TXT))
-          val keep = btn(if (idx==0) "Keep newest" else "Keep this", SURF2) { db.factResolveKeep(f.id); rebuildLearning() }
-          row.addView(keep)
-          cc.addView(row)
+    if (showRules) {
+      val list = rulesAll.filter { learnMatches(it.text) }
+      sectionCard("rules", "Rules", "Saara follows enabled rules before actions/tools/replies.", list.size) { box ->
+        val ri = edit("Add a rule, e.g. Ask before sending SMS")
+        box.addView(ri); box.addView(btn("Add rule") { val t = ri.text.toString().trim(); if (t.isNotEmpty()) { db.ruleAdd(t); rebuildLearning() } }, LinearLayout.LayoutParams(-1,-2).apply { topMargin = dp(6) })
+        for (r in list.take(60)) {
+          val row = LinearLayout(this); row.orientation = LinearLayout.VERTICAL; row.setPadding(dp(8), dp(8), dp(8), dp(8)); row.background = bg(SURF2, 12)
+          val top = LinearLayout(this); top.gravity = Gravity.CENTER_VERTICAL
+          val cb = CheckBox(this); cb.isChecked = learnSelectedRuleIds.contains(r.id); cb.setOnCheckedChangeListener { _, v -> if (v) learnSelectedRuleIds.add(r.id) else learnSelectedRuleIds.remove(r.id) }
+          top.addView(cb)
+          top.addView(tv(r.text.take(160), 14f, TXT), LinearLayout.LayoutParams(0,-2,1f))
+          val sw = Switch(this); sw.isChecked = r.enabled; sw.setOnCheckedChangeListener { _, v -> db.ruleSetEnabled(r.id, v) }
+          top.addView(sw); row.addView(top)
+          val acts = LinearLayout(this); acts.orientation = LinearLayout.HORIZONTAL
+          acts.addView(btn("Edit", SURF) { val input = edit("Rule"); input.setText(r.text); AlertDialog.Builder(this).setTitle("Edit rule").setView(input).setPositiveButton("Save") { _, _ -> db.ruleUpdate(r.id, input.text.toString()); rebuildLearning() }.setNegativeButton("Cancel", null).show() }, LinearLayout.LayoutParams(0,-2,1f))
+          acts.addView(btn("Delete", SURF) { db.ruleDelete(r.id); rebuildLearning() }, LinearLayout.LayoutParams(0,-2,1f))
+          row.addView(acts)
+          box.addView(row, LinearLayout.LayoutParams(-1,-2).apply { topMargin = dp(8) })
         }
       }
     }
 
-    if (facts.isNotEmpty()) {
-      for ((cat, list) in facts.groupBy { it.cat }) {
-        val c = card(learnBox)
-        c.addView(tv(cat.replaceFirstChar { it.uppercase() } + "  (${list.size})", 15f, ACC, true))
-        for (f in list) {
-          val r = LinearLayout(this); r.gravity = Gravity.CENTER_VERTICAL; r.setPadding(0, dp(6), 0, 0)
-          val content = LinearLayout(this); content.orientation = LinearLayout.VERTICAL
-          content.addView(tv((if (f.pinned) "📌 " else "") + f.text, 14f))
-          content.addView(tv("Updated ${hhmm(f.ts)}${if (f.source.isNotBlank()) " · ${f.source}" else ""}", 11f, SUB))
-          val actions = LinearLayout(this); actions.gravity = Gravity.CENTER_VERTICAL
-          val move = Spinner(this); move.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, db.categories())
-          val selected = db.categories().indexOf(f.cat).coerceAtLeast(0); move.setSelection(selected)
-          actions.addView(move, LinearLayout.LayoutParams(0, dp(42), 1f))
-          actions.addView(btn("Edit") {
-            val input = edit("Edit memory", false); input.setText(f.text)
-            AlertDialog.Builder(this).setTitle("Edit memory").setView(input)
-              .setPositiveButton("Save") { _, _ -> db.factUpdate(f.id, move.selectedItem?.toString() ?: f.cat, input.text.toString()); rebuildLearning() }
-              .setNegativeButton("Cancel", null).show()
-          })
-          actions.addView(btn(if (f.pinned) "Unpin" else "Pin", SURF2) { db.factSetPinned(f.id, !f.pinned); rebuildLearning() })
-          content.addView(actions); r.addView(content, LinearLayout.LayoutParams(0, -2, 1f))
-          val x = tv("✕", 16f, SUB); x.setPadding(dp(12), dp(4), dp(2), dp(4))
-          x.setOnClickListener {
-            AlertDialog.Builder(this).setMessage("Make Saara forget this?\n\n" + f.text).setPositiveButton("Forget") { _, _ -> db.factDelete(f.id); rebuildLearning() }.setNegativeButton("Cancel", null).show()
+    if (showLessons) {
+      val list = lessons.filter { learnMatches(it.text) }
+      sectionCard("lessons", "Lessons / Guardrails", "Mistakes and lessons Saara should avoid repeating.", list.size) { box ->
+        for (f in list.take(60)) {
+          val row = LinearLayout(this); row.orientation = LinearLayout.VERTICAL; row.setPadding(dp(8), dp(8), dp(8), dp(8)); row.background = bg(SURF2, 12)
+          val top = LinearLayout(this); top.gravity = Gravity.CENTER_VERTICAL
+          val cb = CheckBox(this); cb.isChecked = learnSelectedFactIds.contains(f.id); cb.setOnCheckedChangeListener { _, v -> if (v) learnSelectedFactIds.add(f.id) else learnSelectedFactIds.remove(f.id) }
+          top.addView(cb); top.addView(tv(f.text.take(160), 14f, TXT), LinearLayout.LayoutParams(0,-2,1f)); row.addView(top)
+          row.addView(tv(hhmm(f.ts), 11f, SUB))
+          val acts = LinearLayout(this); acts.orientation = LinearLayout.HORIZONTAL
+          acts.addView(btn("Edit", SURF) { val input = edit("Lesson"); input.setText(f.text); AlertDialog.Builder(this).setTitle("Edit lesson").setView(input).setPositiveButton("Save") { _, _ -> db.factUpdate(f.id, "mistakes_and_lessons", input.text.toString()); rebuildLearning() }.setNegativeButton("Cancel", null).show() }, LinearLayout.LayoutParams(0,-2,1f))
+          acts.addView(btn("Delete", SURF) { db.factDelete(f.id); rebuildLearning() }, LinearLayout.LayoutParams(0,-2,1f))
+          row.addView(acts)
+          box.addView(row, LinearLayout.LayoutParams(-1,-2).apply { topMargin = dp(8) })
+        }
+        if (list.isEmpty()) box.addView(tv("No lessons yet.", 12f, SUB))
+      }
+    }
+
+    if (showBehaviors) {
+      val list = behaviorsAll.filter { learnMatches(it.name + " " + it.stepsJson) }
+      sectionCard("behaviors", "Behaviors / Recorded Steps", "Record, edit, replay, or delete user workflows.", list.size) { box ->
+        val recRow = LinearLayout(this); recRow.orientation = LinearLayout.HORIZONTAL
+        val recBtn = btn(if (BehaviorRecorder.isRecording()) "Stop Recording" else "Record User Steps", if (BehaviorRecorder.isRecording()) 0xFFB3261E.toInt() else ACC2) {
+          if (BehaviorRecorder.isRecording()) { BehaviorRecorder.stopAndSave(this) { rebuildLearning() } } else { BehaviorRecorder.start(this); rebuildLearning() }
+        }
+        recRow.addView(recBtn, LinearLayout.LayoutParams(0,-2,1f))
+        box.addView(recRow)
+        box.addView(tv(if (BehaviorRecorder.isRecording()) "Recording... perform actions, then tap Stop Recording." else "Tap Record, perform steps, then Stop to save.", 12f, SUB))
+        for (b in list.take(40)) {
+          val row = LinearLayout(this); row.orientation = LinearLayout.VERTICAL; row.setPadding(dp(8), dp(8), dp(8), dp(8)); row.background = bg(SURF2, 12)
+          val top = LinearLayout(this); top.gravity = Gravity.CENTER_VERTICAL
+          val cb = CheckBox(this); cb.isChecked = learnSelectedBehaviorIds.contains(b.id); cb.setOnCheckedChangeListener { _, v -> if (v) learnSelectedBehaviorIds.add(b.id) else learnSelectedBehaviorIds.remove(b.id) }
+          top.addView(cb); top.addView(tv(b.name, 14f, TXT, true), LinearLayout.LayoutParams(0,-2,1f)); row.addView(top)
+          val steps = BehaviorRecorder.parseSteps(b.stepsJson)
+          row.addView(tv("${steps.size} steps · ${hhmm(b.updatedTs)}", 11f, SUB))
+          val acts = LinearLayout(this); acts.orientation = LinearLayout.HORIZONTAL
+          acts.addView(btn("Run / Replay", ACC2) { BehaviorRecorder.replay(this, b) }, LinearLayout.LayoutParams(0,-2,1f))
+          acts.addView(btn("Edit", SURF) { BehaviorRecorder.showEditDialog(this, b) { rebuildLearning() } }, LinearLayout.LayoutParams(0,-2,1f))
+          acts.addView(btn("Delete", SURF) { db.behaviorDelete(b.id); rebuildLearning() }, LinearLayout.LayoutParams(0,-2,1f))
+          row.addView(acts)
+          box.addView(row, LinearLayout.LayoutParams(-1,-2).apply { topMargin = dp(8) })
+        }
+        if (list.isEmpty()) box.addView(tv("No recorded behaviors yet.", 12f, SUB))
+      }
+    }
+
+    if (showKnowledge) {
+      val conflicts = try { db.factConflicts() } catch (_: Exception) { emptyList() }
+      if (conflicts.isNotEmpty()) {
+        sectionCard("conflicts", "Conflicts", "Keep the correct fact and remove stale duplicates.", conflicts.size) { box ->
+          for (grp in conflicts.take(4)) {
+            grp.forEachIndexed { idx, f ->
+              val row = LinearLayout(this); row.orientation = LinearLayout.VERTICAL; row.setPadding(0, dp(6), 0, dp(6))
+              row.addView(tv((if (idx==0) "NEWEST: " else "STALE: ") + "[${f.cat}] ${f.text.take(120)}", 12f, if (idx==0) GOOD else TXT))
+              row.addView(btn(if (idx==0) "Keep newest" else "Keep this", SURF2) { db.factResolveKeep(f.id); rebuildLearning() })
+              box.addView(row)
+            }
           }
-          r.addView(x); c.addView(r)
         }
       }
+      val steps = try { db.taskSteps(15) } catch (_: Exception) { emptyList() }
+      if (steps.isNotEmpty() && learnFilter == "All") {
+        sectionCard("taskmethods", "Task methods", "Recent on-device task steps that worked/failed.", steps.size) { box ->
+          for (s in steps.take(8)) box.addView(tv((if (s.ok) "✓ " else "✗ ") + s.goal.take(80) + " · " + s.tool, 12f, if (s.ok) GOOD else WARN))
+          box.addView(btn("Clear task learning", SURF2) { db.taskStepsClear(); rebuildLearning() }, LinearLayout.LayoutParams(-1,-2).apply { topMargin = dp(6) })
+        }
+      }
+      rebuildShop()
     }
   }
 

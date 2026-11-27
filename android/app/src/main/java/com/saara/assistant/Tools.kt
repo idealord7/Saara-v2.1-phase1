@@ -56,7 +56,7 @@ object Tools {
 {"name":"send_direct_message","description":"Send a message directly without opening apps when possible. channel: sms | whatsapp | whatsapp_business | telegram. target=contact name or number. For sms sends via SMS manager. For WhatsApp/Telegram uses latest notification reply action for that sender/chat (no app open) and reports if no replyable notification exists.","parameters":{"type":"OBJECT","properties":{"channel":{"type":"STRING"},"target":{"type":"STRING"},"text":{"type":"STRING"},"confirmed":{"type":"BOOLEAN"}},"required":["channel","target","text"]}},
 {"name":"fetch_url","description":"Fetch a public webpage or Google Sheet shared as 'Anyone with the link' and return its readable text.","parameters":{"type":"OBJECT","properties":{"url":{"type":"STRING"}},"required":["url"]}},
 {"name":"read_saara_self_state","description":"Read Saara's real app settings/state/capabilities. Use for questions like current settings, status, wake phrases, speaker focus, rules, auto-reply toggles, models, chat/session counts. section optional: all|status|settings|permissions|rules|history|models|capabilities.","parameters":{"type":"OBJECT","properties":{"section":{"type":"STRING"}}}},
-{"name":"saara_app_control","description":"Read or control Saara app settings/rules/models/history via voice. Actions: read_settings, read_clipboard, set_session_timeout, toggle_session_timeout, read_language, set_language, list_wake_phrases, add_wake_phrase, remove_wake_phrase, toggle_only_my_voice, toggle_verify_every_input, toggle_bypass_manual_tap, toggle_ignore_media_noise, set_voice_strictness, set_voice_match_threshold, enroll_voice, clear_voice_sample, test_voice_match, list_automation_rules, add_automation_rule, edit_automation_rule, delete_automation_rule, toggle_auto_reply_master, toggle_ai_auto_reply, list_reply_rules, add_reply_rule, edit_reply_rule, delete_reply_rule, list_pre_action_rules, add_pre_action_rule, edit_pre_action_rule, delete_pre_action_rule, clear_chat_history, clear_recent_session_state, detect_supported_models, set_model_settings, save_model_settings. Destructive actions require confirmed=true.","parameters":{"type":"OBJECT","properties":{"action":{"type":"STRING"},"section":{"type":"STRING"},"value":{"type":"STRING"},"enabled":{"type":"BOOLEAN"},"seconds":{"type":"NUMBER"},"percent":{"type":"NUMBER"},"id":{"type":"NUMBER"},"name":{"type":"STRING"},"text":{"type":"STRING"},"trigger":{"type":"STRING"},"condition":{"type":"STRING"},"ruleAction":{"type":"STRING"},"cooldownMs":{"type":"NUMBER"},"apps":{"type":"STRING"},"senders":{"type":"STRING"},"blockedSenders":{"type":"STRING"},"chatType":{"type":"STRING"},"keywords":{"type":"STRING"},"quietStart":{"type":"STRING"},"quietEnd":{"type":"STRING"},"screenOffOnly":{"type":"BOOLEAN"},"mode":{"type":"STRING"},"instruction":{"type":"STRING"},"replyData":{"type":"STRING"},"vipSenders":{"type":"STRING"},"muteSenders":{"type":"STRING"},"primaryModel":{"type":"STRING"},"fallbackModels":{"type":"STRING"},"autoReplyModel":{"type":"STRING"},"visionModel":{"type":"STRING"},"complexModel":{"type":"STRING"},"autoFallback":{"type":"BOOLEAN"},"smartSelection":{"type":"BOOLEAN"},"retryCount":{"type":"NUMBER"},"retryDelayMs":{"type":"NUMBER"},"confirmed":{"type":"BOOLEAN"}},"required":["action"]}}
+{"name":"saara_app_control","description":"Read or control Saara app settings/rules/models/history via voice. Actions: read_settings, read_clipboard, set_session_timeout, toggle_session_timeout, read_language, set_language, list_wake_phrases, add_wake_phrase, remove_wake_phrase, toggle_only_my_voice, toggle_verify_every_input, toggle_bypass_manual_tap, toggle_ignore_media_noise, set_voice_strictness, set_voice_match_threshold, enroll_voice, clear_voice_sample, test_voice_match, list_automation_rules, add_automation_rule, edit_automation_rule, delete_automation_rule, toggle_auto_reply_master, toggle_ai_auto_reply, list_reply_rules, add_reply_rule, edit_reply_rule, delete_reply_rule, list_pre_action_rules, add_pre_action_rule, edit_pre_action_rule, delete_pre_action_rule, clear_chat_history, clear_recent_session_state, detect_supported_models, set_model_settings, save_model_settings, clean_duplicates, list_behaviors, start_behavior_recording, stop_behavior_recording, replay_behavior, delete_behavior. Destructive actions require confirmed=true.","parameters":{"type":"OBJECT","properties":{"action":{"type":"STRING"},"section":{"type":"STRING"},"value":{"type":"STRING"},"enabled":{"type":"BOOLEAN"},"seconds":{"type":"NUMBER"},"percent":{"type":"NUMBER"},"id":{"type":"NUMBER"},"name":{"type":"STRING"},"text":{"type":"STRING"},"trigger":{"type":"STRING"},"condition":{"type":"STRING"},"ruleAction":{"type":"STRING"},"cooldownMs":{"type":"NUMBER"},"apps":{"type":"STRING"},"senders":{"type":"STRING"},"blockedSenders":{"type":"STRING"},"chatType":{"type":"STRING"},"keywords":{"type":"STRING"},"quietStart":{"type":"STRING"},"quietEnd":{"type":"STRING"},"screenOffOnly":{"type":"BOOLEAN"},"mode":{"type":"STRING"},"instruction":{"type":"STRING"},"replyData":{"type":"STRING"},"vipSenders":{"type":"STRING"},"muteSenders":{"type":"STRING"},"primaryModel":{"type":"STRING"},"fallbackModels":{"type":"STRING"},"autoReplyModel":{"type":"STRING"},"visionModel":{"type":"STRING"},"complexModel":{"type":"STRING"},"autoFallback":{"type":"BOOLEAN"},"smartSelection":{"type":"BOOLEAN"},"retryCount":{"type":"NUMBER"},"retryDelayMs":{"type":"NUMBER"},"confirmed":{"type":"BOOLEAN"}},"required":["action"]}}
 ]}]""")
 
   fun shopReport(c: Context, item: String): String {
@@ -374,7 +374,7 @@ object Tools {
     val p = Prefs.plain(c)
     fun onOff(b: Boolean) = if (b) "ON" else "OFF"
 
-    val destructive = setOf("clear_chat_history", "clear_recent_session_state", "clear_voice_sample", "delete_automation_rule", "delete_reply_rule", "delete_pre_action_rule")
+    val destructive = setOf("clear_chat_history", "clear_recent_session_state", "clear_voice_sample", "delete_automation_rule", "delete_reply_rule", "delete_pre_action_rule", "delete_behavior", "clean_duplicates")
     if (action in destructive && !confirmed) {
       return when (action) {
         "clear_chat_history" -> reqConfirm(action, "clear all saved chat history")
@@ -383,6 +383,8 @@ object Tools {
         "delete_automation_rule" -> reqConfirm(action, "delete automation rule #${a.optLong("id")}")
         "delete_reply_rule" -> reqConfirm(action, "delete replying rule #${a.optLong("id")}")
         "delete_pre_action_rule" -> reqConfirm(action, "delete pre-action rule #${a.optLong("id")}")
+        "delete_behavior" -> reqConfirm(action, "delete behavior #${a.optLong("id")}")
+        "clean_duplicates" -> reqConfirm(action, "clean duplicate/near-duplicate memory and rules")
         else -> reqConfirm(action, action)
       }
     }
@@ -574,6 +576,33 @@ object Tools {
           if (a.has("retryDelayMs")) a.optInt("retryDelayMs") else null
         ).also { syncSettingsUi() }
       }
+
+      "clean_duplicates" -> {
+        val fd = db.findDuplicateFacts(); val rd = db.findDuplicateRules()
+        val total = fd.sumOf { it.size - 1 } + rd.sumOf { it.size - 1 }
+        if (total == 0) "No duplicates found."
+        else { val rf = db.cleanDuplicateFacts(); val rr = db.cleanDuplicateRules(); syncSettingsUi(); "Cleaned ${rf + rr} duplicate entries (facts=$rf, rules=$rr)." }
+      }
+      "list_behaviors" -> {
+        val bs = db.behaviors()
+        if (bs.isEmpty()) "No recorded behaviors." else bs.joinToString("\n") { "#${it.id} ${it.name} (${BehaviorRecorder.parseSteps(it.stepsJson).size} steps)" }
+      }
+      "start_behavior_recording", "record_my_steps", "follow_my_steps" -> {
+        if (SaaraAccessibility.instance == null) return "Enable Accessibility service to record steps."
+        BehaviorRecorder.start(c); syncSettingsUi(); "Behavior recording started. Perform your steps, then say stop recording steps."
+      }
+      "stop_behavior_recording", "stop_recording_steps" -> {
+        if (!BehaviorRecorder.isRecording()) return "No active behavior recording."
+        BehaviorRecorder.stopAndSave(c) { syncSettingsUi() }; "Stopping recording and asking for behavior name."
+      }
+      "replay_behavior", "run_behavior" -> {
+        val name = a.optString("name", a.optString("value", a.optString("text", ""))).trim()
+        val id = a.optLong("id", -1L)
+        val b = if (id > 0L) db.behaviors().firstOrNull { it.id == id } else db.behaviorByName(name)
+        if (b == null) return "Behavior not found${if (name.isNotBlank()) ": $name" else ""}."
+        BehaviorRecorder.replay(c, b); "Replaying behavior: ${b.name}"
+      }
+      "delete_behavior" -> { val id = a.optLong("id", -1L); db.behaviorDelete(id); syncSettingsUi(); "Behavior #$id deleted." }
 
       else -> "error: unknown saara_app_control action '$action'"
     }
