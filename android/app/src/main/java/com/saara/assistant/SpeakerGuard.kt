@@ -8,7 +8,7 @@ import kotlin.math.min
 
 /**
  * Lightweight rolling speaker-match helper used by VoiceService capture loop.
- * Uses OpenWakeWordFeatures embeddings when only-user-voice is enabled.
+ * Prefers OpenWakeWord embeddings; falls back to SimpleVoiceFeatures when TFLite model init fails.
  */
 class SpeakerGuard(private val c: Context) {
   @Volatile var enabled: Boolean = false
@@ -20,20 +20,27 @@ class SpeakerGuard(private val c: Context) {
   private var features: OpenWakeWordFeatures? = null
   private var window: ArrayDeque<FloatArray> = ArrayDeque()
   private var failed = false
+  private var useSimpleFallback = false
   private val audioBuf = ShortArray(OpenWakeWordFeatures.CHUNK)
   private var pending = 0
+  private val simpleBuf = ArrayList<Short>(16000)
 
   fun ensureStarted(): Boolean {
     synchronized(lock) {
-      if (features != null || failed) return features != null
-      if (!OpenWakeWordFeatures.available(c)) { failed = true; return false }
+      if (features != null || useSimpleFallback) return true
+      if (failed) return false
+      if (!OpenWakeWordFeatures.available(c)) {
+        useSimpleFallback = true
+        return true
+      }
       return try {
         features = OpenWakeWordFeatures(c)
-        failed = false
         true
-      } catch (_: Exception) {
-        failed = true
-        false
+      } catch (_: Throwable) {
+        // TFLite model allocation can fail on some devices; use simple fallback.
+        features = null
+        useSimpleFallback = true
+        true
       }
     }
   }
@@ -43,14 +50,17 @@ class SpeakerGuard(private val c: Context) {
       runCatching { features?.close() }
       features = null
       window.clear()
+      simpleBuf.clear()
       pending = 0
       failed = false
+      useSimpleFallback = false
     }
   }
 
   fun reset() {
     synchronized(lock) {
       window.clear()
+      simpleBuf.clear()
       pending = 0
       runCatching { features?.reset() }
     }
@@ -59,10 +69,11 @@ class SpeakerGuard(private val c: Context) {
   /** Feed 16kHz PCM samples (any count). Returns latest match percent or null if not enough data. */
   fun feed(samples: ShortArray, count: Int = samples.size): Float? {
     if (!enabled || count <= 0) return null
-    val f = synchronized(lock) { features } ?: if (ensureStarted()) synchronized(lock) { features } else null
-    if (f == null) return null
-    var latest: Float? = null
+    if (!ensureStarted()) return null
     synchronized(lock) {
+      if (useSimpleFallback || features == null) return feedSimpleLocked(samples, count)
+      val f = features ?: return feedSimpleLocked(samples, count)
+      var latest: Float? = null
       var i = 0
       while (i < count) {
         val take = minOf(count - i, OpenWakeWordFeatures.CHUNK - pending)
@@ -71,7 +82,8 @@ class SpeakerGuard(private val c: Context) {
         i += take
         if (pending >= OpenWakeWordFeatures.CHUNK) {
           pending = 0
-          val emb = try { f.accept(audioBuf) } catch (_: Exception) { null } ?: continue
+          val emb = try { f.accept(audioBuf) } catch (_: Throwable) { null }
+          if (emb == null) continue
           window.addLast(emb.copyOf())
           while (window.size > 24) window.removeFirst()
           if (window.size >= 16) {
@@ -79,17 +91,33 @@ class SpeakerGuard(private val c: Context) {
             var skip = window.size - 16
             for (v in window) { if (skip-- > 0) continue; tail.add(v) }
             val vec = WakeVerifier.pool(tail)
-            val pct = UserVoiceProfile.matchPercent(c, vec)
-            if (pct != null) {
-              lastMatchPercent = pct
-              lastMatchAt = SystemClock.elapsedRealtime()
-              latest = pct
-            }
+            val pct = UserVoiceProfile.matchPercent(c, vec) ?: continue
+            lastMatchPercent = pct
+            lastMatchAt = SystemClock.elapsedRealtime()
+            latest = pct
           }
         }
       }
+      return latest
     }
-    return latest
+  }
+
+  private fun feedSimpleLocked(samples: ShortArray, count: Int): Float? {
+    for (i in 0 until count) {
+      if (simpleBuf.size < 16000) simpleBuf.add(samples[i])
+    }
+    if (simpleBuf.size < 12000) return null
+    val vec = SimpleVoiceFeatures.extract(simpleBuf.toShortArray(), 16000) ?: return null
+    // Keep a sliding 1s window
+    if (simpleBuf.size > 14000) {
+      val keep = simpleBuf.takeLast(8000)
+      simpleBuf.clear()
+      simpleBuf.addAll(keep)
+    }
+    val pct = UserVoiceProfile.matchPercent(c, vec) ?: return null
+    lastMatchPercent = pct
+    lastMatchAt = SystemClock.elapsedRealtime()
+    return pct
   }
 
   fun currentPercent(): Float = lastMatchPercent
@@ -112,7 +140,6 @@ class SpeakerGuard(private val c: Context) {
       return true // graceful fallback: don't lock out; UI warns
     }
     if (!hasRecentMatch()) {
-      // Warmup grace: allow briefly while collecting enough embeddings, to avoid startup lockout.
       if (startedAt > 0L && SystemClock.elapsedRealtime() - startedAt < 4000L) {
         lastDecision = "warming_up"
         return true
