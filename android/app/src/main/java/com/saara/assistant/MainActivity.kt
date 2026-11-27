@@ -575,6 +575,146 @@ class MainActivity : AppCompatActivity() {
 
     heading(root, "Voice, Wake-Word & Safety", "Wake behavior, interruption, confirmations, and fallback.")
     feature(root, "Barge-in interruption", "Stop Saara speech when user speaks a new command.", "f_barge_in", true, { true }, "", {})
+
+    val uv = card(root)
+    uv.addView(tv("User-Only Voice / Speaker Focus", 16f, bold = true))
+    uv.addView(tv("When enabled, Saara accepts wake/commands only when voice matches your enrolled local voice sample. All matching stays on-device.", 12f, SUB))
+    val uvStatus = tv(UserVoiceProfile.statusSummary(this), 12f, SUB)
+    uv.addView(uvStatus)
+    val uvLive = tv("", 12f, SUB)
+    uv.addView(uvLive)
+
+    val onlyRow = LinearLayout(this); onlyRow.gravity = Gravity.CENTER_VERTICAL
+    onlyRow.addView(tv("Only Catch My Voice", 14f, TXT), LinearLayout.LayoutParams(0, -2, 1f))
+    val onlySw = Switch(this); onlySw.isChecked = UserVoiceProfile.onlyUserVoiceEnabled(this)
+    onlySw.setOnCheckedChangeListener { _, v ->
+      Prefs.plain(this).edit().putBoolean("f_only_user_voice", v).apply()
+      VoiceService.instance?.refreshSpeakerGuardConfig()
+      uvStatus.text = UserVoiceProfile.statusSummary(this)
+      toast(if (v) "Only My Voice ON" else "Only My Voice OFF")
+    }
+    onlyRow.addView(onlySw); uv.addView(onlyRow)
+
+    val bypassRow = LinearLayout(this); bypassRow.gravity = Gravity.CENTER_VERTICAL
+    bypassRow.addView(tv("Bypass on manual tap / unmute", 14f, TXT), LinearLayout.LayoutParams(0, -2, 1f))
+    val bypassSw = Switch(this); bypassSw.isChecked = UserVoiceProfile.bypassOnManual(this)
+    bypassSw.setOnCheckedChangeListener { _, v -> Prefs.plain(this).edit().putBoolean("f_voice_match_bypass_manual", v).apply() }
+    bypassRow.addView(bypassSw); uv.addView(bypassRow)
+
+    val mediaRow = LinearLayout(this); mediaRow.gravity = Gravity.CENTER_VERTICAL
+    mediaRow.addView(tv("Ignore media/TV noise when playing", 14f, TXT), LinearLayout.LayoutParams(0, -2, 1f))
+    val mediaSw = Switch(this); mediaSw.isChecked = UserVoiceProfile.rejectMediaNoise(this)
+    mediaSw.setOnCheckedChangeListener { _, v -> Prefs.plain(this).edit().putBoolean("f_voice_reject_media", v).apply() }
+    mediaRow.addView(mediaSw); uv.addView(mediaRow)
+
+    uv.addView(tv("Voice Match Strictness preset", 13f, SUB))
+    val strictRow = LinearLayout(this)
+    fun paintStrict() {
+      val cur = UserVoiceProfile.strictnessPreset(this)
+      for (i in 0 until strictRow.childCount) {
+        val c = strictRow.getChildAt(i) as? TextView ?: continue
+        val tag = c.tag as? String ?: continue
+        val sel = tag == cur
+        c.background = bg(if (sel) ACC2 else SURF2, 18)
+        c.setTextColor(if (sel) Color.WHITE else TXT)
+      }
+    }
+    listOf("relaxed" to "Relaxed", "balanced" to "Balanced", "strict" to "Strict").forEach { (k, label) ->
+      val ch = chip(label) {
+        val v = UserVoiceProfile.applyStrictnessPreset(this, k)
+        paintStrict(); uvStatus.text = UserVoiceProfile.statusSummary(this)
+        VoiceService.instance?.refreshSpeakerGuardConfig()
+        toast("$label strictness: ${v}%")
+        refresh()
+      }
+      ch.tag = k
+      val lp = LinearLayout.LayoutParams(-2, -2); lp.rightMargin = dp(8)
+      strictRow.addView(ch, lp)
+    }
+    uv.addView(strictRow); paintStrict()
+
+    val thLabel = tv("", 14f, TXT)
+    val thSeek = SeekBar(this); thSeek.max = 100; thSeek.progress = UserVoiceProfile.threshold(this)
+    fun paintTh() {
+      val v = thSeek.progress.coerceIn(0, 100)
+      thLabel.text = "Minimum Voice Match: ${v}%"
+      uvStatus.text = UserVoiceProfile.statusSummary(this)
+    }
+    paintTh()
+    thSeek.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+      override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
+        if (fromUser) {
+          val v = progress.coerceIn(0, 100)
+          UserVoiceProfile.setThreshold(this@MainActivity, v)
+          Prefs.plain(this@MainActivity).edit().putString("voice_match_strictness", "custom").apply()
+          paintTh(); paintStrict()
+          VoiceService.instance?.refreshSpeakerGuardConfig()
+        }
+      }
+      override fun onStartTrackingTouch(seekBar: SeekBar?) {}
+      override fun onStopTrackingTouch(seekBar: SeekBar?) { toast("Voice match threshold saved: ${thSeek.progress}%") }
+    })
+    uv.addView(thLabel)
+    uv.addView(tv("Voice is accepted only when match confidence is at or above this percentage. 50% means matchScore >= 50 is required.", 11f, SUB))
+    uv.addView(thSeek)
+
+    val enrollRow = LinearLayout(this); enrollRow.orientation = LinearLayout.HORIZONTAL
+    enrollRow.addView(btn("Enroll / Re-enroll", ACC2) {
+      val dlg = AlertDialog.Builder(this).setTitle("Enroll My Voice").setMessage("Preparing…").setCancelable(false).setNegativeButton("Close", null).show()
+      val vs = VoiceService.instance
+      if (vs != null) {
+        vs.enrollUserVoice(3, onProgress = { prog ->
+          runOnUiThread { if (dlg.isShowing) dlg.setMessage("Step ${prog.step}/${prog.total}: ${prog.message}") }
+        }, onDone = { res ->
+          runOnUiThread {
+            if (dlg.isShowing) dlg.setMessage(if (res.ok) res.message else "Failed: ${res.message}")
+            dlg.setCancelable(true)
+            uvStatus.text = UserVoiceProfile.statusSummary(this)
+            paintTh(); paintStrict(); refresh()
+          }
+        })
+      } else {
+        Thread {
+          val res = VoiceEnrollment.enroll(applicationContext, 3) { prog ->
+            runOnUiThread { if (dlg.isShowing) dlg.setMessage("Step ${prog.step}/${prog.total}: ${prog.message}") }
+          }
+          runOnUiThread {
+            if (dlg.isShowing) dlg.setMessage(if (res.ok) res.message else "Failed: ${res.message}")
+            dlg.setCancelable(true)
+            uvStatus.text = UserVoiceProfile.statusSummary(this)
+            paintTh(); paintStrict(); refresh()
+          }
+        }.start()
+      }
+    }, LinearLayout.LayoutParams(0, -2, 1f))
+    enrollRow.addView(btn("Clear Sample", SURF2) {
+      AlertDialog.Builder(this).setMessage("Clear enrolled voice sample?").setPositiveButton("Clear") { _, _ ->
+        UserVoiceProfile.clear(this); uvStatus.text = UserVoiceProfile.statusSummary(this)
+        VoiceService.instance?.clearUserVoiceEnrollment(); toast("Voice sample cleared")
+      }.setNegativeButton("Cancel", null).show()
+    }, LinearLayout.LayoutParams(0, -2, 1f))
+    uv.addView(enrollRow, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8) })
+
+    uv.addView(btn("Test voice match now", SURF2) {
+      if (!UserVoiceProfile.exists(this)) { toast("Enroll your voice first"); return@btn }
+      val dlg = AlertDialog.Builder(this).setTitle("Voice Match Test").setMessage("Recording ~3s… speak now.").setCancelable(false).setNegativeButton("Close", null).show()
+      Thread {
+        val pct = VoiceEnrollment.quickCheck(applicationContext)
+        runOnUiThread {
+          val th = UserVoiceProfile.threshold(this)
+          val msg = if (pct == null) "Could not capture/check voice. Check mic permission."
+          else "Match: ${"%.1f".format(pct)}% · Threshold: ${th}% · " + if (pct >= th) "ACCEPT" else "REJECT"
+          if (dlg.isShowing) { dlg.setMessage(msg); dlg.setCancelable(true) }
+          Bus.add("system", "Voice match test: $msg", true)
+        }
+      }.start()
+    }, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8) })
+
+    updaters.add {
+      if (Bus.running) uvLive.text = VoiceService.instance?.speakerStatus() ?: "Service not running"
+      else uvLive.text = "Start Saara to see live speaker-match diagnostics."
+    }
+
     feature(root, "Confirm before calls", "Ask before placing calls.", "confirm_calls", true, { true }, "", {})
     feature(root, "Confirm before SMS/messages", "Ask before sending SMS/WhatsApp/Telegram/replies.", "confirm_messages", true, { true }, "", {})
     feature(root, "Offline/503 fallback retry", "Auto-retry transient network/503 errors with backoff and queue pending tasks.", "f_offline_retry", true, { true }, "", {})

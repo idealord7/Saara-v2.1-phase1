@@ -122,6 +122,11 @@ class VoiceService : Service() {
   @Volatile private var sessionId: String = ""
   @Volatile private var lastTaskNote: String = ""
 
+  // --- User-only voice / speaker focus ---
+  private val speakerGuard = SpeakerGuard(this)
+  @Volatile private var manualVoiceBypassUntil = 0L
+  @Volatile private var lastVoiceRejectLogAt = 0L
+
   private fun sessionTimeoutEnabled(): Boolean =
     Prefs.plain(this).getBoolean(PREF_SESSION_TIMEOUT_ENABLED, true)
 
@@ -134,9 +139,99 @@ class VoiceService : Service() {
   fun refreshWakeConfig() {
     main.post {
       wakePatterns = buildWakePatterns(loadWakePhrases(Prefs.plain(this)))
-    localWakeUnavailable = false; localWakeWarned = false
+      localWakeUnavailable = false; localWakeWarned = false
+      refreshSpeakerGuardConfig()
       if (isSaraActive) resetSessionTimer()
     }
+  }
+
+  fun refreshSpeakerGuardConfig() {
+    val enabled = UserVoiceProfile.onlyUserVoiceEnabled(this)
+    speakerGuard.enabled = enabled
+    if (!enabled) {
+      speakerGuard.reset()
+      speakerGuard.lastDecision = "disabled"
+    } else {
+      speakerGuard.ensureStarted()
+      speakerGuard.markStarted()
+      if (!UserVoiceProfile.exists(this)) {
+        Bus.add("system", "Only My Voice is ON, but no voice sample is enrolled. Open Settings > User-Only Voice and enroll your voice.", true)
+      }
+    }
+  }
+
+  fun isManualVoiceBypassActive(): Boolean = System.currentTimeMillis() < manualVoiceBypassUntil
+
+  fun markManualVoiceBypass(reason: String = "manual") {
+    manualVoiceBypassUntil = System.currentTimeMillis() + 12_000L
+    speakerGuard.lastDecision = "bypass_$reason"
+  }
+
+  fun speakerStatus(): String {
+    val enabled = UserVoiceProfile.onlyUserVoiceEnabled(this)
+    if (!enabled) return "Only My Voice: OFF"
+    val th = UserVoiceProfile.threshold(this)
+    val pct = speakerGuard.lastMatchPercent
+    val pctStr = if (pct >= 0f) "%.0f%%".format(pct) else "n/a"
+    val enrolled = UserVoiceProfile.exists(this)
+    return "Only My Voice: ON · enrolled=${if (enrolled) "yes" else "no"} · last=$pctStr · threshold=${th}% · ${speakerGuard.lastDecision}"
+  }
+
+  fun enrollUserVoice(samples: Int = 3, onProgress: (VoiceEnrollment.Progress) -> Unit = {}, onDone: (VoiceEnrollment.Result) -> Unit = {}) {
+    Thread {
+      suspendWakeForEnrollment()
+      try {
+        val res = VoiceEnrollment.enroll(applicationContext, samples, onProgress)
+        if (res.ok) {
+          val th = UserVoiceProfile.threshold(applicationContext)
+          Bus.add("system", "Voice enrolled. Only My Voice matching active at ${th}% threshold.", true)
+        } else {
+          Bus.add("system", "Voice enrollment failed: ${res.message}", true)
+        }
+        main.post { onDone(res) }
+      } catch (e: Exception) {
+        Bus.add("system", "Voice enrollment error: ${e.message}", true)
+        main.post { onDone(VoiceEnrollment.Result(false, e.message ?: "Enrollment failed")) }
+      } finally {
+        resumeWakeAfterEnrollment()
+      }
+    }.apply { name = "saara-voice-enroll"; isDaemon = true; start() }
+  }
+
+  fun clearUserVoiceEnrollment() {
+    UserVoiceProfile.clear(this)
+    speakerGuard.reset()
+    speakerGuard.lastDecision = "cleared"
+    Bus.add("system", "Enrolled voice sample cleared.", true)
+  }
+
+  private fun shouldRejectNonUserVoice(source: String, manualBypass: Boolean = false): Boolean {
+    if (!UserVoiceProfile.onlyUserVoiceEnabled(this)) return false
+    if (!UserVoiceProfile.exists(this)) return false // graceful fallback; warned in config
+    if (manualBypass && UserVoiceProfile.bypassOnManual(this)) {
+      speakerGuard.lastDecision = "bypass_manual"
+      return false
+    }
+    if (UserVoiceProfile.rejectMediaNoise(this) && SpeakerGuard.isMediaPlaying(this)) {
+      val now = System.currentTimeMillis()
+      if (now - lastVoiceRejectLogAt > 3000L) {
+        lastVoiceRejectLogAt = now
+        Bus.add("system", "Ignored audio during media playback ($source).", true)
+      }
+      speakerGuard.lastDecision = "media_playing"
+      return true
+    }
+    val ok = speakerGuard.shouldAccept(manualBypass = false)
+    if (ok) return false
+    val now = System.currentTimeMillis()
+    if (now - lastVoiceRejectLogAt > 2500L) {
+      lastVoiceRejectLogAt = now
+      val pct = speakerGuard.lastMatchPercent
+      val th = UserVoiceProfile.threshold(this)
+      val pctStr = if (pct >= 0f) "%.0f%%".format(pct) else "n/a"
+      Bus.add("system", "Voice rejected: $pctStr < ${th}% threshold ($source).", true)
+    }
+    return true
   }
 
   private fun buildWakePatterns(phrases: List<String>): List<Regex> {
@@ -180,6 +275,7 @@ class VoiceService : Service() {
       Prefs.plain(this).edit().putBoolean("mic_enabled", micEnabled).apply()
       if (micEnabled) {
         bubbleDismissedByUser = false
+        markManualVoiceBypass("mic_toggle")
         Bus.add("system", "Microphone ON. Listening now.", true)
         ensureCaptureStarted()
         if (ready && running && !callActive) {
@@ -279,6 +375,7 @@ class VoiceService : Service() {
 
   fun onExplicitTrigger() {
     bubbleDismissedByUser = false
+    markManualVoiceBypass("bubble_tap")
     refreshBubble()
   }
 
@@ -411,13 +508,21 @@ class VoiceService : Service() {
 
     if (!isSaraActive) {
       val afterWake = extractWakeCommand(heard) ?: return // software: ignore all non-wake/background
+      if (shouldRejectNonUserVoice("cloud-wake", manualBypass = isManualVoiceBypassActive())) return
       isSaraActive = true
       resetSessionTimer()
-      Bus.add("system", "Wake word heard.", true)
+      val pct = speakerGuard.lastMatchPercent
+      val th = UserVoiceProfile.threshold(this)
+      if (UserVoiceProfile.onlyUserVoiceEnabled(this) && pct >= 0f) {
+        Bus.add("system", "Wake word heard (voice match ${"%.0f".format(pct)}% >= ${th}%).", true)
+      } else {
+        Bus.add("system", "Wake word heard.", true)
+      }
       if (afterWake.isNotBlank()) processUtterance(afterWake)
       return
     }
 
+    if (shouldRejectNonUserVoice("command", manualBypass = isManualVoiceBypassActive())) return
     resetSessionTimer()
     processUtterance(heard)
   }
@@ -510,11 +615,18 @@ class VoiceService : Service() {
 
   private fun onLocalWakeDetected() {
     if (!running || !micEnabled || callActive || enrolling) return
+    if (shouldRejectNonUserVoice("wake-word", manualBypass = isManualVoiceBypassActive())) return
     if (!isSaraActive) {
       isSaraActive = true
       resetSessionTimer()
       stopIdleWakeEngine()
-      Bus.add("system", "Wake word heard.", true)
+      val pct = speakerGuard.lastMatchPercent
+      val th = UserVoiceProfile.threshold(this)
+      if (UserVoiceProfile.onlyUserVoiceEnabled(this) && pct >= 0f) {
+        Bus.add("system", "Wake word heard (voice match ${"%.0f".format(pct)}% >= ${th}%).", true)
+      } else {
+        Bus.add("system", "Wake word heard.", true)
+      }
       Bus.setStatus("Listening")
     }
   }
@@ -550,6 +662,8 @@ class VoiceService : Service() {
       rec.startRecording()
       captureRunning = true
       refreshNotif()
+      refreshSpeakerGuardConfig()
+      if (UserVoiceProfile.onlyUserVoiceEnabled(this)) { speakerGuard.ensureStarted(); speakerGuard.markStarted() }
       Bus.setStatus(if (isSaraActive) "Connected · listening" else "Connected · say a wake phrase")
       if (!isSaraActive) main.post { maybeStartIdleWakeEngine() }
       captureThread = Thread {
@@ -560,19 +674,23 @@ class VoiceService : Service() {
           if (n > 0) {
             if (!micEnabled || callActive || enrolling || !ready) continue
             val speaking = System.currentTimeMillis() < speakingUntil + 120L
+            var si = 0; var bi = 0
+            val scount = n / 2
+            while (bi + 1 < n && si < scount) {
+              val lo = buf[bi].toInt() and 0xff
+              val hi = buf[bi + 1].toInt()
+              shorts[si++] = ((hi shl 8) or lo).toShort()
+              bi += 2
+            }
+            val onlyUser = UserVoiceProfile.onlyUserVoiceEnabled(this@VoiceService)
+            if (onlyUser && !speaking && si > 0) {
+              try { speakerGuard.feed(shorts, si) } catch (_: Exception) {}
+            }
             if (!isSaraActive) {
               val eng = wakeEngine
               if (eng != null && eng.running && !localWakeUnavailable) {
                 // IDLE: on-device wake only. No Gemini stream.
                 if (!speaking) {
-                  var si = 0; var bi = 0
-                  val scount = n / 2
-                  while (bi + 1 < n && si < scount) {
-                    val lo = buf[bi].toInt() and 0xff
-                    val hi = buf[bi + 1].toInt()
-                    shorts[si++] = ((hi shl 8) or lo).toShort()
-                    bi += 2
-                  }
                   try { eng.feed(shorts, si) } catch (_: Exception) {}
                 }
                 continue
@@ -619,6 +737,7 @@ class VoiceService : Service() {
   private fun stopCapture() {
     captureRunning = false
     stopIdleWakeEngine()
+    try { speakerGuard.stop() } catch (_: Exception) {}
     try { audioRecord?.stop() } catch (_: Exception) {}
     try { audioRecord?.release() } catch (_: Exception) {}
     audioRecord = null
@@ -698,6 +817,7 @@ class VoiceService : Service() {
     micEnabled = Prefs.plain(this).getBoolean("mic_enabled", true)
     wakePatterns = buildWakePatterns(loadWakePhrases(Prefs.plain(this)))
     localWakeUnavailable = false; localWakeWarned = false
+    refreshSpeakerGuardConfig()
     liveModelIndex = 0; liveCandidates = emptyList(); liveModel = ModelRouter.primaryModel(this)
     migrateFacts(this)
     ensureSessionId()
