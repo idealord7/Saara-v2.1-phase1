@@ -154,18 +154,21 @@ object UserVoiceProfile {
   fun applyStrictnessPreset(c: Context, preset: String): Int {
     val v = when (preset.lowercase()) {
       "relaxed" -> 35
-      "strict" -> 75
+      "strict" -> 80
       else -> 50
     }
     Prefs.plain(c).edit().putString("voice_match_strictness", preset.lowercase()).putInt("voice_match_threshold", v).apply()
     return v
   }
 
+  fun verifyAllInputsEnabled(c: Context): Boolean = Prefs.on(c, "f_voice_verify_all", true)
+
   /** Human-readable status for settings/diagnostics. */
   fun statusSummary(c: Context): String {
     val p = load(c)
     val th = threshold(c)
+    val all = if (verifyAllInputsEnabled(c)) "all-inputs" else "wake-only"
     return if (p == null) "No voice sample enrolled. Enroll your voice to enable matching."
-    else "Enrolled ${p.sampleCount} sample(s), threshold ${th}%."
+    else "Enrolled ${p.sampleCount} sample(s), threshold ${th}%, $all."
   }
 }

@@ -160,9 +160,11 @@ class VoiceService : Service() {
     }
   }
 
-  fun isManualVoiceBypassActive(): Boolean = System.currentTimeMillis() < manualVoiceBypassUntil
+  fun isManualVoiceBypassActive(): Boolean =
+    UserVoiceProfile.bypassOnManual(this) && System.currentTimeMillis() < manualVoiceBypassUntil
 
   fun markManualVoiceBypass(reason: String = "manual") {
+    if (!UserVoiceProfile.bypassOnManual(this)) return
     manualVoiceBypassUntil = System.currentTimeMillis() + 12_000L
     speakerGuard.lastDecision = "bypass_$reason"
   }
@@ -174,7 +176,8 @@ class VoiceService : Service() {
     val pct = speakerGuard.lastMatchPercent
     val pctStr = if (pct >= 0f) "%.0f%%".format(pct) else "n/a"
     val enrolled = UserVoiceProfile.exists(this)
-    return "Only My Voice: ON · enrolled=${if (enrolled) "yes" else "no"} · last=$pctStr · threshold=${th}% · ${speakerGuard.lastDecision}"
+    val scope = if (UserVoiceProfile.verifyAllInputsEnabled(this)) "all-inputs" else "wake-only"
+    return "Only My Voice: ON · $scope · enrolled=${if (enrolled) "yes" else "no"} · last=$pctStr · threshold=${th}% · ${speakerGuard.lastDecision}"
   }
 
   fun enrollUserVoice(samples: Int = 6, onProgress: (VoiceEnrollment.Progress) -> Unit = {}, onDone: (VoiceEnrollment.Result) -> Unit = {}) {
@@ -255,7 +258,10 @@ class VoiceService : Service() {
       val now = System.currentTimeMillis()
       if (now - lastVoiceRejectLogAt > 3000L) {
         lastVoiceRejectLogAt = now
-        Bus.add("system", "Ignored audio during media playback ($source).", true)
+        val pct = speakerGuard.lastMatchPercent
+        val th = UserVoiceProfile.threshold(this)
+        val pctStr = if (pct >= 0f) "%.0f%%".format(pct) else "n/a"
+        Bus.add("system", "Voice rejected: $pctStr < ${th}% threshold ($source, media_playback).", true)
       }
       speakerGuard.lastDecision = "media_playing"
       return true
@@ -268,7 +274,12 @@ class VoiceService : Service() {
       val pct = speakerGuard.lastMatchPercent
       val th = UserVoiceProfile.threshold(this)
       val pctStr = if (pct >= 0f) "%.0f%%".format(pct) else "n/a"
-      Bus.add("system", "Voice rejected: $pctStr < ${th}% threshold ($source).", true)
+      val reason = when (speakerGuard.lastDecision) {
+        "no_recent_match" -> "no_voice_match"
+        "media_playing" -> "media_playback"
+        else -> "below_threshold"
+      }
+      Bus.add("system", "Voice rejected: $pctStr < ${th}% threshold ($source, $reason).", true)
     }
     return true
   }
@@ -601,7 +612,8 @@ class VoiceService : Service() {
       return
     }
 
-    if (shouldRejectNonUserVoice("command", manualBypass = isManualVoiceBypassActive())) return
+    if (UserVoiceProfile.verifyAllInputsEnabled(this) &&
+        shouldRejectNonUserVoice("command", manualBypass = isManualVoiceBypassActive())) return
     resetSessionTimer()
     processUtterance(heard)
   }
@@ -748,7 +760,7 @@ class VoiceService : Service() {
       captureRunning = true
       refreshNotif()
       refreshSpeakerGuardConfig()
-      if (UserVoiceProfile.onlyUserVoiceEnabled(this)) { speakerGuard.ensureStarted(); speakerGuard.markStarted() }
+      if (UserVoiceProfile.onlyUserVoiceEnabled(this)) { speakerGuard.ensureStarted(); speakerGuard.markStarted(); speakerGuard.reset() }
       Bus.setStatus(if (isSaraActive) "Connected · listening" else "Connected · say a wake phrase")
       if (!isSaraActive) main.post { maybeStartIdleWakeEngine() }
       captureThread = Thread {
@@ -782,6 +794,7 @@ class VoiceService : Service() {
               }
               // Fallback: stream for inputTranscription wake detection only; handle() suppresses Gemini responses/actions in idle.
               if (speaking) continue
+              if (onlyUser && shouldRejectNonUserVoice("wake_audio", manualBypass = isManualVoiceBypassActive())) continue
               val socket = ws ?: continue
               val chunk = ByteArray(n)
               System.arraycopy(buf, 0, chunk, 0, n)
@@ -794,8 +807,9 @@ class VoiceService : Service() {
               continue
             }
             // ACTIVE: do NOT stream mic to Gemini while Saara is speaking — prevents self-voice feedback loop (mic hears TTS).
-            // Barge-in via voice is disabled during playback; listening resumes after speaking guard.
             if (speaking) continue
+            if (onlyUser && UserVoiceProfile.verifyAllInputsEnabled(this@VoiceService) &&
+                shouldRejectNonUserVoice(if (isSaraActive) "live_audio" else "wake_audio", manualBypass = isManualVoiceBypassActive())) continue
             val socket = ws ?: continue
             val chunk = ByteArray(n)
             System.arraycopy(buf, 0, chunk, 0, n)

@@ -595,16 +595,33 @@ class MainActivity : AppCompatActivity() {
     }
     onlyRow.addView(onlySw); uv.addView(onlyRow)
 
+    val allRow = LinearLayout(this); allRow.gravity = Gravity.CENTER_VERTICAL
+    allRow.addView(tv("Verify every voice input & command (Always-On)", 14f, TXT), LinearLayout.LayoutParams(0, -2, 1f))
+    val allSw = Switch(this); allSw.isChecked = UserVoiceProfile.verifyAllInputsEnabled(this)
+    allSw.setOnCheckedChangeListener { _, v ->
+      Prefs.plain(this).edit().putBoolean("f_voice_verify_all", v).apply()
+      VoiceService.instance?.refreshSpeakerGuardConfig()
+      uvStatus.text = UserVoiceProfile.statusSummary(this)
+      toast(if (v) "Always-On voice verification ON" else "Wake-only verification")
+    }
+    allRow.addView(allSw); uv.addView(allRow)
+
     val bypassRow = LinearLayout(this); bypassRow.gravity = Gravity.CENTER_VERTICAL
     bypassRow.addView(tv("Bypass on manual tap / unmute", 14f, TXT), LinearLayout.LayoutParams(0, -2, 1f))
     val bypassSw = Switch(this); bypassSw.isChecked = UserVoiceProfile.bypassOnManual(this)
-    bypassSw.setOnCheckedChangeListener { _, v -> Prefs.plain(this).edit().putBoolean("f_voice_match_bypass_manual", v).apply() }
+    bypassSw.setOnCheckedChangeListener { _, v ->
+      Prefs.plain(this).edit().putBoolean("f_voice_match_bypass_manual", v).apply()
+      VoiceService.instance?.refreshSpeakerGuardConfig()
+    }
     bypassRow.addView(bypassSw); uv.addView(bypassRow)
 
     val mediaRow = LinearLayout(this); mediaRow.gravity = Gravity.CENTER_VERTICAL
-    mediaRow.addView(tv("Ignore media/TV noise when playing", 14f, TXT), LinearLayout.LayoutParams(0, -2, 1f))
+    mediaRow.addView(tv("Ignore media/TV/background playback noise", 14f, TXT), LinearLayout.LayoutParams(0, -2, 1f))
     val mediaSw = Switch(this); mediaSw.isChecked = UserVoiceProfile.rejectMediaNoise(this)
-    mediaSw.setOnCheckedChangeListener { _, v -> Prefs.plain(this).edit().putBoolean("f_voice_reject_media", v).apply() }
+    mediaSw.setOnCheckedChangeListener { _, v ->
+      Prefs.plain(this).edit().putBoolean("f_voice_reject_media", v).apply()
+      VoiceService.instance?.refreshSpeakerGuardConfig()
+    }
     mediaRow.addView(mediaSw); uv.addView(mediaRow)
 
     uv.addView(tv("Voice Match Strictness preset", 13f, SUB))
@@ -655,7 +672,7 @@ class MainActivity : AppCompatActivity() {
       override fun onStopTrackingTouch(seekBar: SeekBar?) { toast("Voice match threshold saved: ${thSeek.progress}%") }
     })
     uv.addView(thLabel)
-    uv.addView(tv("Voice is accepted only when match confidence is at or above this percentage. 50% means matchScore >= 50 is required.", 11f, SUB))
+    uv.addView(tv("Voice is accepted only when match confidence is at or above this percentage. 50% means matchScore >= 50. Strict preset is 80%; you can still drag to 100% manually.", 11f, SUB))
     uv.addView(thSeek)
 
     val enrollRow = LinearLayout(this); enrollRow.orientation = LinearLayout.HORIZONTAL
