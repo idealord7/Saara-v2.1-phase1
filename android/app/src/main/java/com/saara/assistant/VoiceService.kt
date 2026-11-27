@@ -179,7 +179,6 @@ class VoiceService : Service() {
 
   fun enrollUserVoice(samples: Int = 3, onProgress: (VoiceEnrollment.Progress) -> Unit = {}, onDone: (VoiceEnrollment.Result) -> Unit = {}) {
     Thread {
-      val wasMuted = !micEnabled
       val wasActive = isSaraActive
       try {
         val perm = ContextCompat.checkSelfPermission(applicationContext, Manifest.permission.RECORD_AUDIO)
@@ -189,17 +188,32 @@ class VoiceService : Service() {
           main.post { onDone(res) }
           return@Thread
         }
+
+        val handoff = java.util.concurrent.CountDownLatch(1)
         main.post {
-          suspendWakeForEnrollment()
-          Bus.add("system", "Preparing microphone for voice enrollment…", false)
+          try {
+            suspendWakeForEnrollment()
+            Bus.add("system", "Preparing microphone for voice enrollment…", false)
+          } finally {
+            handoff.countDown()
+          }
         }
+        try { handoff.await(2, java.util.concurrent.TimeUnit.SECONDS) } catch (_: Exception) {}
+
         // Wait for active capture/wake engine to fully release mic hardware.
         var waited = 0
-        while (waited < 2500 && (captureRunning || audioRecord != null || captureStarting.get())) {
+        while (waited < 3500 && (captureRunning || audioRecord != null || captureStarting.get())) {
           try { Thread.sleep(80) } catch (_: Exception) {}
           waited += 80
         }
-        try { Thread.sleep(250) } catch (_: Exception) {}
+        try { Thread.sleep(350) } catch (_: Exception) {}
+
+        if (captureRunning || audioRecord != null) {
+          val res = VoiceEnrollment.Result(false, "Microphone is still in use by Saara capture. Stop Saara and try again.")
+          Bus.add("system", "Voice enrollment failed: ${res.message}", true)
+          main.post { onDone(res) }
+          return@Thread
+        }
 
         val res = VoiceEnrollment.enroll(applicationContext, samples, onProgress)
         if (res.ok) {
@@ -209,8 +223,9 @@ class VoiceService : Service() {
           Bus.add("system", "Voice enrollment failed: ${res.message}", true)
         }
         main.post { onDone(res) }
-      } catch (e: Exception) {
-        val msg = e.message ?: e.javaClass.simpleName
+      } catch (t: Throwable) {
+        val msg = t.message ?: t.javaClass.simpleName
+        Log.e("VoiceService", "Voice enrollment error", t)
         Bus.add("system", "Voice enrollment error: $msg", true)
         main.post { onDone(VoiceEnrollment.Result(false, msg)) }
       } finally {
