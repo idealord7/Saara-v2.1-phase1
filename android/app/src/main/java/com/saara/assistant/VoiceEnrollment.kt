@@ -144,7 +144,7 @@ object VoiceEnrollment {
               built.startRecording()
             } catch (e: Exception) {
               lastReason = "startRecording failed (${sourceName(source)}, ${rate}Hz): ${e.message ?: e.javaClass.simpleName}"
-              runCatching { builtFeat.close() }
+              runCatching { builtFeat?.close() }
               runCatching { built.release() }
               recorder = null
               feat = null
@@ -154,7 +154,7 @@ object VoiceEnrollment {
               lastReason = "recorder did not enter recording state (${sourceName(source)}, ${rate}Hz, state=${built.recordingState})"
               runCatching { built.stop() }
               runCatching { built.release() }
-              runCatching { builtFeat.close() }
+              runCatching { builtFeat?.close() }
               recorder = null
               feat = null
               continue
@@ -163,7 +163,7 @@ object VoiceEnrollment {
             val (vec, captureErr) = captureFromRecorder(built, builtFeat, rate, source)
             runCatching { built.stop() }
             runCatching { built.release() }
-            runCatching { builtFeat.close() }
+            runCatching { builtFeat?.close() }
             recorder = null
             feat = null
             if (vec != null) return vec
