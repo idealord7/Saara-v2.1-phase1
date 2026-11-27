@@ -55,9 +55,16 @@ object VoiceEnrollment {
       }
       onProgress(Progress(i, total, "Recording sample $i/$total… Speak naturally for ~3 seconds."))
       val failure = CaptureFailure("")
-      val vec = recordOneSample(c, failure)
+      val vec = try {
+        recordOneSample(c, failure)
+      } catch (t: Throwable) {
+        Log.e("VoiceEnrollment", "recordOneSample threw", t)
+        failure.reason = "capture exception: ${t.message ?: t.javaClass.simpleName}"
+        null
+      }
       if (vec == null) {
-        val reason = failure.reason.ifBlank { "unknown capture failure" }
+        val reason = failure.reason.ifBlank { "unknown capture failure (no diagnostic reason reported)" }
+        Log.w("VoiceEnrollment", "Sample $i failed: $reason")
         return Result(false, "Could not record sample $i: $reason", vectors.size)
       }
       vectors.add(vec)
@@ -69,8 +76,8 @@ object VoiceEnrollment {
       val profile = UserVoiceProfile.enroll(vectors)
       UserVoiceProfile.save(c, profile)
       Result(true, "Voice enrolled (${vectors.size} samples). Only-your-voice matching is ready.", vectors.size)
-    } catch (e: Exception) {
-      Result(false, "Failed to save voice profile: ${e.message ?: "unknown error"}", vectors.size)
+    } catch (t: Throwable) {
+      Result(false, "Failed to save voice profile: ${t.message ?: t.javaClass.simpleName}", vectors.size)
     }
   }
 
