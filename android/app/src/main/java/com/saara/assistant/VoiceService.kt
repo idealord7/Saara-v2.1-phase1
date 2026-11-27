@@ -547,7 +547,13 @@ class VoiceService : Service() {
   fun sendText(t: String) { startSession(); processUtterance(t) }
 
   fun runScheduled(text: String): Boolean {
-    Bus.add("system", "Scheduled task fired at ${SimpleDateFormat("dd MMM yyyy, hh:mm:ss a", Locale.getDefault()).format(Date())}: $text", true)
+    val now = SimpleDateFormat("dd MMM yyyy, hh:mm:ss a", Locale.getDefault()).format(Date())
+    Bus.add("system", "Scheduled task fired at $now: $text", true)
+    if (!running) return false
+    // Deliver to active/ready session when possible; keep queued otherwise.
+    if (ready) {
+      try { startSession(); tellModel("[Scheduled automation] $text. Execute this now if appropriate, follow rules, and confirm briefly.") ; return true } catch (_: Exception) {}
+    }
     return false
   }
 
@@ -618,6 +624,137 @@ class VoiceService : Service() {
     processUtterance(heard)
   }
 
+  private fun normCmd(s: String) = s.lowercase(Locale.ROOT).replace(Regex("[^\p{L}\p{N}% ]+"), " ").replace(Regex("\s+"), " ").trim()
+
+  private fun speakLocal(text: String) {
+    Bus.add("saara", text, true)
+  }
+
+  private fun localControl(a: JSONObject): String = try { Tools.run(applicationContext, "saara_app_control", a) } catch (e: Exception) { "error: ${e.message}" }
+
+  private fun tryHandleLocalSelfControl(raw: String): Boolean {
+    val n = normCmd(raw)
+    if (n.isBlank()) return false
+    val asksSettings = listOf("what are your current settings","current settings","your settings","app settings","saara settings","what settings do you have","status report","self status","your status").any { n.contains(it) }
+    val asksAlwaysOn = n.contains("always on") && n.contains("speaker") || n.contains("verify every voice input")
+    val asksReplyRules = n.contains("replying rules") || n.contains("reply rules")
+    val asksModels = n.contains("what models") || n.contains("configured models") || n.contains("model settings")
+    val asksWake = n.contains("wake phrases") || n.contains("wake phrase")
+    val asksSession = n.contains("session timeout")
+    val asksClipboard = n.contains("read clipboard") || n.contains("what s on my clipboard") || n.contains("whats on my clipboard") || n.contains("clipboard")
+
+    // Read-only questions
+    if (asksClipboard && !n.contains("set") && !n.contains("change")) {
+      speakLocal(SaaraSelfState.readClipboard(applicationContext)); return true
+    }
+    if (asksSettings || asksAlwaysOn || asksReplyRules || asksModels || asksWake || asksSession) {
+      val section = when {
+        asksAlwaysOn -> "settings"
+        asksReplyRules -> "rules"
+        asksModels -> "models"
+        asksWake -> "settings"
+        asksSession -> "settings"
+        n.contains("status") || n.contains("service") -> "status"
+        n.contains("history") || n.contains("chat") -> "history"
+        n.contains("capabilit") -> "capabilities"
+        else -> "all"
+      }
+      val snap = try { JSONObject(SaaraSelfState.snapshot(applicationContext, section)) } catch (_: Exception) { JSONObject() }
+      val msg = when {
+        asksAlwaysOn -> {
+          val s = snap.optJSONObject("settings") ?: JSONObject()
+          "Always-On speaker match is ${if (s.optBoolean("verifyEveryInput")) "ON" else "OFF"}. Only My Voice is ${if (s.optBoolean("onlyMyVoice")) "ON" else "OFF"}, threshold ${s.optInt("voiceMatchThreshold")}%."
+        }
+        asksReplyRules -> {
+          val r = snap.optJSONObject("rules") ?: JSONObject()
+          val arr = r.optJSONArray("replyRules") ?: JSONArray()
+          if (arr.length() == 0) "There are no replying rules configured."
+          else buildString {
+            append("Replying rules: ${arr.length()}. ")
+            for (i in 0 until minOf(arr.length(), 5)) {
+              val it = arr.optJSONObject(i) ?: continue
+              append("#${it.optLong("id")} ${it.optString("name").ifBlank { "Rule" }} ${if (it.optBoolean("enabled")) "ON" else "OFF"}; ")
+            }
+          }.trim()
+        }
+        asksModels -> {
+          val m = snap.optJSONObject("models") ?: JSONObject()
+          "Primary model ${m.optString("primary")}. Auto-fallback ${if (m.optBoolean("autoFallback")) "ON" else "OFF"}. Smart selection ${if (m.optBoolean("smartSelection")) "ON" else "OFF"}. Fallbacks: ${(m.optJSONArray("fallbacks")?.let { ja -> (0 until ja.length()).map { ja.optString(it) }.filter { it.isNotBlank() }.joinToString(", ") } ?: "")}."
+        }
+        asksWake -> {
+          val s = snap.optJSONObject("settings") ?: JSONObject()
+          val wp = s.optJSONArray("wakePhrases") ?: JSONArray()
+          "Wake phrases: ${(0 until wp.length()).map { wp.optString(it) }.joinToString(", ")}."
+        }
+        asksSession -> {
+          val s = snap.optJSONObject("settings") ?: JSONObject()
+          val on = s.optBoolean("sessionTimeoutEnabled")
+          val sec = s.optInt("sessionTimeoutSec")
+          if (on && sec > 0) "Session timeout is ON at ${sec} seconds." else "Session timeout is OFF."
+        }
+        else -> SaaraSelfState.concise(applicationContext).replace("SAARA SELF-STATE (real app state; private/local):\n", "Current Saara settings: ")
+      }
+      speakLocal(msg.take(700)); return true
+    }
+
+    // Mutating commands
+    fun hasAny(vararg ks: String) = ks.any { n.contains(it) }
+    val setMatch = Regex("""\b(set|change|make)\b.*\b(session timeout|timeout)\b.*?(\d{1,3})""").find(n)
+    if (setMatch != null) {
+      val sec = setMatch.groupValues[3].toIntOrNull()?.coerceIn(0,999) ?: return false
+      speakLocal(localControl(JSONObject().put("action","set_session_timeout").put("seconds", sec))); return true
+    }
+    if (hasAny("turn off session timeout","disable session timeout","session timeout off")) { speakLocal(localControl(JSONObject().put("action","toggle_session_timeout").put("enabled", false))); return true }
+    if (hasAny("turn on session timeout","enable session timeout","session timeout on")) { speakLocal(localControl(JSONObject().put("action","toggle_session_timeout").put("enabled", true))); return true }
+
+    Regex("""\b(set|change)\b.*\blanguage\b.*\b(auto|bn|bengali|hi|hindi|en|english|hinglish)\b""").find(n)?.let { m ->
+      val v = m.groupValues[2]
+      val lang = when { v=="bn"||v.contains("beng") -> "bn"; v=="hi"||v.contains("hin") -> "hi"; v=="en"||v.contains("eng") -> "en"; v=="hinglish" -> "hinglish"; else -> "auto" }
+      speakLocal(localControl(JSONObject().put("action","set_language").put("value", lang))); return true
+    }
+
+    Regex("""\b(add|create)\b.*\bwake phrase\b(.+)""").find(raw.lowercase(Locale.ROOT))?.let { m ->
+      val phrase = m.groupValues[2].replace(Regex("""^[\s:,-]+"""), "").trim().trim('"','\'')
+      if (phrase.isNotBlank()) { speakLocal(localControl(JSONObject().put("action","add_wake_phrase").put("value", phrase))); return true }
+    }
+    Regex("""\b(remove|delete)\b.*\bwake phrase\b(.+)""").find(raw.lowercase(Locale.ROOT))?.let { m ->
+      val phrase = m.groupValues[2].replace(Regex("""^[\s:,-]+"""), "").trim().trim('"','\'')
+      if (phrase.isNotBlank()) { speakLocal(localControl(JSONObject().put("action","remove_wake_phrase").put("value", phrase))); return true }
+    }
+
+    fun toggleAction(keywords: List<String>, action: String, onWords: List<String>, offWords: List<String>): Boolean {
+      if (!keywords.any { n.contains(it) }) return false
+      val enabled = when { onWords.any { n.contains(it) } -> true; offWords.any { n.contains(it) } -> false; else -> return false }
+      speakLocal(localControl(JSONObject().put("action", action).put("enabled", enabled))); return true
+    }
+    if (toggleAction(listOf("only catch my voice","only my voice"), "toggle_only_my_voice", listOf("turn on","enable","on"), listOf("turn off","disable","off"))) return true
+    if (toggleAction(listOf("verify every voice input","always on speaker","always on voice"), "toggle_verify_every_input", listOf("turn on","enable","on"), listOf("turn off","disable","off"))) return true
+    if (toggleAction(listOf("bypass on manual tap","bypass manual tap"), "toggle_bypass_manual_tap", listOf("turn on","enable","on"), listOf("turn off","disable","off"))) return true
+    if (toggleAction(listOf("ignore media","background playback noise"), "toggle_ignore_media_noise", listOf("turn on","enable","on"), listOf("turn off","disable","off"))) return true
+    if (toggleAction(listOf("notification auto reply master","auto reply master"), "toggle_auto_reply_master", listOf("turn on","enable","on"), listOf("turn off","disable","off"))) return true
+    if (toggleAction(listOf("ai smart auto reply","gemini auto reply","ai auto reply"), "toggle_ai_auto_reply", listOf("turn on","enable","on"), listOf("turn off","disable","off"))) return true
+
+    Regex("""\b(set|change)\b.*\b(strictness|voice match)\b.*\b(relaxed|balanced|strict)\b""").find(n)?.let { m ->
+      speakLocal(localControl(JSONObject().put("action","set_voice_strictness").put("value", m.groupValues[3]))); return true
+    }
+    Regex("""\b(set|change)\b.*\b(minimum voice match|voice match threshold|voice match)\b.*?(\d{1,3})\s*%?""").find(n)?.let { m ->
+      val pct = m.groupValues[2].toIntOrNull()?.coerceIn(0,100) ?: return false
+      speakLocal(localControl(JSONObject().put("action","set_voice_match_threshold").put("percent", pct))); return true
+    }
+
+    if (hasAny("enroll voice","re enroll voice","reenroll voice","enroll my voice")) { speakLocal(localControl(JSONObject().put("action","enroll_voice"))); return true }
+    if (hasAny("clear voice sample","delete voice sample","clear enrolled voice")) { speakLocal(localControl(JSONObject().put("action","clear_voice_sample").put("confirmed", TaskControl.isApproved()))); return true }
+    if (hasAny("test voice match","test my voice match")) { speakLocal(localControl(JSONObject().put("action","test_voice_match"))); return true }
+
+    if (hasAny("clear chat history","delete chat history")) { speakLocal(localControl(JSONObject().put("action","clear_chat_history").put("confirmed", TaskControl.isApproved()))); return true }
+    if (hasAny("clear recent session state","clear session state")) { speakLocal(localControl(JSONObject().put("action","clear_recent_session_state").put("confirmed", TaskControl.isApproved()))); return true }
+
+    if (hasAny("detect supported models","detect models","refresh models")) { speakLocal(localControl(JSONObject().put("action","detect_supported_models"))); return true }
+    if (hasAny("save model settings")) { speakLocal(localControl(JSONObject().put("action","save_model_settings"))); return true }
+
+    return false
+  }
+
   private fun processUtterance(text: String) {
     if (text.isBlank()) return
     val cleaned = extractWakeCommand(text)?.takeIf { it.isNotBlank() } ?: text.trim()
@@ -639,6 +776,12 @@ class VoiceService : Service() {
     lastTaskNote = cleaned.take(220)
     noteSession(status = "active_goal", activeGoal = cleaned.take(300), lastStep = "received user request", pending = "understand and execute request", lastError = "")
     try { Db.get(this).usage("command", "turn") } catch (_: Exception) {}
+
+    // Fast local self-awareness/app-control path (works offline/connected; keeps real state).
+    if (tryHandleLocalSelfControl(cleaned)) {
+      resetSessionTimer(); return
+    }
+
     if (ready) ws?.send(JSONObject().put("realtimeInput", JSONObject().put("text", cleaned)).toString())
     else {
       noteSession(status = "disconnected", lastError = "Gemini not connected", pending = cleaned.take(220))
@@ -1144,13 +1287,17 @@ class VoiceService : Service() {
       "SELF-LEARNING: before repeating a multi-step task, call recall_task to check which steps worked or failed. After solving a new task or discovering a better method, call remember_task with concise working steps. Never put contacts, messages, ledger data, URLs, or screen text into remember_task. " +
       "Do not ask for private shop ledger details. Local ledger data is not sent to Gemini. " +
       "Live camera and screen frames are sent to Gemini only while the user turns camera or screen sharing ON; the user can turn them off at any time. While Screen automation is ON, on-device tool results may include screen text so you can complete the task. Contacts, SMS, call log, and notification contents may be accessed only when the user asks or when handling an incoming notification/reply; use them only for the requested task and keep responses concise. Links and spreadsheet data are fetched and stored locally by the app, not by Gemini. " +
+      "SELF-AWARENESS: You know your own app settings/state. For questions about your current settings, status, rules, wake phrases, speaker focus, auto-reply toggles, models, chat/session counts, or capabilities, call read_saara_self_state or saara_app_control(action='read_*') and answer from real app state. Never guess. " +
+      "APP CONTROL: Use saara_app_control for voice-requested app actions: read clipboard, change session timeout/language/wake phrases/speaker focus, manage automation/replying/pre-action rules, toggle auto-reply master/AI reply, clear chat/session history, detect/save model settings, enroll/clear/test voice match. Destructive actions require confirmation and are guarded by the tool. " +
+      "AUTO-REPLY ISOLATION: never include personal learned memory/facts into external auto-replies or external notification replies unless explicitly in replying rule data/instructions; keep external replies context-safe. " +
       if (taskMemory.isBlank()) "" else "The short task-memory hints below contain goal names, tool names and outcomes with numbers/emails redacted; they do not contain contacts, messages, ledger data, or screen text.\n$taskMemory"
     val rules = try { Db.get(this).rulesPrompt() } catch (_: Exception) { "" }
+    val selfState = try { SaaraSelfState.concise(this) } catch (_: Exception) { "" }
     val s = JSONObject()
       .put("model", "models/$model")
       .put("generationConfig", JSONObject().put("responseModalities", JSONArray().put("AUDIO"))
         .put("speechConfig", JSONObject().put("voiceConfig", JSONObject().put("prebuiltVoiceConfig", JSONObject().put("voiceName", voice)))))
-      .put("systemInstruction", JSONObject().put("parts", JSONArray().put(JSONObject().put("text", ins + rules + factMemory + sessionMemory))))
+      .put("systemInstruction", JSONObject().put("parts", JSONArray().put(JSONObject().put("text", ins + rules + factMemory + sessionMemory + (if (selfState.isBlank()) "" else "\n\n" + selfState)))))
       .put("tools", Tools.declarations())
       .put("inputAudioTranscription", JSONObject())
       .put("outputAudioTranscription", JSONObject())

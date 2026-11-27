@@ -41,6 +41,7 @@ class MainActivity : AppCompatActivity() {
   private val GOOD = 0xFF81C995.toInt(); private val WARN = 0xFFFDD663.toInt(); private val BAD = 0xFFF28B82.toInt()
 
   private val updaters = ArrayList<() -> Unit>()
+  private val settingsUpdaters = ArrayList<() -> Unit>()
   private val pages = ArrayList<View>()
   private val navItems = ArrayList<Pair<TextView, TextView>>()
   private var curTab = 0
@@ -58,6 +59,9 @@ class MainActivity : AppCompatActivity() {
   private lateinit var taskBox: LinearLayout
   private lateinit var contactsBox: LinearLayout
   private lateinit var contactsSearch: EditText
+  private var settingsRoot: LinearLayout? = null
+  private var settingsScroll: ScrollView? = null
+  private var lastSettingsRebuild = 0L
   private val shown = HashMap<Long, TextView>()
   private var lastId = 0L
   private var firstId = Long.MAX_VALUE
@@ -229,7 +233,7 @@ class MainActivity : AppCompatActivity() {
     curTab = i
     pages.forEachIndexed { k, p -> p.visibility = if (k == i) View.VISIBLE else View.GONE }
     navItems.forEachIndexed { k, (ic, lb) -> lb.setTextColor(if (k == i) ACC else SUB); ic.alpha = if (k == i) 1f else 0.6f }
-    when (i) { 1 -> { rebuildLearning(); rebuildShop() }; 2 -> rebuildTasks(); 3 -> refresh() }
+    when (i) { 1 -> { rebuildLearning(); rebuildShop() }; 2 -> rebuildTasks(); 3 -> { rebuildSettings(force = true); refresh() } }
   }
 
   // ---------- CHAT ----------
@@ -397,7 +401,7 @@ class MainActivity : AppCompatActivity() {
     val glp = LinearLayout.LayoutParams(-1, -2); glp.topMargin = dp(8)
     if (grantLabel.isNotEmpty()) c.addView(g, glp)
     extra?.invoke(c)
-    updaters.add {
+    addSettingsUpdater {
       val good = ok()
       st.text = if (good) (if (grantLabel.isEmpty()) "✓ Ready" else "✓ Permission granted") else "⚠ Permission needed"
       st.setTextColor(if (good) GOOD else WARN)
@@ -477,7 +481,7 @@ class MainActivity : AppCompatActivity() {
       return row
     }
     var readyBuilt = false
-    updaters.add {
+    addSettingsUpdater {
       try {
         if (!readyBuilt || ready.childCount == 0) {
           ready.removeAllViews()
@@ -732,7 +736,7 @@ class MainActivity : AppCompatActivity() {
       }.start()
     }, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8) })
 
-    updaters.add {
+    addSettingsUpdater {
       if (Bus.running) uvLive.text = VoiceService.instance?.speakerStatus() ?: "Service not running"
       else uvLive.text = "Start Saara to see live speaker-match diagnostics."
     }
@@ -1246,11 +1250,32 @@ class MainActivity : AppCompatActivity() {
   private val VOICES = listOf("Aoede", "Kore", "Leda", "Zephyr", "Callirrhoe", "Autonoe", "Despina", "Puck", "Charon", "Fenrir", "Orus")
   private val MODELS = listOf("gemini-3.1-flash-live-preview", "gemini-2.5-flash-native-audio-preview-12-2025", "gemini-live-2.5-flash-preview")
 
+  private fun addSettingsUpdater(u: () -> Unit) { settingsUpdaters.add(u); updaters.add(u) }
+
+  private fun rebuildSettings(force: Boolean = false) {
+    val now = SystemClock.elapsedRealtime()
+    if (!force && now - lastSettingsRebuild < 1200L) return
+    val root = settingsRoot ?: return
+    lastSettingsRebuild = now
+    val y = settingsScroll?.scrollY ?: 0
+    updaters.removeAll { settingsUpdaters.contains(it) }
+    settingsUpdaters.clear()
+    root.removeAllViews()
+    heading(root, "Settings")
+    addFeatures(root)
+    addSettingsSections(root)
+    settingsScroll?.post { settingsScroll?.scrollTo(0, y) }
+  }
+
   private fun buildSettings(): View {
     val (sv, root) = page()
-    heading(root, "Settings")
+    settingsScroll = sv
+    settingsRoot = root
+    rebuildSettings()
+    return sv
+  }
 
-    addFeatures(root)
+  private fun addSettingsSections(root: LinearLayout) {
 
     // wake phrases & session timeout
     val cw = card(root)
@@ -1399,13 +1424,16 @@ class MainActivity : AppCompatActivity() {
     }
     c4.addView(tv(summary, 12f, SUB))
     val clr = btn("Clear chat history", SURF2) {
-      AlertDialog.Builder(this).setMessage("Delete all saved chats? Learned memory and shop data stay.").setPositiveButton("Delete") { _, _ -> Bus.clear() }.setNegativeButton("Cancel", null).show()
+      AlertDialog.Builder(this).setMessage("Delete all saved chats? Learned memory and shop data stay.").setPositiveButton("Delete") { _, _ -> Bus.clear(); Bus.add("system", "Chat history cleared.", true); refresh() }.setNegativeButton("Cancel", null).show()
     }
     c4.addView(clr, lp1)
     val clrSession = btn("Clear recent session state", SURF2) {
-      try { Db.get(this).sessionStateClear(true) } catch (_: Exception) {}
-      toast("Recent session state cleared")
-      refresh()
+      AlertDialog.Builder(this).setMessage("Clear recent session state? This removes active/pending session continuity but keeps chat history.").setPositiveButton("Clear") { _, _ ->
+        try { Db.get(this).sessionStateClear(true) } catch (_: Exception) {}
+        Bus.add("system", "Recent session state cleared.", true)
+        toast("Recent session state cleared")
+        refresh()
+      }.setNegativeButton("Cancel", null).show()
     }
     c4.addView(clrSession, lp1)
 
@@ -1487,6 +1515,7 @@ class MainActivity : AppCompatActivity() {
 
   // ---------- live refresh ----------
   private fun refresh() {
+    if (curTab == 3) rebuildSettings()
     for (u in updaters) try { u() } catch (_: Exception) {}
     statusTv.text = Bus.status + (if (Bus.camOn) "  •  camera live" else "") + (if (Bus.screenOn) "  •  screen live" else "")
     startBtn.text = if (Bus.running) "Stop" else "Start"
@@ -1522,7 +1551,7 @@ class MainActivity : AppCompatActivity() {
     super.onResume(); visible = true; Bus.listen(busListener); refresh()
     SaaraNotifications.requestRebindIfPossible(this)
     VoiceService.instance?.refreshBubble()
-    if (curTab == 3 && has(Manifest.permission.READ_CONTACTS)) scheduleContactsRefresh()
+    if (curTab == 3) rebuildSettings(force = true)
     Bus.ping()
   }
   override fun onPause() { visible = false; Bus.unlisten(busListener); super.onPause() }

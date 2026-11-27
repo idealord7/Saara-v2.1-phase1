@@ -82,6 +82,21 @@ object TaskControl {
         "send message to ${target.ifBlank { "recipient" }} (high-risk action)"
       }
     }
+    "saara_app_control" -> {
+      val action = a.optString("action").trim().lowercase(Locale.ROOT)
+      val destructive = setOf("clear_chat_history", "clear_recent_session_state", "clear_voice_sample", "delete_automation_rule", "delete_reply_rule", "delete_pre_action_rule")
+      if (action in destructive && !a.optBoolean("confirmed", false)) {
+        when (action) {
+          "clear_chat_history" -> "clear all saved chat history"
+          "clear_recent_session_state" -> "clear recent session state"
+          "clear_voice_sample" -> "clear enrolled voice sample"
+          "delete_automation_rule" -> "delete automation rule #${a.optLong("id")}"
+          "delete_reply_rule" -> "delete replying rule #${a.optLong("id")}"
+          "delete_pre_action_rule" -> "delete pre-action rule #${a.optLong("id")}"
+          else -> "perform destructive app action '$action'"
+        }
+      } else null
+    }
     else -> null
   }
 

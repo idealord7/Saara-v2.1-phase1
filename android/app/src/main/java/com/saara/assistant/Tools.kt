@@ -54,7 +54,9 @@ object Tools {
 {"name":"cancel_task","description":"Cancel a scheduled task by id. Cancellation needs confirmation.","parameters":{"type":"OBJECT","properties":{"id":{"type":"NUMBER"},"confirmed":{"type":"BOOLEAN"}},"required":["id"]}},
 {"name":"reply_notification","description":"Reply to an incoming notification by key/sender (WhatsApp, WhatsApp Business, Telegram, SMS app notifications, etc.). Use when user asks to reply to a received message/notification. If key is unknown, provide sender/name; tool will target latest matching cached notification. Works via Notification access without opening app.","parameters":{"type":"OBJECT","properties":{"key":{"type":"STRING"},"sender":{"type":"STRING"},"text":{"type":"STRING"},"confirmed":{"type":"BOOLEAN"}},"required":["text"]}},
 {"name":"send_direct_message","description":"Send a message directly without opening apps when possible. channel: sms | whatsapp | whatsapp_business | telegram. target=contact name or number. For sms sends via SMS manager. For WhatsApp/Telegram uses latest notification reply action for that sender/chat (no app open) and reports if no replyable notification exists.","parameters":{"type":"OBJECT","properties":{"channel":{"type":"STRING"},"target":{"type":"STRING"},"text":{"type":"STRING"},"confirmed":{"type":"BOOLEAN"}},"required":["channel","target","text"]}},
-{"name":"fetch_url","description":"Fetch a public webpage or Google Sheet shared as 'Anyone with the link' and return its readable text.","parameters":{"type":"OBJECT","properties":{"url":{"type":"STRING"}},"required":["url"]}}
+{"name":"fetch_url","description":"Fetch a public webpage or Google Sheet shared as 'Anyone with the link' and return its readable text.","parameters":{"type":"OBJECT","properties":{"url":{"type":"STRING"}},"required":["url"]}},
+{"name":"read_saara_self_state","description":"Read Saara's real app settings/state/capabilities. Use for questions like current settings, status, wake phrases, speaker focus, rules, auto-reply toggles, models, chat/session counts. section optional: all|status|settings|permissions|rules|history|models|capabilities.","parameters":{"type":"OBJECT","properties":{"section":{"type":"STRING"}}}},
+{"name":"saara_app_control","description":"Read or control Saara app settings/rules/models/history via voice. Actions: read_settings, read_clipboard, set_session_timeout, toggle_session_timeout, read_language, set_language, list_wake_phrases, add_wake_phrase, remove_wake_phrase, toggle_only_my_voice, toggle_verify_every_input, toggle_bypass_manual_tap, toggle_ignore_media_noise, set_voice_strictness, set_voice_match_threshold, enroll_voice, clear_voice_sample, test_voice_match, list_automation_rules, add_automation_rule, edit_automation_rule, delete_automation_rule, toggle_auto_reply_master, toggle_ai_auto_reply, list_reply_rules, add_reply_rule, edit_reply_rule, delete_reply_rule, list_pre_action_rules, add_pre_action_rule, edit_pre_action_rule, delete_pre_action_rule, clear_chat_history, clear_recent_session_state, detect_supported_models, set_model_settings, save_model_settings. Destructive actions require confirmed=true.","parameters":{"type":"OBJECT","properties":{"action":{"type":"STRING"},"section":{"type":"STRING"},"value":{"type":"STRING"},"enabled":{"type":"BOOLEAN"},"seconds":{"type":"NUMBER"},"percent":{"type":"NUMBER"},"id":{"type":"NUMBER"},"name":{"type":"STRING"},"text":{"type":"STRING"},"trigger":{"type":"STRING"},"condition":{"type":"STRING"},"ruleAction":{"type":"STRING"},"cooldownMs":{"type":"NUMBER"},"apps":{"type":"STRING"},"senders":{"type":"STRING"},"blockedSenders":{"type":"STRING"},"chatType":{"type":"STRING"},"keywords":{"type":"STRING"},"quietStart":{"type":"STRING"},"quietEnd":{"type":"STRING"},"screenOffOnly":{"type":"BOOLEAN"},"mode":{"type":"STRING"},"instruction":{"type":"STRING"},"replyData":{"type":"STRING"},"vipSenders":{"type":"STRING"},"muteSenders":{"type":"STRING"},"primaryModel":{"type":"STRING"},"fallbackModels":{"type":"STRING"},"autoReplyModel":{"type":"STRING"},"visionModel":{"type":"STRING"},"complexModel":{"type":"STRING"},"autoFallback":{"type":"BOOLEAN"},"smartSelection":{"type":"BOOLEAN"},"retryCount":{"type":"NUMBER"},"retryDelayMs":{"type":"NUMBER"},"confirmed":{"type":"BOOLEAN"}},"required":["action"]}}
 ]}]""")
 
   fun shopReport(c: Context, item: String): String {
@@ -197,6 +199,8 @@ object Tools {
         "reply_notification" -> if (!Prefs.on(c, "f_notif", false)) off("Notification auto-reply") else SaaraNotifications.reply(a.optString("key"), a.optString("sender"), a.optString("text").trim().ifBlank { return "error: reply text is empty" })
         "send_direct_message" -> sendDirect(c, a)
         "fetch_url" -> fetchUrlText(a.optString("url"))
+        "read_saara_self_state" -> SaaraSelfState.snapshot(c, a.optString("section", "all"))
+        "saara_app_control" -> saaraAppControl(c, a)
         else -> "unknown tool"
       }
     } catch (e: Exception) { "error: ${e.message}" }
@@ -218,6 +222,8 @@ object Tools {
     if (name in setOf("shop_report", "shop_record", "list_tasks", "fetch_url")) {
       return "Completed on this phone. Private local contents were kept on the device."
     }
+    if (name == "read_saara_self_state") return result.take(7000)
+    if (name == "saara_app_control") return result.take(3500)
     if (name in setOf("device_control", "reply_notification", "send_direct_message")) return result.take(6000)
     // User explicitly asked for on-device reads/actions (contacts/messages/call log/notifications).
     // Keep output bounded but do not replace with a generic privacy placeholder.
@@ -351,6 +357,226 @@ object Tools {
       }
     }
     return if (out.isEmpty()) "No SMS messages found" + if (target.isNotBlank()) " for '$target'" else "" else out.joinToString("\n")
+  }
+
+
+  private fun reqConfirm(action: String, detail: String): String =
+    "CONFIRMATION REQUIRED: $detail has NOT been done. Ask the user to confirm clearly. After confirmation, retry saara_app_control with action='$action' and confirmed=true."
+
+  private fun syncSettingsUi() {
+    try { Bus.ping() } catch (_: Exception) {}
+  }
+
+  private fun saaraAppControl(c: Context, a: JSONObject): String {
+    val action = a.optString("action").trim().lowercase(Locale.ROOT)
+    val confirmed = a.optBoolean("confirmed", false)
+    val db = Db.get(c)
+    val p = Prefs.plain(c)
+    fun onOff(b: Boolean) = if (b) "ON" else "OFF"
+
+    val destructive = setOf("clear_chat_history", "clear_recent_session_state", "clear_voice_sample", "delete_automation_rule", "delete_reply_rule", "delete_pre_action_rule")
+    if (action in destructive && !confirmed) {
+      return when (action) {
+        "clear_chat_history" -> reqConfirm(action, "clear all saved chat history")
+        "clear_recent_session_state" -> reqConfirm(action, "clear recent session state")
+        "clear_voice_sample" -> reqConfirm(action, "clear enrolled voice sample")
+        "delete_automation_rule" -> reqConfirm(action, "delete automation rule #${a.optLong("id")}")
+        "delete_reply_rule" -> reqConfirm(action, "delete replying rule #${a.optLong("id")}")
+        "delete_pre_action_rule" -> reqConfirm(action, "delete pre-action rule #${a.optLong("id")}")
+        else -> reqConfirm(action, action)
+      }
+    }
+
+    return when (action) {
+      "read_settings", "read_all", "read_status" -> SaaraSelfState.snapshot(c, a.optString("section", "all"))
+      "read_clipboard" -> SaaraSelfState.readClipboard(c)
+
+      "set_session_timeout" -> {
+        val sec = a.optInt("seconds", a.optInt("value", -1)).coerceIn(0, 999)
+        p.edit().putInt(VoiceService.PREF_SESSION_TIMEOUT_SEC, sec).putBoolean(VoiceService.PREF_SESSION_TIMEOUT_ENABLED, sec > 0).apply()
+        VoiceService.instance?.refreshWakeConfig(); syncSettingsUi()
+        if (sec <= 0) "Session timeout turned OFF." else "Session timeout set to ${sec}s."
+      }
+      "toggle_session_timeout" -> {
+        val enabled = if (a.has("enabled")) a.optBoolean("enabled") else !(p.getBoolean(VoiceService.PREF_SESSION_TIMEOUT_ENABLED, true) && p.getInt(VoiceService.PREF_SESSION_TIMEOUT_SEC, VoiceService.DEFAULT_SESSION_TIMEOUT_SEC) > 0)
+        var sec = p.getInt(VoiceService.PREF_SESSION_TIMEOUT_SEC, VoiceService.DEFAULT_SESSION_TIMEOUT_SEC).coerceIn(0, 999)
+        if (enabled && sec <= 0) sec = VoiceService.DEFAULT_SESSION_TIMEOUT_SEC
+        p.edit().putBoolean(VoiceService.PREF_SESSION_TIMEOUT_ENABLED, enabled).putInt(VoiceService.PREF_SESSION_TIMEOUT_SEC, sec).apply()
+        VoiceService.instance?.refreshWakeConfig(); syncSettingsUi()
+        if (enabled) "Session timeout ON (${sec}s)." else "Session timeout OFF."
+      }
+
+      "read_language" -> "Language priority: ${p.getString("lang", "auto") ?: "auto"}"
+      "set_language" -> {
+        val v = a.optString("value", a.optString("text", "")).trim().lowercase(Locale.ROOT)
+        val lang = when {
+          v in setOf("auto","bn","hi","en","hinglish") -> v
+          v.contains("bang") || v.contains("ben") -> "bn"
+          v.contains("hin") -> "hi"
+          v.contains("english") || v == "eng" -> "en"
+          v.contains("hinglish") -> "hinglish"
+          else -> return "error: invalid language. Use auto, bn, hi, en, or hinglish."
+        }
+        p.edit().putString("lang", lang).apply(); syncSettingsUi()
+        "Language priority set to $lang. Restart Saara to fully apply live prompt behavior."
+      }
+
+      "list_wake_phrases" -> "Wake phrases: ${VoiceService.loadWakePhrases(p).joinToString(", ")}"
+      "add_wake_phrase" -> {
+        val phrase = a.optString("value", a.optString("text", a.optString("name", ""))).trim()
+        if (phrase.isBlank()) return "error: wake phrase is required"
+        val cur = VoiceService.loadWakePhrases(p)
+        if (cur.none { it.equals(phrase, true) }) cur.add(phrase)
+        val e = p.edit(); VoiceService.saveWakePhrases(e, cur); e.apply()
+        VoiceService.instance?.refreshWakeConfig(); syncSettingsUi()
+        "Wake phrase added: $phrase"
+      }
+      "remove_wake_phrase" -> {
+        val phrase = a.optString("value", a.optString("text", a.optString("name", ""))).trim()
+        if (phrase.isBlank()) return "error: wake phrase is required"
+        val cur = VoiceService.loadWakePhrases(p)
+        val removed = cur.removeAll { it.equals(phrase, true) }
+        val e = p.edit(); VoiceService.saveWakePhrases(e, cur); e.apply()
+        VoiceService.instance?.refreshWakeConfig(); syncSettingsUi()
+        if (removed) "Wake phrase removed: $phrase" else "Wake phrase not found: $phrase"
+      }
+
+      "toggle_only_my_voice" -> {
+        val v = if (a.has("enabled")) a.optBoolean("enabled") else !UserVoiceProfile.onlyUserVoiceEnabled(c)
+        p.edit().putBoolean("f_only_user_voice", v).apply(); VoiceService.instance?.refreshSpeakerGuardConfig(); syncSettingsUi()
+        "Only Catch My Voice ${onOff(v)}."
+      }
+      "toggle_verify_every_input" -> {
+        val v = if (a.has("enabled")) a.optBoolean("enabled") else !UserVoiceProfile.verifyAllInputsEnabled(c)
+        p.edit().putBoolean("f_voice_verify_all", v).apply(); VoiceService.instance?.refreshSpeakerGuardConfig(); syncSettingsUi()
+        "Verify every voice input & command ${onOff(v)}."
+      }
+      "toggle_bypass_manual_tap" -> {
+        val v = if (a.has("enabled")) a.optBoolean("enabled") else !UserVoiceProfile.bypassOnManual(c)
+        p.edit().putBoolean("f_voice_match_bypass_manual", v).apply(); VoiceService.instance?.refreshSpeakerGuardConfig(); syncSettingsUi()
+        "Bypass on manual tap / unmute ${onOff(v)}."
+      }
+      "toggle_ignore_media_noise" -> {
+        val v = if (a.has("enabled")) a.optBoolean("enabled") else !UserVoiceProfile.rejectMediaNoise(c)
+        p.edit().putBoolean("f_voice_reject_media", v).apply(); VoiceService.instance?.refreshSpeakerGuardConfig(); syncSettingsUi()
+        "Ignore media/TV/background playback noise ${onOff(v)}."
+      }
+      "set_voice_strictness" -> {
+        val v = a.optString("value", a.optString("text", "")).trim().lowercase(Locale.ROOT)
+        val preset = when { v.startsWith("relax") -> "relaxed"; v.startsWith("strict") -> "strict"; v.startsWith("bal") -> "balanced"; else -> return "error: strictness must be Relaxed, Balanced, or Strict" }
+        val pct = UserVoiceProfile.applyStrictnessPreset(c, preset)
+        VoiceService.instance?.refreshSpeakerGuardConfig(); syncSettingsUi()
+        "Voice Match Strictness set to ${preset.replaceFirstChar { it.uppercase() }} (${pct}%)."
+      }
+      "set_voice_match_threshold" -> {
+        val pct = a.optInt("percent", a.optInt("value", -1)).coerceIn(0, 100)
+        UserVoiceProfile.setThreshold(c, pct)
+        p.edit().putString("voice_match_strictness", "custom").apply()
+        VoiceService.instance?.refreshSpeakerGuardConfig(); syncSettingsUi()
+        "Minimum Voice Match set to ${pct}%."
+      }
+      "enroll_voice" -> {
+        val vs = VoiceService.instance ?: return "Saara service is not running. Start Saara, then ask to enroll voice."
+        vs.enrollUserVoice(6, onProgress = { prog -> Bus.add("system", "Voice enrollment ${prog.step}/${prog.total}: ${prog.message}", true) }, onDone = { res ->
+          Bus.add("system", if (res.ok) "Voice enrollment complete: ${res.message}" else "Voice enrollment failed: ${res.message}", true)
+          syncSettingsUi()
+        })
+        "Voice enrollment started. Follow the on-screen/audio prompts and speak naturally."
+      }
+      "clear_voice_sample" -> {
+        VoiceService.instance?.clearUserVoiceEnrollment() ?: run { UserVoiceProfile.clear(c); Bus.add("system", "Enrolled voice sample cleared.", true) }
+        syncSettingsUi(); "Enrolled voice sample cleared."
+      }
+      "test_voice_match" -> {
+        if (!UserVoiceProfile.exists(c)) return "No voice sample enrolled."
+        Thread {
+          try { VoiceService.instance?.suspendWakeForEnrollment(); Thread.sleep(350) } catch (_: Exception) {}
+          val (pct, err) = VoiceEnrollment.quickCheck(c)
+          try { VoiceService.instance?.resumeWakeAfterEnrollment() } catch (_: Exception) {}
+          val th = UserVoiceProfile.threshold(c)
+          val msg = if (pct == null) "Voice match test failed: ${err ?: "unknown error"}" else "Voice match ${"%.1f".format(pct)}% vs threshold ${th}%: ${if (pct >= th) "ACCEPT" else "REJECT"}"
+          Bus.add("system", msg, true)
+        }.start()
+        "Voice match test started. Speak now for about 3 seconds."
+      }
+
+      "list_automation_rules" -> {
+        val rules = db.autoRules()
+        if (rules.isEmpty()) "No automation rules." else rules.joinToString("\n") { "#${it.id} ${if (it.enabled) "ON" else "OFF"} ${it.name} · trigger=${it.trigger} · condition=${it.condition} · action=${it.action}" }
+      }
+      "add_automation_rule" -> {
+        val r = AutoRule(0, a.optString("name"), a.optBoolean("enabled", true), a.optString("trigger", "time"), a.optString("condition"), a.optString("ruleAction", a.optString("actionText", a.optString("text"))), a.optLong("cooldownMs", 0L), 0L, System.currentTimeMillis())
+        if (r.action.isBlank() && r.trigger.isBlank()) return "error: automation rule needs trigger/action"
+        val id = db.autoRuleAdd(r); Automation.scheduleAll(c); syncSettingsUi(); "Automation rule added #$id."
+      }
+      "edit_automation_rule" -> {
+        val id = a.optLong("id", -1L); val ex = db.autoRules().firstOrNull { it.id == id } ?: return "error: automation rule not found"
+        val r = AutoRule(id, a.optString("name", ex.name), if (a.has("enabled")) a.optBoolean("enabled") else ex.enabled, a.optString("trigger", ex.trigger), a.optString("condition", ex.condition), a.optString("ruleAction", a.optString("actionText", a.optString("text", ex.action))), if (a.has("cooldownMs")) a.optLong("cooldownMs") else ex.cooldownMs, ex.lastFiredMs, System.currentTimeMillis())
+        db.autoRuleUpdate(r); Automation.scheduleAll(c); syncSettingsUi(); "Automation rule #$id updated."
+      }
+      "delete_automation_rule" -> { val id = a.optLong("id", -1L); db.autoRuleDelete(id); Automation.cancel(c, id); syncSettingsUi(); "Automation rule #$id deleted." }
+
+      "toggle_auto_reply_master" -> {
+        val v = if (a.has("enabled")) a.optBoolean("enabled") else !Prefs.on(c, "f_notif", false)
+        p.edit().putBoolean("f_notif", v).apply(); syncSettingsUi(); "Notification auto-reply master ${onOff(v)}."
+      }
+      "toggle_ai_auto_reply" -> {
+        val v = if (a.has("enabled")) a.optBoolean("enabled") else !Prefs.on(c, "f_ai_reply", false)
+        p.edit().putBoolean("f_ai_reply", v).apply(); syncSettingsUi(); "AI smart auto-reply (Gemini) ${onOff(v)}."
+      }
+
+      "list_reply_rules" -> {
+        val rules = db.replyRules()
+        if (rules.isEmpty()) "No replying rules." else rules.joinToString("\n") { "#${it.id} ${if (it.enabled) "ON" else "OFF"} ${it.name} · apps=${it.apps} · senders=${it.senders} · keywords=${it.keywords} · mode=${it.mode}" }
+      }
+      "add_reply_rule" -> {
+        val r = ReplyRule(0, a.optString("name"), a.optBoolean("enabled", true), a.optString("apps"), a.optString("senders"), a.optString("blockedSenders"), a.optString("chatType", "any"), a.optString("keywords"), a.optString("quietStart"), a.optString("quietEnd"), a.optBoolean("screenOffOnly", false), a.optString("mode", "ai"), a.optString("instruction", a.optString("text")), System.currentTimeMillis(), a.optString("vipSenders"), a.optString("muteSenders"), a.optString("replyData"))
+        val id = db.replyRuleAdd(r); syncSettingsUi(); "Replying rule added #$id."
+      }
+      "edit_reply_rule" -> {
+        val id = a.optLong("id", -1L); val ex = db.replyRules().firstOrNull { it.id == id } ?: return "error: replying rule not found"
+        val r = ReplyRule(id, a.optString("name", ex.name), if (a.has("enabled")) a.optBoolean("enabled") else ex.enabled, a.optString("apps", ex.apps), a.optString("senders", ex.senders), a.optString("blockedSenders", ex.blockedSenders), a.optString("chatType", ex.chatType), a.optString("keywords", ex.keywords), a.optString("quietStart", ex.quietStart), a.optString("quietEnd", ex.quietEnd), if (a.has("screenOffOnly")) a.optBoolean("screenOffOnly") else ex.screenOffOnly, a.optString("mode", ex.mode), a.optString("instruction", a.optString("text", ex.instruction)), System.currentTimeMillis(), a.optString("vipSenders", ex.vipSenders), a.optString("muteSenders", ex.muteSenders), a.optString("replyData", ex.replyData))
+        db.replyRuleUpdate(r); syncSettingsUi(); "Replying rule #$id updated."
+      }
+      "delete_reply_rule" -> { val id = a.optLong("id", -1L); db.replyRuleDelete(id); syncSettingsUi(); "Replying rule #$id deleted." }
+
+      "list_pre_action_rules" -> {
+        val rules = db.rules()
+        if (rules.isEmpty()) "No pre-action rules." else rules.joinToString("\n") { "#${it.id} ${if (it.enabled) "ON" else "OFF"} ${it.text}" }
+      }
+      "add_pre_action_rule" -> {
+        val text = a.optString("text", a.optString("value", "")).trim()
+        if (text.isBlank()) return "error: rule text is required"
+        val id = db.ruleAdd(text); syncSettingsUi(); "Pre-action rule added #$id."
+      }
+      "edit_pre_action_rule" -> {
+        val id = a.optLong("id", -1L); val text = a.optString("text", a.optString("value", "")).trim()
+        if (id <= 0L || text.isBlank()) return "error: id and text are required"
+        db.ruleUpdate(id, text); syncSettingsUi(); "Pre-action rule #$id updated."
+      }
+      "delete_pre_action_rule" -> { val id = a.optLong("id", -1L); db.ruleDelete(id); syncSettingsUi(); "Pre-action rule #$id deleted." }
+
+      "clear_chat_history" -> { Bus.clear(); syncSettingsUi(); "Chat history cleared." }
+      "clear_recent_session_state" -> { try { db.sessionStateClear(true) } catch (_: Exception) {}; syncSettingsUi(); "Recent session state cleared." }
+
+      "detect_supported_models" -> SaaraSelfState.detectSupportedModels(c)
+      "set_model_settings", "save_model_settings" -> {
+        val fallbacks = a.optString("fallbackModels").takeIf { it.isNotBlank() }?.split('\n', ',')?.map { it.trim() }?.filter { it.isNotBlank() }
+        SaaraSelfState.saveModelSettings(c,
+          a.optString("primaryModel", a.optString("value", "")).takeIf { it.isNotBlank() || a.has("primaryModel") || a.has("value") },
+          fallbacks,
+          a.optString("autoReplyModel").takeIf { a.has("autoReplyModel") },
+          a.optString("visionModel").takeIf { a.has("visionModel") },
+          a.optString("complexModel").takeIf { a.has("complexModel") },
+          if (a.has("autoFallback")) a.optBoolean("autoFallback") else null,
+          if (a.has("smartSelection")) a.optBoolean("smartSelection") else null,
+          if (a.has("retryCount")) a.optInt("retryCount") else null,
+          if (a.has("retryDelayMs")) a.optInt("retryDelayMs") else null
+        ).also { syncSettingsUi() }
+      }
+
+      else -> "error: unknown saara_app_control action '$action'"
+    }
   }
 
   private fun sendDirect(c: Context, a: JSONObject): String {
