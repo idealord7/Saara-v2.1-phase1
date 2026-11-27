@@ -60,27 +60,61 @@ class OpenWakeWordFeatures(private val c: Context) {
       outBuf.asFloatBuffer().get(out)
       return out
     }
+
+    private fun shapeMatches(shape: IntArray, expected: IntArray): Boolean {
+      if (shape.size != expected.size) return false
+      for (i in shape.indices) {
+        val s = shape[i]
+        val e = expected[i]
+        if (s != -1 && s != e) return false
+      }
+      return true
+    }
   }
 
-  private val mel = Interpreter(loadModel(c, MEL_ASSET), Interpreter.Options().setNumThreads(1))
-  private val emb = Interpreter(loadModel(c, EMB_ASSET), Interpreter.Options().setNumThreads(1))
+  private val mel: Interpreter
+  private val emb: Interpreter
   private val melInput = FloatArray(CHUNK + PRE_ROLL)
   private val melBuf = ArrayDeque<FloatArray>()
   private val melWindow = FloatArray(MEL_WINDOW * MEL_BINS)
 
   init {
-    // Some model exports allocate fine without resize; try safest path first.
+    mel = createInterpreter(MEL_ASSET, intArrayOf(1, CHUNK + PRE_ROLL))
     try {
-      mel.allocateTensors()
-    } catch (_: Exception) {
-      mel.resizeInput(0, intArrayOf(1, CHUNK + PRE_ROLL))
-      mel.allocateTensors()
+      emb = createInterpreter(EMB_ASSET, intArrayOf(1, MEL_WINDOW, MEL_BINS, 1))
+    } catch (e: Exception) {
+      runCatching { mel.close() }
+      throw e
     }
+  }
+
+  private fun createInterpreter(asset: String, expected: IntArray): Interpreter {
+    val opts = Interpreter.Options().setNumThreads(1)
+    // First try: load and allocate as-is.
     try {
-      emb.allocateTensors()
-    } catch (_: Exception) {
-      emb.resizeInput(0, intArrayOf(1, MEL_WINDOW, MEL_BINS, 1))
-      emb.allocateTensors()
+      val i = Interpreter(loadModel(c, asset), opts)
+      try {
+        val shape = i.getInputTensor(0).shape()
+        if (!shapeMatches(shape, expected)) {
+          i.resizeInput(0, expected.copyOf())
+        }
+        i.allocateTensors()
+        return i
+      } catch (e: Exception) {
+        runCatching { i.close() }
+        throw e
+      }
+    } catch (first: Exception) {
+      // Second try: fresh interpreter, resize before allocate.
+      val i = Interpreter(loadModel(c, asset), opts)
+      try {
+        i.resizeInput(0, expected.copyOf())
+        i.allocateTensors()
+        return i
+      } catch (second: Exception) {
+        runCatching { i.close() }
+        throw RuntimeException("${asset.substringAfterLast('/')}: ${second.message ?: first.message}", second)
+      }
     }
   }
 

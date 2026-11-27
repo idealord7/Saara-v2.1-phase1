@@ -134,8 +134,9 @@ object VoiceEnrollment {
               continue
             }
 
-            val builtFeat = try { OpenWakeWordFeatures(c) } catch (e: Exception) {
-              lastReason = "feature extractor init error: ${e.message ?: e.javaClass.simpleName}"
+            val builtFeat = try { OpenWakeWordFeatures(c) } catch (t: Throwable) {
+              lastReason = "feature extractor init error: ${t.message ?: t.javaClass.simpleName}"
+              Log.e("VoiceEnrollment", lastReason, t)
               failure.reason = lastReason
               runCatching { built.release() }
               recorder = null
