@@ -343,6 +343,11 @@ class MainActivity : AppCompatActivity() {
         val row = LinearLayout(this); row.addView(t); return row to t
       }
       else -> {
+        val summary = m.text.startsWith("Done:") || m.text.startsWith("Couldn't complete") || m.text.startsWith("✅")
+        if (summary) {
+          t.textSize = 13f; t.setTextColor(TXT); t.background = bg(SURF, 14); t.setPadding(dp(12), dp(8), dp(12), dp(8)); t.maxWidth = maxW
+          val row = LinearLayout(this); row.gravity = Gravity.START; row.addView(t); return row to t
+        }
         t.textSize = 12f; t.setTextColor(SUB); t.gravity = Gravity.CENTER
         val row = LinearLayout(this); row.gravity = Gravity.CENTER; row.addView(t); return row to t
       }
@@ -805,7 +810,7 @@ class MainActivity : AppCompatActivity() {
             override fun onStopTrackingTouch(seekBar: SeekBar?) {}
           })
           val edgeRow = LinearLayout(this); edgeRow.gravity = Gravity.CENTER_VERTICAL
-          edgeRow.addView(tv("Hide to screen edge & reveal on touch", 14f, TXT), LinearLayout.LayoutParams(0, -2, 1f))
+          edgeRow.addView(tv("Swipe bubble to edge to hide; tap or drag inward to reveal", 14f, TXT), LinearLayout.LayoutParams(0, -2, 1f))
           val edgeSw = Switch(this); edgeSw.isChecked = Prefs.on(this, "bubble_edge_hide", false)
           edgeSw.setOnCheckedChangeListener { _, v -> Prefs.plain(this).edit().putBoolean("bubble_edge_hide", v).apply(); VoiceService.instance?.refreshBubbleCustomization() }
           edgeRow.addView(edgeSw); c.addView(edgeRow)
@@ -1683,10 +1688,11 @@ class MainActivity : AppCompatActivity() {
     val nearBottom = chatScroll.scrollY + chatScroll.height >= chatList.height - dp(140)
     var changed = false
     for (m in snap) {
+      if (Bus.isChatNoise(m.role, m.text)) continue
       val t = shown[m.id]
       if (t != null) { val s = fmt(m); if (t.text.toString() != s) { t.text = s; changed = true } }
       else if (m.id > lastId) {
-        val prev = snap.lastOrNull { it.id < m.id }
+        val prev = snap.lastOrNull { it.id < m.id && !Bus.isChatNoise(it.role, it.text) }
         if (prev == null || !sameDay(prev.ts, m.ts)) chatList.addView(dateLabel(m.ts), rowLp())
         val (row, tvw) = msgRow(m); chatList.addView(row, rowLp()); shown[m.id] = tvw
         lastId = m.id; if (m.id < firstId) firstId = m.id; changed = true

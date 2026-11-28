@@ -196,7 +196,7 @@ class VoiceService : Service() {
         main.post {
           try {
             suspendWakeForEnrollment()
-            Bus.add("system", "Preparing microphone for voice enrollment…", false)
+            Bus.diag("voice", "Preparing microphone for voice enrollment…")
           } finally {
             handoff.countDown()
           }
@@ -261,7 +261,7 @@ class VoiceService : Service() {
         val pct = speakerGuard.lastMatchPercent
         val th = UserVoiceProfile.threshold(this)
         val pctStr = if (pct >= 0f) "%.0f%%".format(pct) else "n/a"
-        Bus.add("system", "Voice rejected: $pctStr < ${th}% threshold ($source, media_playback).", true)
+        Bus.diag("voice", "Voice rejected: $pctStr < ${th}% threshold ($source, media_playback).")
       }
       speakerGuard.lastDecision = "media_playing"
       return true
@@ -279,7 +279,7 @@ class VoiceService : Service() {
         "media_playing" -> "media_playback"
         else -> "below_threshold"
       }
-      Bus.add("system", "Voice rejected: $pctStr < ${th}% threshold ($source, $reason).", true)
+      Bus.diag("voice", "Voice rejected: $pctStr < ${th}% threshold ($source, $reason).")
     }
     return true
   }
@@ -326,7 +326,7 @@ class VoiceService : Service() {
       if (micEnabled) {
         bubbleDismissedByUser = false
         markManualVoiceBypass("mic_toggle")
-        Bus.add("system", "Microphone ON. Listening now.", true)
+        Bus.diag("mic", "Microphone ON. Listening now.")
         ensureCaptureStarted()
         if (ready && running && !callActive) {
           startSession()
@@ -339,7 +339,7 @@ class VoiceService : Service() {
         // Mute/unmute must not close session; keep session context continuous.
         pauseSession(announce = false)
         stopCapture()
-        Bus.add("system", "Microphone muted. Session context preserved.", true)
+        Bus.diag("mic", "Microphone muted. Session context preserved.")
       }
       refreshNotif(); Bus.ping()
     }
@@ -370,7 +370,7 @@ class VoiceService : Service() {
     isSaraActive = false
     main.removeCallbacks(sessionTimer)
     noteSession(status = "paused", pending = lastTaskNote.ifBlank { "Resume previous conversation when active again." })
-    if (announce) Bus.add("system", "Session paused. Say a wake phrase to continue.", true)
+    if (announce) Bus.diag("session", "Session paused. Say a wake phrase to continue.")
     maybeStartIdleWakeEngine()
   }
 
@@ -384,7 +384,7 @@ class VoiceService : Service() {
     stopSpeaking()
     try { Db.get(this).sessionStateClear(keepSessionId = true) } catch (_: Exception) {}
     noteSession(status = "closed", activeGoal = "", lastStep = "session closed ($reason)", pending = "", lastError = "")
-    if (announce) Bus.add("system", "Session closed.", true)
+    if (announce) Bus.diag("session", "Session closed.")
     if (running && !callActive && micEnabled) maybeStartIdleWakeEngine()
   }
 
@@ -408,7 +408,7 @@ class VoiceService : Service() {
     isSaraActive = false
     main.removeCallbacks(sessionTimer)
     noteSession(status = "timeout_paused", pending = lastTaskNote.ifBlank { "Resume previous conversation on next wake." })
-    Bus.add("system", "Listening paused after timeout. Say a wake phrase to continue the same session.", true)
+    Bus.diag("session", "Listening paused after timeout. Say a wake phrase to continue the same session.")
     maybeStartIdleWakeEngine()
   }
 
@@ -417,7 +417,7 @@ class VoiceService : Service() {
       enrolling = true
       stopIdleWakeEngine()
       stopCapture()
-      if (running) Bus.add("system", "Voice capture paused for enrollment.", true)
+      if (running) Bus.diag("voice", "Voice capture paused for enrollment.")
     } else {
       main.post { suspendWakeForEnrollment() }
     }
@@ -458,7 +458,7 @@ class VoiceService : Service() {
   private fun onCallEnded() {
     callActive = false
     Bus.setStatus(if (ready) "Connected · listening" else Bus.status)
-    Bus.add("system", "Call ended.", true)
+    Bus.diag("call", "Call ended.")
     main.postDelayed({ if (running && ready && !callActive && micEnabled) { ensureCaptureStarted(); if (!isSaraActive) maybeStartIdleWakeEngine() else Bus.setStatus("Listening") } }, 900L)
     Bus.ping()
   }
@@ -547,7 +547,7 @@ class VoiceService : Service() {
     // User dismissed bubble via X target: hide runtime bubble only; keep f_bubble setting for next start/trigger.
     bubbleDismissedByUser = true
     chatHead?.hide(); chatHead = null
-    Bus.add("system", "Floating bubble hidden for this session. It will return on next start if enabled in Settings.", true)
+    Bus.diag("ui", "Floating bubble hidden for this session. It will return on next start if enabled in Settings.")
     updateOverlay()
     Bus.ping()
   }
@@ -573,7 +573,7 @@ class VoiceService : Service() {
     val goal = st.activeGoal.ifBlank { st.pending }
     if (goal.isBlank() && st.lastError.isBlank()) return
     val msg = "Resuming after $reason. Goal: ${goal.take(120).ifBlank { "(recent chat)" }}. Last: ${st.lastStep.take(100).ifBlank { "n/a" }}. Pending: ${st.pending.take(100).ifBlank { "continue naturally" }}." + if (st.lastError.isNotBlank()) " Last issue: ${st.lastError.take(100)}." else ""
-    Bus.add("system", msg, true)
+    Bus.diag("session", msg)
     if (ready) tellModel("[System continuity] $msg Continue the same task/topic seamlessly without asking the user to repeat unless critical info is missing.")
   }
 
@@ -592,7 +592,7 @@ class VoiceService : Service() {
 
   fun runScheduled(text: String): Boolean {
     val now = SimpleDateFormat("dd MMM yyyy, hh:mm:ss a", Locale.getDefault()).format(Date())
-    Bus.add("system", "Scheduled task fired at $now: $text", true)
+    Bus.add("system", "Done: Ran scheduled task — ${text.take(120)}", true)
     if (!running) return false
     // Deliver to active/ready session when possible; keep queued otherwise.
     if (ready) {
@@ -635,7 +635,7 @@ class VoiceService : Service() {
         if (Prefs.on(this, "f_barge_in", true)) {
           // Barge-in: user intentionally speaking over Saara.
           stopSpeaking()
-          Bus.add("system", "Barge-in detected; listening to new command.", false)
+          Bus.diag("voice", "Barge-in detected; listening to new command.")
         } else {
           return
         }
@@ -654,9 +654,9 @@ class VoiceService : Service() {
       val pct = speakerGuard.lastMatchPercent
       val th = UserVoiceProfile.threshold(this)
       if (UserVoiceProfile.onlyUserVoiceEnabled(this) && pct >= 0f) {
-        Bus.add("system", "Wake word heard (voice match ${"%.0f".format(pct)}% >= ${th}%).", true)
+        Bus.diag("wake", "Wake word heard (voice match ${"%.0f".format(pct)}% >= ${th}%).")
       } else {
-        Bus.add("system", "Wake word heard.", true)
+        Bus.diag("wake", "Wake word heard.")
       }
       if (afterWake.isNotBlank()) processUtterance(afterWake)
       return
@@ -822,7 +822,7 @@ class VoiceService : Service() {
     if (TaskControl.isStop(cleaned)) {
       TaskControl.clear(); stopSpeaking()
       noteSession(status = "stopped_task", lastStep = "user requested stop", pending = lastTaskNote.ifBlank { "" }, lastError = "")
-      Bus.add("system", "Stopped the current task. Session is still active.", true)
+      Bus.add("system", "Done: Stopped current task", true)
       resetSessionTimer(); return
     }
     lastTaskNote = cleaned.take(220)
@@ -915,9 +915,9 @@ class VoiceService : Service() {
       val pct = speakerGuard.lastMatchPercent
       val th = UserVoiceProfile.threshold(this)
       if (UserVoiceProfile.onlyUserVoiceEnabled(this) && pct >= 0f) {
-        Bus.add("system", "Wake word heard (voice match ${"%.0f".format(pct)}% >= ${th}%).", true)
+        Bus.diag("wake", "Wake word heard (voice match ${"%.0f".format(pct)}% >= ${th}%).")
       } else {
-        Bus.add("system", "Wake word heard.", true)
+        Bus.diag("wake", "Wake word heard.")
       }
       Bus.setStatus("Listening")
     }
@@ -1088,7 +1088,7 @@ class VoiceService : Service() {
     if (i?.action != "STOP") bubbleDismissedByUser = false
     when (i?.action) {
       "STOP" -> { closeSession(reason = "service_stop", announce = false); stopSelf(); return START_NOT_STICKY }
-      ACTION_WAKE -> { if (running && ready && micEnabled && !callActive) { ensureCaptureStarted(); startSession(); Bus.add("system", "Woke up from device button.", true) }; if (!running) { /* fall through to start then wake */ } else { refreshBubble(); return START_STICKY } }
+      ACTION_WAKE -> { if (running && ready && micEnabled && !callActive) { ensureCaptureStarted(); startSession(); Bus.diag("wake", "Woke up from device button.") }; if (!running) { /* fall through to start then wake */ } else { refreshBubble(); return START_STICKY } }
       "CAM_START", "CAM_STOP", "SCREEN_START", "SCREEN_CAPTURE", "SCREEN_STOP" -> { if (!running) { stopSelf(); return START_NOT_STICKY }; share(i!!); return START_STICKY }
     }
     if (cmd != null) {
@@ -1130,7 +1130,7 @@ class VoiceService : Service() {
         try { track?.write(b, 0, b.size) } catch (_: Exception) {}
       }
     }.apply { name = "saara-playback"; isDaemon = true; start() }
-    refreshBubble(); Bus.listen(busListener); Bus.add("system", "Connecting…", true); refreshCalls(); registerAutomationEvents(); connect()
+    refreshBubble(); Bus.listen(busListener); Bus.diag("conn", "Connecting…"); refreshCalls(); registerAutomationEvents(); connect()
     if (wakeNoPhrase) pendingCommand = pendingCommand ?: "" // marker handled in setupComplete via flag
     if (wakeNoPhrase) pendingWakeNoPhrase = true
     return START_STICKY
@@ -1163,7 +1163,7 @@ class VoiceService : Service() {
   private fun updateOverlay() {
     if (!running) return
     if (!Prefs.on(this, "f_overlay", true) || !Settings.canDrawOverlays(this)) { overlay?.hide(); return }
-    if (chatHead?.isExpanded() == true) { overlay?.hide(); return }
+    if (chatHead?.isExpanded() == true || chatHead?.isDocked() == true) { overlay?.hide(); return }
     if (overlay == null) overlay = Overlay(this)
     val st = Bus.status
     when {
@@ -1172,9 +1172,14 @@ class VoiceService : Service() {
     val anchor = bubbleAnchor()
     if (Bus.camOn) { overlay?.show("Camera live", true, anchor); return }
     if (MainActivity.visible) { overlay?.hide(); return }
-    val m = synchronized(Bus) { Bus.msgs.lastOrNull() } ?: return
-    val icon = when (m.role) { "you" -> "You"; "saara" -> "Saara"; "tool" -> "Tool"; else -> "Sys" }
-    overlay?.show("$icon: ${m.text.takeLast(120)}", false, anchor)
+    val m = synchronized(Bus) { Bus.msgs.lastOrNull { !Bus.isChatNoise(it.role, it.text) && it.role != "tool" } } ?: return
+    val text = when (m.role) {
+      "you" -> "You: ${m.text.takeLast(100)}"
+      "saara" -> m.text.takeLast(140)
+      else -> m.text.takeLast(120)
+    }
+    if (text.isBlank()) { overlay?.hide(); return }
+    overlay?.show(text, false, anchor)
   }
 
   private fun share(i: Intent) {
@@ -1216,11 +1221,11 @@ class VoiceService : Service() {
     val err = c.start(front)
     if (err != null) { Bus.add("system", err, true); stopCam(false); return }
     Bus.ping()
-    if (!was) { Bus.add("system", "Camera sharing is ON (${if (front) "front" else "back"}).", true); Bus.add("system", "Live camera frames are being sent to Gemini.", true); tellModel("[System] Camera sharing is now ON. Live camera frames are being sent to you. Use them to help the user with the task.") }
+    if (!was) { Bus.add("system", "Done: Camera sharing on (${if (front) "front" else "back"})", true); Bus.diag("camera", "Live camera frames are being sent to Gemini."); tellModel("[System] Camera sharing is now ON. Live camera frames are being sent to you. Use them to help the user with the task.") }
   }
   private fun stopCam(say: Boolean) {
     cam?.stop(); cam = null
-    if (Bus.camOn) { Bus.camOn = false; fg(); if (say) { Bus.add("system", "Camera sharing stopped.", true); tellModel("[System] Camera sharing stopped. Do not reply.") } }
+    if (Bus.camOn) { Bus.camOn = false; fg(); if (say) { Bus.add("system", "Done: Camera sharing stopped", true); tellModel("[System] Camera sharing stopped. Do not reply.") } }
     Bus.ping()
   }
   private fun startScreen(code: Int, data: Intent?, auto: Boolean) {
@@ -1229,14 +1234,14 @@ class VoiceService : Service() {
     val s = screen ?: ScreenShare(this, { sendFrame(it) }, { main.post { stopScreen(true) } }).also { screen = it }
     val err = s.start(code, data)
     if (err != null) { Bus.add("system", err, true); stopScreen(false); return }
-    Bus.add("system", if (auto) "Screen sharing is ON for this task. It will stop automatically when the task ends." else "Screen sharing is ON. Tap the Screen chip to stop it.", true)
-    Bus.add("system", "Live screen frames are being sent to Gemini.", true)
+    Bus.add("system", if (auto) "Done: Screen sharing on for this task" else "Done: Screen sharing on", true)
+    Bus.diag("screen", "Live screen frames are being sent to Gemini.")
     if (auto) armScreenAuto(300_000L)
     tellModel("[System] Screen sharing is now ON. Live screen frames are being sent to you. Use them to complete the user's mobile task." + if (auto) " This sharing was requested for the current task; it will be turned off automatically when the task is done." else "")
   }
   private fun stopScreen(say: Boolean) {
     main.removeCallbacks(screenAutoStop); screenAuto = false; Bus.screenAuto = false; screen?.stop(); screen = null
-    if (Bus.screenOn) { Bus.screenOn = false; fg(); if (say) { Bus.add("system", "Screen sharing stopped.", true); tellModel("[System] Screen sharing stopped. Do not reply.") } }
+    if (Bus.screenOn) { Bus.screenOn = false; fg(); if (say) { Bus.add("system", "Done: Screen sharing stopped", true); tellModel("[System] Screen sharing stopped. Do not reply.") } }
     Bus.ping()
   }
   private fun armScreenAuto(delayMs: Long) {
@@ -1285,7 +1290,7 @@ class VoiceService : Service() {
     val autoSwitch = ModelRouter.autoFallbackEnabled(this)
     // Keep session context continuous across disconnect/reconnect; do not speak stale content.
     noteSession(status = if (transient) "reconnecting" else "disconnected", lastError = msg.take(240), pending = lastTaskNote.ifBlank { "Resume recent conversation when reconnected." })
-    Bus.add("system", if (transient && (retryEnabled || autoSwitch)) "$msg — retrying with model fallback." else msg, true)
+    Bus.diag("conn", if (transient && (retryEnabled || autoSwitch)) "$msg — retrying with model fallback." else msg)
     stopSpeaking(); audioQ.clear()
     if (transient && autoSwitch && liveCandidates.isNotEmpty() && liveModelIndex < liveCandidates.lastIndex) {
       val failed = liveModel
@@ -1374,12 +1379,12 @@ class VoiceService : Service() {
         processUtterance(cmd)
       } else if (wakeNow && micEnabled) {
         startSession()
-        Bus.add("system", "Woke up — listening (no wake phrase needed).", true)
+        Bus.diag("wake", "Woke up — listening (no wake phrase needed).")
       } else {
         // Silent continuity on connect/reconnect/mute-state transitions; no old-session speech replay.
         Bus.setStatus(if (isSaraActive) "Listening · $liveModel" else "Listening for wake phrase · $liveModel")
       }
-      if (micEnabled) { ensureCaptureStarted(); if (!isSaraActive) maybeStartIdleWakeEngine() } else Bus.add("system", "Gemini connected ($liveModel). Microphone is muted.", true)
+      if (micEnabled) { ensureCaptureStarted(); if (!isSaraActive) maybeStartIdleWakeEngine() } else Bus.diag("conn", "Gemini connected ($liveModel). Microphone is muted.")
     }
     if (m.has("error")) Bus.add("system", "Gemini error: " + m.optString("error"), true)
     val sc = m.optJSONObject("serverContent")
@@ -1417,7 +1422,7 @@ class VoiceService : Service() {
             if (rn.isNotEmpty()) { lastReplyNorm = rn; lastReplyAt = System.currentTimeMillis() }
           }
         }
-        if (sc.optBoolean("interrupted")) { stopSpeaking(); Bus.add("system", "Interrupted.", false); resetSessionTimerIfActive() }
+        if (sc.optBoolean("interrupted")) { stopSpeaking(); Bus.diag("voice", "Interrupted."); resetSessionTimerIfActive() }
         if (sc.optBoolean("turnComplete")) {
           speakingUntil = minOf(speakingUntil, System.currentTimeMillis() + 180L)
           Bus.endTurn(); armScreenAuto(6000L)
@@ -1441,9 +1446,10 @@ class VoiceService : Service() {
             val c = calls.getJSONObject(i)
             val name = c.getString("name"); val args = c.optJSONObject("args") ?: JSONObject()
             noteSession(status = "executing", activeGoal = lastTaskNote, lastStep = "running $name", pending = "complete $name and continue task")
-            Bus.add("tool", "$name $args", true)
+            Bus.diag("tool", "$name $args")
             val r = Tools.run(this, name, args)
-            Bus.add("tool", "→ $r", true)
+            Bus.diag("tool", "→ $r")
+            toolSummary(name, args, r)?.let { Bus.add("system", it, true) }
             val failed = r.startsWith("error") || r.startsWith("timeout") || r.contains("permission missing", true)
             noteSession(status = if (failed) "task_error" else "executing", activeGoal = lastTaskNote, lastStep = "$name: ${r.take(120)}", pending = if (failed) "retry or adapt after $name failure" else "continue task after $name", lastError = if (failed) r.take(200) else "")
             out.put(JSONObject().put("id", c.optString("id")).put("name", name).put("response", JSONObject().put("result", Tools.modelResult(name, r))))
@@ -1453,6 +1459,52 @@ class VoiceService : Service() {
         }.start()
       }
       // idle: do not execute tools
+    }
+  }
+
+  private fun toolSummary(name: String, args: JSONObject, r: String): String? {
+    if (r.startsWith("error:") || r.startsWith("timeout")) return "Couldn't complete ${name.replace('_',' ')}: ${r.removePrefix("error:").removePrefix("timeout:").trim().take(90)}"
+    return when (name) {
+      "open_app", "open", "launch_app" -> "Done: Opened ${args.optString("app").ifBlank { args.optString("name").ifBlank { "app" } }}"
+      "send_whatsapp", "send_sms", "send_message" -> "Done: Sent message${args.optString("to").takeIf { it.isNotBlank() }?.let { " to ${it.take(40)}" } ?: ""}"
+      "make_call", "call" -> "Done: Placed call${args.optString("to").takeIf { it.isNotBlank() }?.let { " to ${it.take(40)}" } ?: ""}"
+      "set_alarm", "set_timer", "set_reminder", "create_reminder" -> "Done: Set ${name.replace('_',' ')}${args.optString("time").takeIf { it.isNotBlank() }?.let { " for $it" } ?: ""}"
+      "toggle_setting", "set_setting", "change_setting" -> "Done: Updated setting${args.optString("setting").takeIf { it.isNotBlank() }?.let { " $it" } ?: ""}"
+      "take_photo", "take_screenshot", "screenshot" -> "Done: Captured ${name.replace('_',' ')}"
+      "write_note", "save_note", "create_note" -> "Done: Saved note"
+      "search_web", "web_search", "search" -> "Done: Searched for ${args.optString("query").take(60)}"
+      "play_music", "play_media" -> "Done: Playing ${args.optString("query").ifBlank { args.optString("song").ifBlank { "media" } }.take(60)}"
+      "device_control" -> summarizeDeviceControl(args, r)
+      "ui_action" -> summarizeUiAction(args, r)
+      "saara_app_control" -> "Done: ${r.take(120)}"
+      "screen_share", "share_screen" -> if (r.contains("started", true) || r.contains("on", true)) "Done: Screen sharing started" else null
+      "stop_screen_share" -> "Done: Screen sharing stopped"
+      else -> null
+    }
+  }
+
+  private fun summarizeDeviceControl(args: JSONObject, r: String): String? {
+    val op = args.optString("op").ifBlank { args.optString("action") }.lowercase()
+    return when {
+      op.contains("open") -> "Done: Opened ${args.optString("app").ifBlank { args.optString("target").ifBlank { "app" } }.take(40)}"
+      op.contains("call") -> "Done: Call action completed"
+      op.contains("sms") || op.contains("message") -> "Done: Message action completed"
+      op.contains("volume") || op.contains("brightness") || op.contains("wifi") || op.contains("bluetooth") || op.contains("torch") || op.contains("setting") -> "Done: Device setting updated"
+      op.contains("screenshot") || op.contains("photo") -> "Done: Captured ${op.take(30)}"
+      r.length < 120 && !r.contains("error", true) && (op.contains("toggle") || op.contains("set") || op.contains("enable") || op.contains("disable")) -> "Done: ${r.take(100)}"
+      else -> null
+    }
+  }
+
+  private fun summarizeUiAction(args: JSONObject, r: String): String? {
+    val op = args.optString("op").lowercase()
+    return when {
+      op == "tap" || op == "tap_xy" || op == "tap_text" || op == "tap_id" || op == "tap_key" -> null // too frequent/noisy
+      op == "type" || op == "paste" || op == "set_text" -> "Done: Entered text${args.optString("field_label").takeIf { it.isNotBlank() }?.let { " in ${it.take(30)}" } ?: ""}"
+      op == "scroll" -> null
+      op == "back" || op == "home" || op == "recents" -> "Done: Navigated ${op}"
+      op == "open_app" -> "Done: Opened ${args.optString("app").take(40)}"
+      else -> null
     }
   }
 
@@ -1490,7 +1542,7 @@ class VoiceService : Service() {
     try { Db.get(this).sessionStateClear(keepSessionId = true) } catch (_: Exception) {}
     lastTaskNote = ""; pendingCommand = null; pendingWakeNoPhrase = false
     instance = null; Bus.running = false; Bus.assistantOn = false
-    Bus.add("system", "Stopped.", true); Bus.setStatus("Stopped")
+    Bus.diag("svc", "Stopped."); Bus.setStatus("Stopped")
     super.onDestroy()
   }
 }

@@ -39,16 +39,19 @@ class Overlay(private val c: Context) {
       try { wm.addView(t, lp) } catch (e: Exception) { return }
       v = t
     }
-    val status = Bus.status.lowercase()
+    val status = Bus.status
+    val stLower = status.lowercase()
+    val noisyStatus = listOf("connecting", "disconnected", "stopped", "retrying", "503", "reconnect", "woke up", "muted", "resuming").any { stLower.contains(it) }
     val color = when {
-      status.contains("retry") || status.contains("503") || status.contains("reconnect") -> 0xB3B26A00.toInt()
-      status.contains("execut") || status.contains("working") -> 0xB31A73E8.toInt()
-      status.contains("thinking") || status.contains("connect") -> 0xB36A1B9A.toInt()
-      status.contains("listen") || status.contains("wake") -> 0xB31B5E20.toInt()
+      stLower.contains("retry") || stLower.contains("503") || stLower.contains("reconnect") -> 0xB3B26A00.toInt()
+      stLower.contains("execut") || stLower.contains("working") -> 0xB31A73E8.toInt()
+      stLower.contains("thinking") || stLower.contains("connect") -> 0xB36A1B9A.toInt()
+      stLower.contains("listen") || stLower.contains("wake") -> 0xB31B5E20.toInt()
       else -> 0x99000000.toInt()
     }
     t.background = GradientDrawable().apply { setColor(color); cornerRadius = 16 * d; setStroke((1*d).toInt(), 0x55FFFFFF) }
-    t.text = "Saara: ${Bus.status}\n${text.take(120)}"
+    val body = text.take(140).trim()
+    t.text = if (noisyStatus) body.ifBlank { "Saara" } else "Saara: ${status.take(40)}\n${body}"
     val lp = t.layoutParams as WindowManager.LayoutParams
     val margin = (8 * d).toInt()
     val maxW = if (anchor != null) {
