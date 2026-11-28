@@ -88,7 +88,7 @@ class CameraVisionActivity : AppCompatActivity() {
     val flip = mkBtn("Flip") { front = !front; restartCamera() }
     val pick = mkBtn("Pick Image") { pickImage() }
     val capture = mkBtn("Capture") { capturePhoto() }
-    row1.addView(flip, lpW(0,1)); row1.addView(space(8), lpW(dp(8),0)); row1.addView(pick, lpW(0,1)); row1.addView(space(8), lpW(dp(8),0)); row1.addView(capture, lpW(0,1))
+    row1.addView(flip, lpW(0, 1f)); row1.addView(space(8), lpW(dp(8), 0f)); row1.addView(pick, lpW(0, 1f)); row1.addView(space(8), lpW(dp(8), 0f)); row1.addView(capture, lpW(0, 1f))
     col.addView(row1, LinearLayout.LayoutParams(-1,-2).apply { topMargin = dp(10) })
 
     modeSpinner = Spinner(this).apply { adapter = ArrayAdapter(this@CameraVisionActivity, android.R.layout.simple_spinner_dropdown_item, modes) }
@@ -99,13 +99,13 @@ class CameraVisionActivity : AppCompatActivity() {
     val row2 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
     analyzeBtn = mkBtn("Describe / What do you see?") { analyzeCurrent("Describe what you see clearly and concisely.") }
     liveBtn = mkBtn("Start Live") { toggleLive() }
-    row2.addView(analyzeBtn, lpW(0,1)); row2.addView(space(8), lpW(dp(8),0)); row2.addView(liveBtn, lpW(dp(120),0))
+    row2.addView(analyzeBtn, lpW(0, 1f)); row2.addView(space(8), lpW(dp(8), 0f)); row2.addView(liveBtn, lpW(dp(120), 0f))
     col.addView(row2, LinearLayout.LayoutParams(-1,-2).apply { topMargin = dp(10) })
 
     val row3 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-    row3.addView(mkBtn("Remember Face") { promptRememberFace() }, lpW(0,1))
-    row3.addView(space(8), lpW(dp(8),0))
-    row3.addView(mkBtn("Send to Chat") { sendLastToChat() }, lpW(0,1))
+    row3.addView(mkBtn("Remember Face") { promptRememberFace() }, lpW(0, 1f))
+    row3.addView(space(8), lpW(dp(8), 0f))
+    row3.addView(mkBtn("Send to Chat") { sendLastToChat() }, lpW(0, 1f))
     col.addView(row3, LinearLayout.LayoutParams(-1,-2).apply { topMargin = dp(8) })
 
     resultTv = TextView(this).apply {
