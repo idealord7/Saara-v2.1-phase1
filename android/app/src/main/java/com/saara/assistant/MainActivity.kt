@@ -112,15 +112,22 @@ class MainActivity : AppCompatActivity() {
     b.setOnClickListener { f() }
     return b
   }
+  private fun smallBtn(label: String, color: Int = SURF2, f: () -> Unit): Button {
+    val b = Button(this); b.text = label; b.isAllCaps = false; b.textSize = 11f
+    b.minHeight = 0; b.minimumHeight = 0; b.minWidth = 0; b.minimumWidth = 0
+    b.setPadding(dp(10), dp(5), dp(10), dp(5)); b.setTextColor(Color.WHITE); b.background = bg(color, 12)
+    b.setOnClickListener { f() }
+    return b
+  }
   private fun chip(label: String, f: () -> Unit): TextView {
     val t = tv(label, 13f); t.setPadding(dp(14), dp(8), dp(14), dp(8)); t.background = bg(SURF2, 18); t.gravity = Gravity.CENTER
     t.setOnClickListener { f() }
     return t
   }
-  private fun card(parent: LinearLayout): LinearLayout {
+  private fun card(parent: LinearLayout, padH: Int = 16, padV: Int = 14, topMargin: Int = 12, radius: Int = 20): LinearLayout {
     val c = LinearLayout(this)
-    c.orientation = LinearLayout.VERTICAL; c.background = bg(SURF, 20); c.setPadding(dp(16), dp(14), dp(16), dp(14))
-    val lp = LinearLayout.LayoutParams(-1, -2); lp.topMargin = dp(12)
+    c.orientation = LinearLayout.VERTICAL; c.background = bg(SURF, radius); c.setPadding(dp(padH), dp(padV), dp(padH), dp(padV))
+    val lp = LinearLayout.LayoutParams(-1, -2); lp.topMargin = dp(topMargin)
     parent.addView(c, lp)
     return c
   }
@@ -1091,7 +1098,6 @@ class MainActivity : AppCompatActivity() {
     val hs = HorizontalScrollView(this); hs.isHorizontalScrollBarEnabled = false; hs.addView(chipsRow); root.addView(hs)
     paintLearnFilterChips()
     learnBox = LinearLayout(this); learnBox.orientation = LinearLayout.VERTICAL; root.addView(learnBox)
-    shopBox = LinearLayout(this); shopBox.orientation = LinearLayout.VERTICAL; root.addView(shopBox)
     rebuildLearning()
     return sv
   }
@@ -1114,7 +1120,6 @@ class MainActivity : AppCompatActivity() {
   private fun rebuildLearning() {
     if (!::learnBox.isInitialized) return
     learnBox.removeAllViews()
-    if (::shopBox.isInitialized) shopBox.removeAllViews()
     val db = Db.get(this)
     val factsAll = try { db.facts() } catch (_: Exception) { emptyList() }
     val rulesAll = try { db.rules() } catch (_: Exception) { emptyList() }
@@ -1125,15 +1130,15 @@ class MainActivity : AppCompatActivity() {
     val dupRules = try { db.findDuplicateRules().sumOf { (it.size - 1).coerceAtLeast(0) } } catch (_: Exception) { 0 }
     val dupCount = dupFacts + dupRules
 
-    val sum = card(learnBox)
-    sum.addView(tv("Summary", 16f, bold = true))
-    sum.addView(tv("Knowledge ${knowledge.size} · Rules ${rulesAll.size} · Lessons ${lessons.size} · Behaviors ${behaviorsAll.size}", 13f, TXT))
-    sum.addView(tv("Duplicates detected: $dupCount ${if (dupCount > 0) "(facts $dupFacts, rules $dupRules)" else ""}", 12f, if (dupCount > 0) WARN else GOOD))
+    val sum = card(learnBox, padH = 12, padV = 10, topMargin = 8, radius = 14)
+    sum.addView(tv("Summary", 14f, bold = true))
+    sum.addView(tv("Knowledge ${knowledge.size} · Rules ${rulesAll.size} · Lessons ${lessons.size} · Behaviors ${behaviorsAll.size}", 12f, TXT))
+    sum.addView(tv("Duplicates: $dupCount${if (dupCount > 0) " (facts $dupFacts, rules $dupRules)" else ""}", 11f, if (dupCount > 0) WARN else GOOD))
     val sumRow = LinearLayout(this); sumRow.orientation = LinearLayout.HORIZONTAL
-    sumRow.addView(btn("Clean Duplicates", if (dupCount > 0) ACC2 else SURF2) {
+    sumRow.addView(smallBtn("Clean Duplicates", if (dupCount > 0) ACC2 else SURF) {
       val fDup = db.findDuplicateFacts(); val rDup = db.findDuplicateRules()
       val total = fDup.sumOf { it.size - 1 } + rDup.sumOf { it.size - 1 }
-      if (total == 0) { toast("No duplicates found"); return@btn }
+      if (total == 0) { toast("No duplicates found"); return@smallBtn }
       val preview = buildString {
         append("Remove/merge $total duplicate entries?\n\n")
         fDup.take(3).forEach { g -> append("• Fact: ").append(g.first().text.take(70)).append(" (+${g.size - 1})\n") }
@@ -1142,27 +1147,27 @@ class MainActivity : AppCompatActivity() {
       AlertDialog.Builder(this).setTitle("Clean Duplicates").setMessage(preview)
         .setPositiveButton("Clean") { _, _ -> val rf = db.cleanDuplicateFacts(); val rr = db.cleanDuplicateRules(); toast("Cleaned ${rf + rr} duplicates"); rebuildLearning() }
         .setNegativeButton("Cancel", null).show()
-    }, LinearLayout.LayoutParams(0, -2, 1f).apply { rightMargin = dp(8) })
-    sumRow.addView(btn("Batch Delete", SURF2) {
+    }, LinearLayout.LayoutParams(-2, -2).apply { rightMargin = dp(8) })
+    sumRow.addView(smallBtn("Batch Delete", SURF) {
       val fc = learnSelectedFactIds.size; val rc = learnSelectedRuleIds.size; val bc = learnSelectedBehaviorIds.size
       val total = fc + rc + bc
-      if (total == 0) { toast("Select items to delete"); return@btn }
+      if (total == 0) { toast("Select items to delete"); return@smallBtn }
       AlertDialog.Builder(this).setMessage("Delete $total selected item(s)?").setPositiveButton("Delete") { _, _ ->
         learnSelectedFactIds.forEach { db.factDelete(it) }; learnSelectedRuleIds.forEach { db.ruleDelete(it) }; learnSelectedBehaviorIds.forEach { db.behaviorDelete(it) }
         learnSelectedFactIds.clear(); learnSelectedRuleIds.clear(); learnSelectedBehaviorIds.clear(); rebuildLearning()
       }.setNegativeButton("Cancel", null).show()
-    }, LinearLayout.LayoutParams(0, -2, 1f))
-    sum.addView(sumRow, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8) })
+    }, LinearLayout.LayoutParams(-2, -2))
+    sum.addView(sumRow, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(6) })
 
     fun sectionCard(key: String, title: String, subtitle: String, count: Int, body: (LinearLayout) -> Unit) {
-      val c = card(learnBox)
+      val c = card(learnBox, padH = 12, padV = 10, topMargin = 8, radius = 14)
       val header = LinearLayout(this); header.gravity = Gravity.CENTER_VERTICAL
-      header.addView(tv("$title ($count)", 16f, TXT, true), LinearLayout.LayoutParams(0, -2, 1f))
-      val toggle = tv(if (learnCollapsed.contains(key)) "Show" else "Hide", 12f, ACC, true); toggle.setPadding(dp(8), dp(4), dp(0), dp(4))
+      header.addView(tv("$title ($count)", 15f, TXT, true), LinearLayout.LayoutParams(0, -2, 1f))
+      val toggle = tv(if (learnCollapsed.contains(key)) "Show" else "Hide", 11f, ACC, true); toggle.setPadding(dp(8), dp(2), dp(0), dp(2))
       header.addView(toggle); c.addView(header)
-      c.addView(tv(subtitle, 12f, SUB))
+      val subTv = tv(subtitle, 11f, SUB); subTv.setPadding(0, 0, 0, dp(4)); c.addView(subTv)
       val bodyBox = LinearLayout(this); bodyBox.orientation = LinearLayout.VERTICAL
-      if (!learnCollapsed.contains(key)) body(bodyBox) else bodyBox.addView(tv("Collapsed", 12f, SUB))
+      if (!learnCollapsed.contains(key)) body(bodyBox) else bodyBox.addView(tv("Collapsed", 11f, SUB))
       c.addView(bodyBox)
       toggle.setOnClickListener { if (learnCollapsed.contains(key)) learnCollapsed.remove(key) else learnCollapsed.add(key); rebuildLearning() }
     }
@@ -1175,47 +1180,57 @@ class MainActivity : AppCompatActivity() {
     if (showKnowledge) {
       val list = knowledge.filter { learnMatches(it.text + " " + it.cat) }
       sectionCard("knowledge", "Knowledge / Memory", "Facts and preferences. Select items for batch delete.", list.size) { box ->
-        val teach = LinearLayout(this); teach.orientation = LinearLayout.VERTICAL
-        val ti = edit("Teach Saara (e.g. I prefer Bengali after 9 PM)")
-        val add = btn("Add to memory") { val t = ti.text.toString().trim(); if (t.isNotEmpty()) { db.factAdd("preference", t); rebuildLearning() } }
-        teach.addView(ti); teach.addView(add, LinearLayout.LayoutParams(-1,-2).apply { topMargin = dp(6) }); box.addView(teach)
+        val addRow = LinearLayout(this); addRow.orientation = LinearLayout.HORIZONTAL; addRow.gravity = Gravity.CENTER_VERTICAL
+        val ti = edit("Teach Saara (e.g. I prefer Bengali after 9 PM)"); ti.textSize = 13f
+        addRow.addView(ti, LinearLayout.LayoutParams(0, -2, 1f))
+        val add = smallBtn("Add", ACC2) { val t = ti.text.toString().trim(); if (t.isNotEmpty()) { db.factAdd("preference", t); rebuildLearning() } }
+        addRow.addView(add, LinearLayout.LayoutParams(-2, -2).apply { leftMargin = dp(6) })
+        box.addView(addRow)
+        shopBox = LinearLayout(this); shopBox.orientation = LinearLayout.VERTICAL
+        box.addView(shopBox, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(6) })
+        rebuildShop()
         for (f in list.take(60)) {
-          val row = LinearLayout(this); row.orientation = LinearLayout.VERTICAL; row.setPadding(0, dp(8), 0, dp(8)); row.background = bg(SURF2, 12)
+          val row = LinearLayout(this); row.orientation = LinearLayout.VERTICAL; row.setPadding(dp(8), dp(6), dp(8), dp(6)); row.background = bg(SURF2, 10)
           val top = LinearLayout(this); top.gravity = Gravity.CENTER_VERTICAL
-          val cb = CheckBox(this); cb.isChecked = learnSelectedFactIds.contains(f.id); cb.setOnCheckedChangeListener { _, v -> if (v) learnSelectedFactIds.add(f.id) else learnSelectedFactIds.remove(f.id) }
+          val cb = CheckBox(this); cb.isChecked = learnSelectedFactIds.contains(f.id); cb.scaleX = 0.9f; cb.scaleY = 0.9f; cb.setOnCheckedChangeListener { _, v -> if (v) learnSelectedFactIds.add(f.id) else learnSelectedFactIds.remove(f.id) }
           top.addView(cb)
-          top.addView(tv((if (f.pinned) "📌 " else "") + f.text.take(140), 14f, TXT), LinearLayout.LayoutParams(0, -2, 1f))
+          top.addView(tv((if (f.pinned) "📌 " else "") + f.text.take(140), 13f, TXT), LinearLayout.LayoutParams(0, -2, 1f))
           row.addView(top)
-          row.addView(tv("${f.cat} · ${hhmm(f.ts)}${if (f.source.isNotBlank()) " · ${f.source}" else ""}", 11f, SUB))
-          val acts = LinearLayout(this); acts.orientation = LinearLayout.HORIZONTAL
-          acts.addView(btn("Edit", SURF) { val input = edit("Edit memory"); input.setText(f.text); AlertDialog.Builder(this).setTitle("Edit memory").setView(input).setPositiveButton("Save") { _, _ -> db.factUpdate(f.id, f.cat, input.text.toString()); rebuildLearning() }.setNegativeButton("Cancel", null).show() }, LinearLayout.LayoutParams(0,-2,1f))
-          acts.addView(btn(if (f.pinned) "Unpin" else "Pin", SURF) { db.factSetPinned(f.id, !f.pinned); rebuildLearning() }, LinearLayout.LayoutParams(0,-2,1f))
-          acts.addView(btn("Delete", SURF) { db.factDelete(f.id); rebuildLearning() }, LinearLayout.LayoutParams(0,-2,1f))
+          val meta = tv("${f.cat} · ${hhmm(f.ts)}${if (f.source.isNotBlank()) " · ${f.source}" else ""}", 10f, SUB)
+          meta.setPadding(dp(36), 0, 0, 0); row.addView(meta)
+          val acts = LinearLayout(this); acts.orientation = LinearLayout.HORIZONTAL; acts.setPadding(dp(36), dp(4), 0, 0)
+          val aLp = LinearLayout.LayoutParams(-2, -2).apply { rightMargin = dp(6) }
+          acts.addView(smallBtn("Edit", SURF) { val input = edit("Edit memory"); input.setText(f.text); AlertDialog.Builder(this).setTitle("Edit memory").setView(input).setPositiveButton("Save") { _, _ -> db.factUpdate(f.id, f.cat, input.text.toString()); rebuildLearning() }.setNegativeButton("Cancel", null).show() }, aLp)
+          acts.addView(smallBtn(if (f.pinned) "Unpin" else "Pin", SURF) { db.factSetPinned(f.id, !f.pinned); rebuildLearning() }, LinearLayout.LayoutParams(-2, -2).apply { rightMargin = dp(6) })
+          acts.addView(smallBtn("Delete", SURF) { db.factDelete(f.id); rebuildLearning() }, LinearLayout.LayoutParams(-2, -2))
           row.addView(acts)
-          box.addView(row, LinearLayout.LayoutParams(-1,-2).apply { topMargin = dp(8) })
+          box.addView(row, LinearLayout.LayoutParams(-1,-2).apply { topMargin = dp(6) })
         }
-        if (list.size > 60) box.addView(tv("Showing 60 of ${list.size}. Use search to narrow.", 12f, SUB))
+        if (list.size > 60) box.addView(tv("Showing 60 of ${list.size}. Use search to narrow.", 11f, SUB))
       }
     }
 
     if (showRules) {
       val list = rulesAll.filter { learnMatches(it.text) }
       sectionCard("rules", "Rules", "Saara follows enabled rules before actions/tools/replies.", list.size) { box ->
-        val ri = edit("Add a rule, e.g. Ask before sending SMS")
-        box.addView(ri); box.addView(btn("Add rule") { val t = ri.text.toString().trim(); if (t.isNotEmpty()) { db.ruleAdd(t); rebuildLearning() } }, LinearLayout.LayoutParams(-1,-2).apply { topMargin = dp(6) })
+        val addRow = LinearLayout(this); addRow.orientation = LinearLayout.HORIZONTAL; addRow.gravity = Gravity.CENTER_VERTICAL
+        val ri = edit("Add a rule, e.g. Ask before sending SMS"); ri.textSize = 13f
+        addRow.addView(ri, LinearLayout.LayoutParams(0, -2, 1f))
+        addRow.addView(smallBtn("Add", ACC2) { val t = ri.text.toString().trim(); if (t.isNotEmpty()) { db.ruleAdd(t); rebuildLearning() } }, LinearLayout.LayoutParams(-2,-2).apply { leftMargin = dp(6) })
+        box.addView(addRow)
         for (r in list.take(60)) {
-          val row = LinearLayout(this); row.orientation = LinearLayout.VERTICAL; row.setPadding(dp(8), dp(8), dp(8), dp(8)); row.background = bg(SURF2, 12)
+          val row = LinearLayout(this); row.orientation = LinearLayout.VERTICAL; row.setPadding(dp(8), dp(6), dp(8), dp(6)); row.background = bg(SURF2, 10)
           val top = LinearLayout(this); top.gravity = Gravity.CENTER_VERTICAL
-          val cb = CheckBox(this); cb.isChecked = learnSelectedRuleIds.contains(r.id); cb.setOnCheckedChangeListener { _, v -> if (v) learnSelectedRuleIds.add(r.id) else learnSelectedRuleIds.remove(r.id) }
+          val cb = CheckBox(this); cb.isChecked = learnSelectedRuleIds.contains(r.id); cb.scaleX = 0.9f; cb.scaleY = 0.9f; cb.setOnCheckedChangeListener { _, v -> if (v) learnSelectedRuleIds.add(r.id) else learnSelectedRuleIds.remove(r.id) }
           top.addView(cb)
-          top.addView(tv(r.text.take(160), 14f, TXT), LinearLayout.LayoutParams(0,-2,1f))
-          val sw = Switch(this); sw.isChecked = r.enabled; sw.setOnCheckedChangeListener { _, v -> db.ruleSetEnabled(r.id, v) }
+          top.addView(tv(r.text.take(160), 13f, TXT), LinearLayout.LayoutParams(0,-2,1f))
+          val sw = Switch(this); sw.isChecked = r.enabled; sw.scaleX = 0.85f; sw.scaleY = 0.85f; sw.setOnCheckedChangeListener { _, v -> db.ruleSetEnabled(r.id, v) }
           top.addView(sw); row.addView(top)
-          val acts = LinearLayout(this); acts.orientation = LinearLayout.HORIZONTAL
-          acts.addView(btn("Edit", SURF) { val input = edit("Rule"); input.setText(r.text); AlertDialog.Builder(this).setTitle("Edit rule").setView(input).setPositiveButton("Save") { _, _ -> db.ruleUpdate(r.id, input.text.toString()); rebuildLearning() }.setNegativeButton("Cancel", null).show() }, LinearLayout.LayoutParams(0,-2,1f))
-          acts.addView(btn("Delete", SURF) { db.ruleDelete(r.id); rebuildLearning() }, LinearLayout.LayoutParams(0,-2,1f))
+          val acts = LinearLayout(this); acts.orientation = LinearLayout.HORIZONTAL; acts.setPadding(dp(36), dp(4), 0, 0)
+          acts.addView(smallBtn("Edit", SURF) { val input = edit("Rule"); input.setText(r.text); AlertDialog.Builder(this).setTitle("Edit rule").setView(input).setPositiveButton("Save") { _, _ -> db.ruleUpdate(r.id, input.text.toString()); rebuildLearning() }.setNegativeButton("Cancel", null).show() }, LinearLayout.LayoutParams(-2,-2).apply { rightMargin = dp(6) })
+          acts.addView(smallBtn("Delete", SURF) { db.ruleDelete(r.id); rebuildLearning() }, LinearLayout.LayoutParams(-2,-2))
           row.addView(acts)
-          box.addView(row, LinearLayout.LayoutParams(-1,-2).apply { topMargin = dp(8) })
+          box.addView(row, LinearLayout.LayoutParams(-1,-2).apply { topMargin = dp(6) })
         }
       }
     }
@@ -1224,46 +1239,44 @@ class MainActivity : AppCompatActivity() {
       val list = lessons.filter { learnMatches(it.text) }
       sectionCard("lessons", "Lessons / Guardrails", "Mistakes and lessons Saara should avoid repeating.", list.size) { box ->
         for (f in list.take(60)) {
-          val row = LinearLayout(this); row.orientation = LinearLayout.VERTICAL; row.setPadding(dp(8), dp(8), dp(8), dp(8)); row.background = bg(SURF2, 12)
+          val row = LinearLayout(this); row.orientation = LinearLayout.VERTICAL; row.setPadding(dp(8), dp(6), dp(8), dp(6)); row.background = bg(SURF2, 10)
           val top = LinearLayout(this); top.gravity = Gravity.CENTER_VERTICAL
-          val cb = CheckBox(this); cb.isChecked = learnSelectedFactIds.contains(f.id); cb.setOnCheckedChangeListener { _, v -> if (v) learnSelectedFactIds.add(f.id) else learnSelectedFactIds.remove(f.id) }
-          top.addView(cb); top.addView(tv(f.text.take(160), 14f, TXT), LinearLayout.LayoutParams(0,-2,1f)); row.addView(top)
-          row.addView(tv(hhmm(f.ts), 11f, SUB))
-          val acts = LinearLayout(this); acts.orientation = LinearLayout.HORIZONTAL
-          acts.addView(btn("Edit", SURF) { val input = edit("Lesson"); input.setText(f.text); AlertDialog.Builder(this).setTitle("Edit lesson").setView(input).setPositiveButton("Save") { _, _ -> db.factUpdate(f.id, "mistakes_and_lessons", input.text.toString()); rebuildLearning() }.setNegativeButton("Cancel", null).show() }, LinearLayout.LayoutParams(0,-2,1f))
-          acts.addView(btn("Delete", SURF) { db.factDelete(f.id); rebuildLearning() }, LinearLayout.LayoutParams(0,-2,1f))
+          val cb = CheckBox(this); cb.isChecked = learnSelectedFactIds.contains(f.id); cb.scaleX = 0.9f; cb.scaleY = 0.9f; cb.setOnCheckedChangeListener { _, v -> if (v) learnSelectedFactIds.add(f.id) else learnSelectedFactIds.remove(f.id) }
+          top.addView(cb); top.addView(tv(f.text.take(160), 13f, TXT), LinearLayout.LayoutParams(0,-2,1f)); row.addView(top)
+          val meta = tv(hhmm(f.ts), 10f, SUB); meta.setPadding(dp(36), 0, 0, 0); row.addView(meta)
+          val acts = LinearLayout(this); acts.orientation = LinearLayout.HORIZONTAL; acts.setPadding(dp(36), dp(4), 0, 0)
+          acts.addView(smallBtn("Edit", SURF) { val input = edit("Lesson"); input.setText(f.text); AlertDialog.Builder(this).setTitle("Edit lesson").setView(input).setPositiveButton("Save") { _, _ -> db.factUpdate(f.id, "mistakes_and_lessons", input.text.toString()); rebuildLearning() }.setNegativeButton("Cancel", null).show() }, LinearLayout.LayoutParams(-2,-2).apply { rightMargin = dp(6) })
+          acts.addView(smallBtn("Delete", SURF) { db.factDelete(f.id); rebuildLearning() }, LinearLayout.LayoutParams(-2,-2))
           row.addView(acts)
-          box.addView(row, LinearLayout.LayoutParams(-1,-2).apply { topMargin = dp(8) })
+          box.addView(row, LinearLayout.LayoutParams(-1,-2).apply { topMargin = dp(6) })
         }
-        if (list.isEmpty()) box.addView(tv("No lessons yet.", 12f, SUB))
+        if (list.isEmpty()) box.addView(tv("No lessons yet.", 11f, SUB))
       }
     }
 
     if (showBehaviors) {
       val list = behaviorsAll.filter { learnMatches(it.name + " " + it.stepsJson) }
       sectionCard("behaviors", "Behaviors / Recorded Steps", "Record, edit, replay, or delete user workflows.", list.size) { box ->
-        val recRow = LinearLayout(this); recRow.orientation = LinearLayout.HORIZONTAL
-        val recBtn = btn(if (BehaviorRecorder.isRecording()) "Stop Recording" else "Record User Steps", if (BehaviorRecorder.isRecording()) 0xFFB3261E.toInt() else ACC2) {
+        val recBtn = smallBtn(if (BehaviorRecorder.isRecording()) "Stop Recording" else "Record User Steps", if (BehaviorRecorder.isRecording()) 0xFFB3261E.toInt() else ACC2) {
           if (BehaviorRecorder.isRecording()) { BehaviorRecorder.stopAndSave(this) { rebuildLearning() } } else { BehaviorRecorder.start(this); rebuildLearning() }
         }
-        recRow.addView(recBtn, LinearLayout.LayoutParams(0,-2,1f))
-        box.addView(recRow)
-        box.addView(tv(if (BehaviorRecorder.isRecording()) "Recording... perform actions, then tap Stop Recording." else "Tap Record, perform steps, then Stop to save.", 12f, SUB))
+        box.addView(recBtn, LinearLayout.LayoutParams(-2,-2))
+        box.addView(tv(if (BehaviorRecorder.isRecording()) "Recording... perform actions, then tap Stop." else "Tap Record, perform steps, then Stop to save.", 10f, SUB))
         for (b in list.take(40)) {
-          val row = LinearLayout(this); row.orientation = LinearLayout.VERTICAL; row.setPadding(dp(8), dp(8), dp(8), dp(8)); row.background = bg(SURF2, 12)
+          val row = LinearLayout(this); row.orientation = LinearLayout.VERTICAL; row.setPadding(dp(8), dp(6), dp(8), dp(6)); row.background = bg(SURF2, 10)
           val top = LinearLayout(this); top.gravity = Gravity.CENTER_VERTICAL
-          val cb = CheckBox(this); cb.isChecked = learnSelectedBehaviorIds.contains(b.id); cb.setOnCheckedChangeListener { _, v -> if (v) learnSelectedBehaviorIds.add(b.id) else learnSelectedBehaviorIds.remove(b.id) }
-          top.addView(cb); top.addView(tv(b.name, 14f, TXT, true), LinearLayout.LayoutParams(0,-2,1f)); row.addView(top)
+          val cb = CheckBox(this); cb.isChecked = learnSelectedBehaviorIds.contains(b.id); cb.scaleX = 0.9f; cb.scaleY = 0.9f; cb.setOnCheckedChangeListener { _, v -> if (v) learnSelectedBehaviorIds.add(b.id) else learnSelectedBehaviorIds.remove(b.id) }
+          top.addView(cb); top.addView(tv(b.name, 13f, TXT, true), LinearLayout.LayoutParams(0,-2,1f)); row.addView(top)
           val steps = BehaviorRecorder.parseSteps(b.stepsJson)
-          row.addView(tv("${steps.size} steps · ${hhmm(b.updatedTs)}", 11f, SUB))
-          val acts = LinearLayout(this); acts.orientation = LinearLayout.HORIZONTAL
-          acts.addView(btn("Run / Replay", ACC2) { BehaviorRecorder.replay(this, b) }, LinearLayout.LayoutParams(0,-2,1f))
-          acts.addView(btn("Edit", SURF) { BehaviorRecorder.showEditDialog(this, b) { rebuildLearning() } }, LinearLayout.LayoutParams(0,-2,1f))
-          acts.addView(btn("Delete", SURF) { db.behaviorDelete(b.id); rebuildLearning() }, LinearLayout.LayoutParams(0,-2,1f))
+          val meta = tv("${steps.size} steps · ${hhmm(b.updatedTs)}", 10f, SUB); meta.setPadding(dp(36), 0, 0, 0); row.addView(meta)
+          val acts = LinearLayout(this); acts.orientation = LinearLayout.HORIZONTAL; acts.setPadding(dp(36), dp(4), 0, 0)
+          acts.addView(smallBtn("Run / Replay", ACC2) { BehaviorRecorder.replay(this, b) }, LinearLayout.LayoutParams(-2,-2).apply { rightMargin = dp(6) })
+          acts.addView(smallBtn("Edit", SURF) { BehaviorRecorder.showEditDialog(this, b) { rebuildLearning() } }, LinearLayout.LayoutParams(-2,-2).apply { rightMargin = dp(6) })
+          acts.addView(smallBtn("Delete", SURF) { db.behaviorDelete(b.id); rebuildLearning() }, LinearLayout.LayoutParams(-2,-2))
           row.addView(acts)
-          box.addView(row, LinearLayout.LayoutParams(-1,-2).apply { topMargin = dp(8) })
+          box.addView(row, LinearLayout.LayoutParams(-1,-2).apply { topMargin = dp(6) })
         }
-        if (list.isEmpty()) box.addView(tv("No recorded behaviors yet.", 12f, SUB))
+        if (list.isEmpty()) box.addView(tv("No recorded behaviors yet.", 11f, SUB))
       }
     }
 
@@ -1273,9 +1286,9 @@ class MainActivity : AppCompatActivity() {
         sectionCard("conflicts", "Conflicts", "Keep the correct fact and remove stale duplicates.", conflicts.size) { box ->
           for (grp in conflicts.take(4)) {
             grp.forEachIndexed { idx, f ->
-              val row = LinearLayout(this); row.orientation = LinearLayout.VERTICAL; row.setPadding(0, dp(6), 0, dp(6))
-              row.addView(tv((if (idx==0) "NEWEST: " else "STALE: ") + "[${f.cat}] ${f.text.take(120)}", 12f, if (idx==0) GOOD else TXT))
-              row.addView(btn(if (idx==0) "Keep newest" else "Keep this", SURF2) { db.factResolveKeep(f.id); rebuildLearning() })
+              val row = LinearLayout(this); row.orientation = LinearLayout.HORIZONTAL; row.gravity = Gravity.CENTER_VERTICAL; row.setPadding(0, dp(4), 0, dp(4))
+              row.addView(tv((if (idx==0) "NEW: " else "OLD: ") + "[${f.cat}] ${f.text.take(100)}", 11f, if (idx==0) GOOD else TXT), LinearLayout.LayoutParams(0, -2, 1f))
+              row.addView(smallBtn(if (idx==0) "Keep" else "Keep this", SURF2) { db.factResolveKeep(f.id); rebuildLearning() }, LinearLayout.LayoutParams(-2, -2).apply { leftMargin = dp(6) })
               box.addView(row)
             }
           }
@@ -1284,11 +1297,10 @@ class MainActivity : AppCompatActivity() {
       val steps = try { db.taskSteps(15) } catch (_: Exception) { emptyList() }
       if (steps.isNotEmpty() && learnFilter == "All") {
         sectionCard("taskmethods", "Task methods", "Recent on-device task steps that worked/failed.", steps.size) { box ->
-          for (s in steps.take(8)) box.addView(tv((if (s.ok) "✓ " else "✗ ") + s.goal.take(80) + " · " + s.tool, 12f, if (s.ok) GOOD else WARN))
-          box.addView(btn("Clear task learning", SURF2) { db.taskStepsClear(); rebuildLearning() }, LinearLayout.LayoutParams(-1,-2).apply { topMargin = dp(6) })
+          for (s in steps.take(8)) box.addView(tv((if (s.ok) "✓ " else "✗ ") + s.goal.take(80) + " · " + s.tool, 11f, if (s.ok) GOOD else WARN))
+          box.addView(smallBtn("Clear task learning", SURF2) { db.taskStepsClear(); rebuildLearning() }, LinearLayout.LayoutParams(-2,-2).apply { topMargin = dp(6) })
         }
       }
-      rebuildShop()
     }
   }
 
@@ -1308,7 +1320,7 @@ class MainActivity : AppCompatActivity() {
           Db.get(this).factAdd("web_source", "Imported URL: $url")
           Bus.add("system", "Link fetched and saved locally (${result.length} characters). No page content was sent to Gemini.", true)
           toast("Fetched and saved on this device")
-          if (::shopBox.isInitialized) rebuildShop()
+          rebuildLearning()
         }
       }
     }
@@ -1324,46 +1336,29 @@ class MainActivity : AppCompatActivity() {
   }
 
   private fun rebuildShop() {
+    if (!::shopBox.isInitialized) return
     shopBox.removeAllViews()
-    val db = Db.get(this)
-    val manual = card(shopBox)
-    manual.addView(tv("Add knowledge", 16f, bold = true))
-    val categories = db.categories()
-    val cat = Spinner(this)
-    cat.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, categories)
-    manual.addView(cat)
-    val fact = edit("Enter product price, business detail or preference")
-    manual.addView(fact)
-    manual.addView(btn("Save knowledge") {
-      val value = fact.text.toString().trim()
-      if (value.isBlank()) toast("Enter some information first")
-      else { db.factAdd(cat.selectedItem?.toString() ?: "general", value); toast("Saved in Learning"); rebuildShop() }
-    })
-    val sheets = card(shopBox)
-    sheets.addView(tv("Google Sheets connection", 16f, bold = true))
-    sheets.addView(tv("Public webpages and Sheets shared as 'Anyone with the link' can be fetched. Private Sheets are not accessible until Google OAuth is configured.", 13f, SUB))
-    val url = edit("Website or Google Sheets URL")
+    val sheets = LinearLayout(this); sheets.orientation = LinearLayout.VERTICAL; sheets.background = bg(SURF2, 10)
+    sheets.setPadding(dp(10), dp(8), dp(10), dp(8))
+    sheets.addView(tv("Google Sheets / Web import", 13f, TXT, true))
+    sheets.addView(tv("Import public links; private Sheets need OAuth.", 10f, SUB))
+    val url = edit("Website or Google Sheets URL"); url.textSize = 12f
     url.setText(Prefs.plain(this).getString("knowledge_sheet_url", ""))
-    sheets.addView(url)
-    sheets.addView(btn("Save link", SURF2) {
+    sheets.addView(url, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(4) })
+    val row = LinearLayout(this); row.orientation = LinearLayout.HORIZONTAL
+    row.addView(smallBtn("Save link", SURF) {
       val value = url.text.toString().trim()
       if (!value.startsWith("https://") && !value.startsWith("http://")) toast("Enter a valid http:// or https:// URL")
-      else { Prefs.plain(this).edit().putString("knowledge_sheet_url", value).apply(); Db.get(this).factAdd("web_source", "Saved source URL: $value"); toast("Link saved locally. Fetching its data now…"); rebuildShop(); fetchAndSaveUrl(value) }
-    })
-    sheets.addView(btn("Fetch & save data") {
+      else { Prefs.plain(this).edit().putString("knowledge_sheet_url", value).apply(); Db.get(this).factAdd("web_source", "Saved source URL: $value"); toast("Link saved locally. Fetching its data now…"); rebuildLearning(); fetchAndSaveUrl(value) }
+    }, LinearLayout.LayoutParams(-2, -2).apply { rightMargin = dp(6) })
+    row.addView(smallBtn("Fetch & save", ACC2) {
       val value = url.text.toString().trim()
       if (!value.startsWith("https://") && !value.startsWith("http://")) { toast("Enter a valid http:// or https:// URL"); return@btn }
       Prefs.plain(this).edit().putString("knowledge_sheet_url", value).apply()
       fetchAndSaveUrl(value)
-    })
-    val facts = db.facts()
-    heading(shopBox, "Saved knowledge (${facts.size})")
-    for (f in facts.take(100)) {
-      val c = card(shopBox)
-      c.addView(tv(f.cat.uppercase(), 11f, ACC, true))
-      c.addView(tv(f.text, 14f))
-      c.addView(tv(hhmm(f.ts), 11f, SUB))
-    }
+    }, LinearLayout.LayoutParams(-2, -2))
+    sheets.addView(row, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(6) })
+    shopBox.addView(sheets)
   }
 
 
