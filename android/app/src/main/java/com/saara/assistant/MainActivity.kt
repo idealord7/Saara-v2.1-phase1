@@ -279,9 +279,8 @@ class MainActivity : AppCompatActivity() {
     // share / mic chips
     val chips = LinearLayout(this); chips.setPadding(dp(12), dp(4), dp(12), dp(4))
     muteChip = chip("🎤 Mic: ON") { VoiceService.instance?.toggleMic() ?: toast("Tap Start first to connect Saara") }
-    camChip = chip("📷 Camera") { toggleCam() }
-    camChip.setOnLongClickListener { startActivity(Intent(this, CameraVisionActivity::class.java)); true }
-    photoChip = chip("🖼 Photo") { showPhotoSendOptions() }
+    camChip = chip("📷 Camera") { openCameraVision() }
+    photoChip = chip("🖼 Photo") { pickPhotoForChat() }
     flipChip = chip("🔄") { camFront = !camFront; startService(svc("CAM_START").putExtra("front", camFront)) }
     screenChip = chip("🖥 Screen") { toggleScreen() }
     for (c in listOf(muteChip, camChip, photoChip, flipChip, screenChip)) { val lp = LinearLayout.LayoutParams(-2, -2); lp.rightMargin = dp(8); chips.addView(c, lp) }
@@ -398,15 +397,8 @@ class MainActivity : AppCompatActivity() {
     startActivityForResult(mpm.createScreenCaptureIntent(), 10)
   }
 
-  private fun showPhotoSendOptions() {
-    val opts = arrayOf("Open Camera Vision", "Pick from gallery", "Capture photo")
-    AlertDialog.Builder(this).setTitle("Send Photo / Image").setItems(opts) { _, which ->
-      when (which) {
-        0 -> startActivity(Intent(this, CameraVisionActivity::class.java))
-        1 -> pickPhotoForChat()
-        2 -> capturePhotoForChat()
-      }
-    }.show()
+  private fun openCameraVision() {
+    startActivity(Intent(this, CameraVisionActivity::class.java).putExtra("front", false).putExtra("auto_start", true))
   }
 
   @Suppress("DEPRECATION")

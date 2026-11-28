@@ -54,6 +54,7 @@ class CameraVisionActivity : AppCompatActivity() {
   private var camHandler: Handler? = null
   private var front = false
   private var live = false
+  private var pendingAutoLive = false
   private var analyzing = false
   private var lastFrameB64: String? = null
   private var lastFrameAt = 0L
@@ -117,6 +118,9 @@ class CameraVisionActivity : AppCompatActivity() {
     col.addView(resultTv, LinearLayout.LayoutParams(-1,-2))
 
     setContentView(root)
+    front = intent.getBooleanExtra("front", front)
+    pendingAutoLive = intent.getBooleanExtra("auto_start", false)
+    if (pendingAutoLive) { cadenceSpinner.setSelection(1) }
     preview.surfaceTextureListener = object : TextureView.SurfaceTextureListener {
       override fun onSurfaceTextureAvailable(surface: SurfaceTexture, width: Int, height: Int) { ensureCamera() }
       override fun onSurfaceTextureSizeChanged(surface: SurfaceTexture, width: Int, height: Int) {}
@@ -184,7 +188,10 @@ class CameraVisionActivity : AppCompatActivity() {
                   req.addTarget(surface); req.addTarget(reader!!.surface)
                   req.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
                   session.setRepeatingRequest(req.build(), null, handler)
-                  main.post { statusTv.text = "Camera ready · ${if (front) "front" else "back"} · mode=${modes[modeSpinner.selectedItemPosition]}" }
+                  main.post {
+                    statusTv.text = "Camera ready · ${if (front) "front" else "back"} · mode=${modes[modeSpinner.selectedItemPosition]}"
+                    if (pendingAutoLive) { pendingAutoLive = false; if (!live) { live = true; updateLiveBtn(); statusTv.text = "Live vision ON · cadence ${cadences[cadenceSpinner.selectedItemPosition]}" } }
+                  }
                 } catch (e: Exception) { main.post { statusTv.text = "Camera start failed: ${e.message}" } }
               }
               override fun onConfigureFailed(session: CameraCaptureSession) { main.post { statusTv.text = "Camera configure failed" } }
