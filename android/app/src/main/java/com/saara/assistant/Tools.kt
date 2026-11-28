@@ -47,6 +47,7 @@ object Tools {
 {"name":"stop_screen_share","description":"Stop live screen sharing when the task no longer needs to see the screen.","parameters":{"type":"OBJECT","properties":{}}},
 {"name":"capture_screen_context","description":"Capture current screen once (with user permission prompt if needed) and return/summarize what is on screen: active app, forms, chats, invoices, errors, and suggested next steps.","parameters":{"type":"OBJECT","properties":{"mode":{"type":"STRING","description":"context|ocr"}}}},
 {"name":"screen_ocr_extract","description":"Capture screen and extract structured form/invoice/bill fields as JSON/text. Use before autofill or when user asks to read details from screen.","parameters":{"type":"OBJECT","properties":{}}},
+{"name":"camera_vision","description":"Camera Vision actions. action: open (open Camera Vision screen), describe (open Camera Vision and describe), list_faces, delete_face (id or label), remember_face (opens Camera Vision; user must label explicitly), set_appsheet_webhook (url), get_appsheet_webhook, analyze_invoice_prompt, analyze_daybook_prompt. Face enrollment is local and consent-based. Financial/AppSheet writes require confirmation before external submission.","parameters":{"type":"OBJECT","properties":{"action":{"type":"STRING"},"label":{"type":"STRING"},"id":{"type":"NUMBER"},"url":{"type":"STRING"},"confirmed":{"type":"BOOLEAN"}},"required":["action"]}},
 {"name":"shop_record","description":"Shop-owner ledger. kind = purchase (price the user BOUGHT stock at), sale (price SOLD at), cancellation (cancelled / returned order, price = refunded unit price), price (list or MRP price note). item, price per unit, qty, party = supplier or customer name, note.","parameters":{"type":"OBJECT","properties":{"item":{"type":"STRING"},"kind":{"type":"STRING"},"price":{"type":"NUMBER"},"qty":{"type":"NUMBER"},"party":{"type":"STRING"},"note":{"type":"STRING"}},"required":["item","kind","price"]}},
 {"name":"shop_report","description":"Read the shop ledger: purchase / sale prices, quantities, cancellations and margin per item. item optional (empty = all items).","parameters":{"type":"OBJECT","properties":{"item":{"type":"STRING"}}}},
 {"name":"schedule_task","description":"Schedule a task or reminder for later. text = what to do/say when it fires. Give in_minutes OR at (HH:mm 24h, or yyyy-MM-dd HH:mm). repeat = none | hourly | daily | weekly.","parameters":{"type":"OBJECT","properties":{"text":{"type":"STRING"},"in_minutes":{"type":"NUMBER"},"at":{"type":"STRING"},"repeat":{"type":"STRING"},"confirmed":{"type":"BOOLEAN"}},"required":["text"]}},
@@ -200,6 +201,7 @@ object Tools {
         "send_direct_message" -> sendDirect(c, a)
         "fetch_url" -> fetchUrlText(a.optString("url"))
         "read_saara_self_state" -> SaaraSelfState.snapshot(c, a.optString("section", "all"))
+        "camera_vision" -> cameraVision(c, a)
         "saara_app_control" -> saaraAppControl(c, a)
         else -> "unknown tool"
       }
@@ -365,6 +367,45 @@ object Tools {
 
   private fun syncSettingsUi() {
     try { Bus.ping() } catch (_: Exception) {}
+  }
+
+  private fun cameraVision(c: Context, a: JSONObject): String {
+    val action = a.optString("action").trim().lowercase(Locale.ROOT)
+    return when (action) {
+      "open", "open_vision", "open_camera_vision", "describe", "analyze", "what_do_you_see" -> {
+        if (!canLaunch(c)) LAUNCH_HINT else { launch(c, Intent(c, CameraVisionActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)); "Camera Vision opened. Use Describe, Pick Image, or Live mode." }
+      }
+      "list_faces" -> {
+        val faces = try { Db.get(c).faces() } catch (_: Exception) { emptyList() }
+        if (faces.isEmpty()) "No enrolled faces stored locally." else faces.joinToString("\n") { "#${it.id} ${it.label} · ${java.text.SimpleDateFormat("dd MMM yyyy", java.util.Locale.getDefault()).format(java.util.Date(it.ts))}" }
+      }
+      "delete_face" -> {
+        val id = a.optLong("id", 0L)
+        val label = a.optString("label").trim()
+        val face = when {
+          id > 0 -> Db.get(c).faces().firstOrNull { it.id == id }
+          label.isNotBlank() -> Db.get(c).faceByLabel(label)
+          else -> null
+        } ?: return "No matching face found. Provide id or label."
+        try { java.io.File(face.imagePath).delete() } catch (_: Exception) {}
+        Db.get(c).faceDelete(face.id)
+        "Done: Deleted enrolled face ${face.label}"
+      }
+      "remember_face", "enroll_face" -> {
+        if (!canLaunch(c)) LAUNCH_HINT else { launch(c, Intent(c, CameraVisionActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)); "Camera Vision opened. Capture/pick a face and tap Remember Face with explicit consent." }
+      }
+      "set_appsheet_webhook" -> {
+        val url = a.optString("url").trim()
+        if (!url.startsWith("https://") && !url.startsWith("http://")) return "error: provide a valid http/https webhook URL"
+        Prefs.plain(c).edit().putString("appsheet_webhook_url", url).apply()
+        "AppSheet webhook saved locally."
+      }
+      "get_appsheet_webhook" -> Prefs.plain(c).getString("appsheet_webhook_url", "").orEmpty().ifBlank { "No AppSheet webhook configured." }
+      "analyze_invoice_prompt", "analyze_daybook_prompt" -> {
+        if (!canLaunch(c)) LAUNCH_HINT else { launch(c, Intent(c, CameraVisionActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)); "Camera Vision opened. Select ${if (action.contains("invoice")) "Invoice / Bill to Vyapar" else "Day Book to AppSheet"} mode, then capture/pick and analyze." }
+      }
+      else -> "error: unknown camera_vision action '$action'"
+    }
   }
 
   private fun saaraAppControl(c: Context, a: JSONObject): String {

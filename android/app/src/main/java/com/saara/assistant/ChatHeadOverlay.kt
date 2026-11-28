@@ -438,6 +438,16 @@ class ChatHeadOverlay(
     val sLp = LinearLayout.LayoutParams(dp(40), dp(40)); sLp.leftMargin = dp(6)
     inputRow.addView(screen, sLp)
 
+    val photo = TextView(ctx).apply {
+      text = "🖼"; textSize = 16f; gravity = Gravity.CENTER
+      background = bg(0xFF2A2C2E.toInt(), 18)
+      setOnClickListener {
+        try { ctx.startActivity(Intent(ctx, CameraVisionActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) } catch (_: Exception) {}
+      }
+    }
+    val pLp = LinearLayout.LayoutParams(dp(40), dp(40)); pLp.leftMargin = dp(6)
+    inputRow.addView(photo, pLp)
+
     val input = EditText(ctx).apply {
       hint = "Message Saara…"; setHintTextColor(0xFF6F7580.toInt()); setTextColor(0xFFE3E3E3.toInt())
       textSize = 14f; maxLines = 3

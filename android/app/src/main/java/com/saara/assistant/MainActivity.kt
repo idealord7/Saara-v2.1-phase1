@@ -53,6 +53,7 @@ class MainActivity : AppCompatActivity() {
   private lateinit var muteChip: TextView
   private lateinit var camChip: TextView
   private lateinit var flipChip: TextView
+  private lateinit var photoChip: TextView
   private lateinit var screenChip: TextView
   private lateinit var learnBox: LinearLayout
   private lateinit var shopBox: LinearLayout
@@ -87,6 +88,7 @@ class MainActivity : AppCompatActivity() {
   private var pendingAssistantText: String? = null
   private var pendingAssistantWake = false
   private var camFront = false
+  private var photoCaptureUri: Uri? = null
   private var lastToggle = 0L
   private val fetchedModels = ArrayList<String>()
   // Contact provider I/O must never run on Android's main/UI thread.
@@ -278,9 +280,11 @@ class MainActivity : AppCompatActivity() {
     val chips = LinearLayout(this); chips.setPadding(dp(12), dp(4), dp(12), dp(4))
     muteChip = chip("🎤 Mic: ON") { VoiceService.instance?.toggleMic() ?: toast("Tap Start first to connect Saara") }
     camChip = chip("📷 Camera") { toggleCam() }
+    camChip.setOnLongClickListener { startActivity(Intent(this, CameraVisionActivity::class.java)); true }
+    photoChip = chip("🖼 Photo") { showPhotoSendOptions() }
     flipChip = chip("🔄") { camFront = !camFront; startService(svc("CAM_START").putExtra("front", camFront)) }
     screenChip = chip("🖥 Screen") { toggleScreen() }
-    for (c in listOf(muteChip, camChip, flipChip, screenChip)) { val lp = LinearLayout.LayoutParams(-2, -2); lp.rightMargin = dp(8); chips.addView(c, lp) }
+    for (c in listOf(muteChip, camChip, photoChip, flipChip, screenChip)) { val lp = LinearLayout.LayoutParams(-2, -2); lp.rightMargin = dp(8); chips.addView(c, lp) }
     val hs = HorizontalScrollView(this); hs.isHorizontalScrollBarEnabled = false; hs.addView(chips)
     box.addView(hs)
 
@@ -393,12 +397,74 @@ class MainActivity : AppCompatActivity() {
     val mpm = getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
     startActivityForResult(mpm.createScreenCaptureIntent(), 10)
   }
+
+  private fun showPhotoSendOptions() {
+    val opts = arrayOf("Open Camera Vision", "Pick from gallery", "Capture photo")
+    AlertDialog.Builder(this).setTitle("Send Photo / Image").setItems(opts) { _, which ->
+      when (which) {
+        0 -> startActivity(Intent(this, CameraVisionActivity::class.java))
+        1 -> pickPhotoForChat()
+        2 -> capturePhotoForChat()
+      }
+    }.show()
+  }
+
+  @Suppress("DEPRECATION")
+  private fun pickPhotoForChat() {
+    val i = Intent(Intent.ACTION_OPEN_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE).setType("image/*")
+    try { startActivityForResult(i, 21) } catch (_: Exception) { toast("Cannot open gallery") }
+  }
+
+  private fun capturePhotoForChat() {
+    if (!has(Manifest.permission.CAMERA)) { requestPermissions(arrayOf(Manifest.permission.CAMERA), 3); toast("Grant camera permission then try again"); return }
+    val cv = android.content.ContentValues().apply {
+      put(android.provider.MediaStore.Images.Media.DISPLAY_NAME, "saara_photo_${System.currentTimeMillis()}.jpg")
+      put(android.provider.MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
+    }
+    photoCaptureUri = contentResolver.insert(android.provider.MediaStore.Images.Media.EXTERNAL_CONTENT_URI, cv)
+    val i = Intent(android.provider.MediaStore.ACTION_IMAGE_CAPTURE).putExtra(android.provider.MediaStore.EXTRA_OUTPUT, photoCaptureUri)
+    try { startActivityForResult(i, 22) } catch (_: Exception) { toast("Camera capture unavailable") }
+  }
+
+  private fun handlePhotoUri(uri: Uri, source: String) {
+    knowledgeExecutor.execute {
+      try {
+        val bytes = contentResolver.openInputStream(uri)?.use { it.readBytes() } ?: return@execute
+        val bmp = android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: return@execute
+        val maxDim = 1280
+        val m = maxOf(bmp.width, bmp.height)
+        val scaled = if (m > maxDim) { val s = maxDim.toFloat() / m.toFloat(); android.graphics.Bitmap.createScaledBitmap(bmp, (bmp.width*s).toInt(), (bmp.height*s).toInt(), true) } else bmp
+        val out = java.io.ByteArrayOutputStream(); scaled.compress(android.graphics.Bitmap.CompressFormat.JPEG, 80, out)
+        val b64 = android.util.Base64.encodeToString(out.toByteArray(), android.util.Base64.NO_WRAP)
+        Db.get(this).visionEventAdd("chat_photo", "Photo from $source", b64.take(1000))
+        runOnUiThread {
+          Bus.add("you", "[Photo] Sent image ($source)", true)
+          Bus.add("system", "Analyzing photo...", true)
+        }
+        ScreenAnalyzer.geminiVision(this, "Analyze this user-sent photo. Describe key contents. If it is an invoice/bill extract vendor/items/totals; if day-book extract staff entries/totals; if text translate/extract as needed; if handwriting solve math if present. Be concise and clear.", b64) { raw ->
+          runOnUiThread {
+            Bus.add("saara", raw.take(1400), true)
+            Bus.add("system", "Done: Photo analyzed", true)
+          }
+        }
+      } catch (e: Exception) { runOnUiThread { toast("Photo failed: ${e.message}") } }
+    }
+  }
+
   @Suppress("DEPRECATION")
   override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
     super.onActivityResult(requestCode, resultCode, data)
     if (requestCode == 10) {
       if (resultCode == RESULT_OK && data != null) startService(svc("SCREEN_START").putExtra("code", resultCode).putExtra("data", data))
       else toast("Screen sharing was cancelled.")
+    }
+    if (requestCode == 21 && resultCode == RESULT_OK) {
+      val uri = data?.data ?: return
+      try { contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION) } catch (_: Exception) {}
+      handlePhotoUri(uri, "gallery")
+    }
+    if (requestCode == 22 && resultCode == RESULT_OK) {
+      photoCaptureUri?.let { handlePhotoUri(it, "camera") }
     }
   }
 
@@ -885,6 +951,18 @@ class MainActivity : AppCompatActivity() {
         cloud.addView(tv("Cloud sync (Firebase/Firestore)", 16f, bold = true))
         cloud.addView(tv("Current build: no Firebase/Firestore dependency detected in this repo. Memory remains local-first. Add Firebase config/dependencies to enable cloud sync controls.", 12f, SUB))
         cloud.addView(tv("Status: Not configured", 13f, WARN))
+
+        val integ = card(r)
+        integ.addView(tv("Vision integrations", 16f, bold = true))
+        integ.addView(tv("Invoice/Bill -> Vyapar: Saara extracts and prepares summary; opens Vyapar for review before financial writes. Day-book -> AppSheet: configure webhook for staff-wise submission after confirmation.", 12f, SUB))
+        val wh = edit("AppSheet webhook URL (https://...)")
+        wh.setText(Prefs.plain(this).getString("appsheet_webhook_url", ""))
+        integ.addView(wh)
+        integ.addView(btn("Save AppSheet webhook", SURF2) {
+          val url = wh.text.toString().trim()
+          if (url.isNotEmpty() && !url.startsWith("https://") && !url.startsWith("http://")) { toast("Enter a valid http/https URL"); return@btn }
+          Prefs.plain(this).edit().putString("appsheet_webhook_url", url).apply(); toast(if (url.isBlank()) "Webhook cleared" else "AppSheet webhook saved")
+        }, LinearLayout.LayoutParams(-1,-2).apply { topMargin = dp(8) })
       },
 
       arrayOf("chat history session continuity resume recent session task clear chat history clear recent session state", "chat", "history", "session", "continuity", "clear") to { r ->

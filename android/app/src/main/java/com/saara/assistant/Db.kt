@@ -16,9 +16,10 @@ data class AutoRule(val id: Long, val name: String, val enabled: Boolean, val tr
 data class MemoryFact(val id: Long, val cat: String, val text: String, val ts: Long, val lastUsed: Long = 0L, val pinned: Boolean = false, val source: String = "")
 data class SessionState(val sessionId: String, val status: String, val activeGoal: String, val lastStep: String, val pending: String, val lastError: String, val updatedTs: Long)
 data class Behavior(val id: Long, val name: String, val stepsJson: String, val ts: Long, val updatedTs: Long)
+data class FaceRow(val id: Long, val label: String, val imagePath: String, val ts: Long)
 
 /** Local SQLite store: chat history, learned facts, shop ledger, usage stats, scheduled tasks, task steps. */
-class Db private constructor(c: Context) : SQLiteOpenHelper(c.applicationContext, "saara.db", null, 13) {
+class Db private constructor(c: Context) : SQLiteOpenHelper(c.applicationContext, "saara.db", null, 14) {
   private val appCtx = c.applicationContext
   companion object {
     @Volatile private var inst: Db? = null
@@ -35,6 +36,7 @@ class Db private constructor(c: Context) : SQLiteOpenHelper(c.applicationContext
     createTaskSteps(d)
     createSessionTables(d)
     createBehaviorTables(d)
+    createVisionTables(d)
   }
   override fun onUpgrade(d: SQLiteDatabase, o: Int, n: Int) {
     if (o < 2) {
@@ -78,10 +80,15 @@ class Db private constructor(c: Context) : SQLiteOpenHelper(c.applicationContext
       try { d.execSQL("ALTER TABLE reply_rules ADD COLUMN reply_data TEXT DEFAULT ''") } catch (_: Exception) {}
     }
     if (o < 13) createBehaviorTables(d)
+    if (o < 14) createVisionTables(d)
   }
 
   private fun createBehaviorTables(d: SQLiteDatabase) {
     d.execSQL("CREATE TABLE IF NOT EXISTS behaviors(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, steps_json TEXT, ts INTEGER, updated_ts INTEGER)")
+  }
+  private fun createVisionTables(d: SQLiteDatabase) {
+    d.execSQL("CREATE TABLE IF NOT EXISTS face_memory(id INTEGER PRIMARY KEY AUTOINCREMENT, label TEXT, image_path TEXT, ts INTEGER)")
+    d.execSQL("CREATE TABLE IF NOT EXISTS vision_events(id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT, summary TEXT, payload TEXT, ts INTEGER)")
   }
   private fun createTaskSteps(d: SQLiteDatabase) {
     d.execSQL("CREATE TABLE IF NOT EXISTS task_steps(id INTEGER PRIMARY KEY AUTOINCREMENT, goal TEXT, tool TEXT, args TEXT, result TEXT, ok INTEGER, ts INTEGER)")
@@ -579,6 +586,29 @@ class Db private constructor(c: Context) : SQLiteOpenHelper(c.applicationContext
     val n = name.trim().lowercase()
     return behaviors().firstOrNull { it.name.trim().lowercase() == n }
       ?: behaviors().firstOrNull { it.name.trim().lowercase().contains(n) || n.contains(it.name.trim().lowercase()) }
+  }
+
+  // ---------- camera vision / face memory ----------
+  fun faceAdd(label: String, imagePath: String): Long = writableDatabase.insert("face_memory", null, ContentValues().apply {
+    put("label", label.trim().take(120)); put("image_path", imagePath.trim()); put("ts", System.currentTimeMillis())
+  })
+  fun faces(): List<FaceRow> {
+    val out = ArrayList<FaceRow>()
+    readableDatabase.rawQuery("SELECT id,label,image_path,ts FROM face_memory ORDER BY ts DESC, id DESC", null).use {
+      while (it.moveToNext()) out.add(FaceRow(it.getLong(0), it.getString(1) ?: "", it.getString(2) ?: "", it.getLong(3)))
+    }
+    return out
+  }
+  fun faceDelete(id: Long) { writableDatabase.delete("face_memory", "id=?", arrayOf(id.toString())) }
+  fun faceByLabel(label: String): FaceRow? {
+    val n = label.trim().lowercase()
+    return faces().firstOrNull { it.label.trim().lowercase() == n }
+      ?: faces().firstOrNull { it.label.trim().lowercase().contains(n) || n.contains(it.label.trim().lowercase()) }
+  }
+  fun visionEventAdd(kind: String, summary: String, payload: String = "") {
+    writableDatabase.insert("vision_events", null, ContentValues().apply {
+      put("kind", kind.take(60)); put("summary", summary.take(2000)); put("payload", payload.take(12000)); put("ts", System.currentTimeMillis())
+    })
   }
 }
 
