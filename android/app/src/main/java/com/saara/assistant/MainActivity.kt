@@ -1353,7 +1353,7 @@ class MainActivity : AppCompatActivity() {
     }, LinearLayout.LayoutParams(-2, -2).apply { rightMargin = dp(6) })
     row.addView(smallBtn("Fetch & save", ACC2) {
       val value = url.text.toString().trim()
-      if (!value.startsWith("https://") && !value.startsWith("http://")) { toast("Enter a valid http:// or https:// URL"); return@btn }
+      if (!value.startsWith("https://") && !value.startsWith("http://")) { toast("Enter a valid http:// or https:// URL"); return@smallBtn }
       Prefs.plain(this).edit().putString("knowledge_sheet_url", value).apply()
       fetchAndSaveUrl(value)
     }, LinearLayout.LayoutParams(-2, -2))
